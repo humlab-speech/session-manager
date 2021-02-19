@@ -1,6 +1,7 @@
 const nanoid = require('nanoid');
 const httpProxy = require('http-proxy');
 const { Docker } = require('node-docker-api');
+const { ApiResponse } = require('./ApiResponse.class');
 
 class Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
@@ -10,11 +11,13 @@ class Session {
         this.port = port;
         this.port = 8787;
         this.hsApp = hsApp;
+        this.volumes = volumes;
         this.accessCode = this.app.sessMan.getContainerAccessCode();
         this.sessionCode = null; //This is identical to the container ID, thus if it is null, there's no container running for this session
         this.fullDockerContainerId = null;
         this.shortDockerContainerId = null;
-        this.rstudioImageName = "hird-rstudio-emu";
+        this.rstudioImageName = process.env.RSTUDIO_IMAGE_NAME;
+        this.rstudioPassword = process.env.RSTUDIO_PASSWORD;
         this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     }
 
@@ -130,7 +133,8 @@ class Session {
             Image: this.rstudioImageName,
             name: this.getContainerName(this.user.id, this.project.id),
             Env: [
-                "DISABLE_AUTH=true"
+                "DISABLE_AUTH=true",
+                "PASSWORD="+this.rstudioPassword
             ],
             Labels: {
                 "hs.hsApp": this.hsApp.toString(),
@@ -138,9 +142,9 @@ class Session {
                 "hs.projectId": this.project.id.toString(),
                 "hs.accessCode": this.accessCode.toString()
             },
-            NetworkMode: "humlab-speech-deployment_hird-net",
             HostConfig: {
                 AutoRemove: true,
+                NetworkMode: "humlab-speech-deployment_hird-net",
                 Mounts: mounts
             }
         };
@@ -224,11 +228,24 @@ class Session {
             this.proxyServer.close();
         }
         catch(error) {
-            this.app.addLog("Proxy server error at delete: "+error, "error");
+            this.app.addLog("Session error at proxy-server delete: "+error, "error");
         }
 
-        await this.container.kill();
-        await this.container.delete();
+        try {
+            await this.container.stop();
+        }
+        catch(error) {
+            this.app.addLog("Session error at container stop: "+error, "error");
+        }
+        /*
+        try {
+            await this.container.delete();
+        }
+        catch(error) {
+            this.app.addLog("Session error at container delete: "+error, "error");
+        }
+        */
+        
         return this.accessCode;
     }
 };

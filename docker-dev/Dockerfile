@@ -18,9 +18,9 @@ RUN add-apt-repository \
 
 RUN apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
 
-WORKDIR /approuter
+WORKDIR /session-manager
 
 ENV GIT_SSL_NO_VERIFY=true
 ENV GIT_DISCOVERY_ACROSS_FILESYSTEM=true
 
-CMD ["node", "/approuter/src/index.js"]
+CMD ["node", "/session-manager/src/index.js"]

@@ -2,7 +2,7 @@ const nanoid = require('nanoid');
 const Session = require('./Session.class');
 const fetch = require('node-fetch');
 const { Docker } = require('node-docker-api');
-const { ApiResponse } = require('./ApiResponse.class');
+const ApiResponse = require('./ApiResponse.class');
 
 class SessionManager {
     constructor(app) {
@@ -143,42 +143,7 @@ class SessionManager {
     }
     
     getRunningContainers() {
-      /*
-      (async () => {
-        await docker.container.list()
-        .then((containers) => {
-            let filteredList = containers.filter((container) => {
-              return container.data.Image == "hird-rstudio-emu";
-            });
-
-            return filteredList;
-          });
-      })();
-
-      return await fetchSessionContainers();
-      */
-
-      /*
-      let cmd = "docker ps --format='{{json .}}'";
-      let dockerContainersJson = child_process.execSync(cmd).toString('utf8');
-      let containersJson = dockerContainersJson.split("\n");
-      containersJson.pop();
-      let sessions = [];
-      containersJson.forEach((containerJson) => {
-        let containerInfo = JSON.parse(containerJson);
-        //Filter out non-rstudio
-        if(containerInfo.Image == this.rstudioImageName) {
-          sessions.push({
-            id: containerInfo.ID,
-            name: containerInfo.Names,
-            runningFor: containerInfo.RunningFor,
-            status: containerInfo.Status
-          });
-        }
-      });
-      this.sessions = sessions;
-      return sessions;
-      */
+      //This needs to be implemented using docker API
     }
 
     getSessionByCode(code) {
@@ -300,7 +265,6 @@ class SessionManager {
           });
   
           Promise.all(fetchPromises).then(data => {
-            this.app.addLog("Promises data:"+data);
             filteredList.forEach((c) => {
               let hsApp = c.data.Labels['hs.hsApp'];
               let userId = c.data.Labels['hs.userId'];

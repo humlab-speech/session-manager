@@ -165,7 +165,10 @@ class Application {
       let user = JSON.parse(req.body.gitlabUser);
       let project = JSON.parse(req.body.project);
       let hsApp = req.body.hsApp;
-      let volumes = JSON.parse(req.body.volumes);
+      let volumes = [];
+      if(typeof req.body.volumes != "undefined") {
+        volumes = JSON.parse(req.body.volumes);
+      }
       
       this.addLog("Received request access session for user "+user.id+" and project "+project.id+" with session "+req.body.appSession);
       this.addLog("Volumes:");
