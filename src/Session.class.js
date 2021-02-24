@@ -144,7 +144,7 @@ class Session {
             },
             HostConfig: {
                 AutoRemove: true,
-                NetworkMode: "humlab-speech-deployment_hird-net",
+                NetworkMode: "humlab-speech-deployment_hs-net",
                 Mounts: mounts
             }
         };
