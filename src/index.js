@@ -68,14 +68,9 @@ class Application {
     
   }
 
-  setupEndpoints() {
-    this.expressApp.get('/*', (req, res, next) => {
-      let parts = req.url.split("/");
-      this.addLog(req.url);
-      if(parts[1] != "api") {
-        this.sessMan.routeToApp(req, res);
-      }
-      else {
+  trafficDivider(req, res, next) {
+      this.addLog("Request: "+req.url);
+      if(req.headers.hs_api_access_token) {
         if(!this.checkApiAccessCode(req)) { //Requests to the approuter API must always include the API access code, which should be held by the webapi service
           res.sendStatus(401);
           return false;
@@ -84,22 +79,30 @@ class Application {
           next();
         }
       }
+      else {
+        this.sessMan.routeToApp(req, res);
+      }
+  }
+
+  setupEndpoints() {
+    this.expressApp.get('/*', (req, res, next) => {
+      this.trafficDivider(req, res, next);
     });
 
     this.expressApp.post('/*', (req, res, next) => {
-      let parts = req.url.split("/");
-      if(parts[1] != "api") {
-        this.sessMan.routeToApp(req, res);
-      }
-      else {
-        if(!this.checkApiAccessCode(req)) { //Requests to the approuter API must always include the API access code, which should be held by the webapi service
-          res.sendStatus(401);
-          return false;
-        }
-        else {
-          next();
-        }
-      }
+      this.trafficDivider(req, res, next);
+    });
+
+    this.expressApp.put('/*', (req, res, next) => {
+      this.trafficDivider(req, res, next);
+    });
+
+    this.expressApp.patch('/*', (req, res, next) => {
+      this.trafficDivider(req, res, next);
+    });
+
+    this.expressApp.delete('/*', (req, res, next) => {
+      this.trafficDivider(req, res, next);
     });
     
    this.expressApp.get('/api/sessions/:user_id', (req, res) => {
@@ -170,7 +173,7 @@ class Application {
         volumes = JSON.parse(req.body.volumes);
       }
       
-      this.addLog("Received request access session for user "+user.id+" and project "+project.id+" with session "+req.body.appSession);
+      this.addLog("Received request access "+hsApp+" session for user "+user.id+" and project "+project.id+" with session "+req.body.appSession);
       this.addLog("Volumes:");
       for(let key in volumes) {
         this.addLog("Volumes: "+key+":"+volumes[key]);

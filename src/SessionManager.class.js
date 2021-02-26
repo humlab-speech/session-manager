@@ -3,11 +3,12 @@ const Session = require('./Session.class');
 const fetch = require('node-fetch');
 const { Docker } = require('node-docker-api');
 const ApiResponse = require('./ApiResponse.class');
+const RstudioSession = require('./Sessions/RstudioSession.class');
+const JupyterSession = require('./Sessions/JupyterSession.class');
 
 class SessionManager {
     constructor(app) {
       this.app = app;
-      this.rstudioImageName = process.env.RSTUDIO_IMAGE_NAME
       this.sessions = [];
       this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     }
@@ -37,7 +38,7 @@ class SessionManager {
           userSessions.push({
             sessionCode: this.sessions[key].accessCode,
             projectId: this.sessions[key].project.id,
-            type: 'rstudio'
+            type: this.sessions.hsApp
           });
         }
       }
@@ -45,9 +46,21 @@ class SessionManager {
     }
 
     createSession(user, project, hsApp = 'rstudio', volumes = []) {
-        let sess = new Session(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
-        this.sessions.push(sess);
-        return sess;
+      let sess = null;
+      switch(hsApp) {
+        case "rstudio":
+          sess = new RstudioSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
+        break;
+        case "jupyter":
+          sess = new JupyterSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
+        break;
+        default:
+          this.app.addLog("Unknown hsApp type: "+hsApp, "error");
+      }
+      //let sess = new Session(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
+      
+      this.sessions.push(sess);
+      return sess;
     }
 
     getSessionAccessCodeFromRequest(req) {
@@ -59,7 +72,7 @@ class SessionManager {
             let key = cparts[0];
             let value = cparts[1];
             switch(key) {
-                case "rstudioSession":
+                case "SessionAccessCode":
                 sessionAccessCode = value;
                 break;
             }
@@ -82,25 +95,29 @@ class SessionManager {
             return false;
         }
         
-        this.app.addLog("REQ:"+req.url, "debug");
+        this.app.addLog("Route-to-app - request: "+req.url, "debug");
         
         if(ws) {
-            this.app.addLog("Performing websocket routing");
-            sess.proxyServer.ws(req, socket, {
-            target: "ws://localhost:17890",
+          this.app.addLog("Performing websocket routing");
+          sess.proxyServer.web(req, res);
+          /*
+          sess.proxyServer.ws(req, socket, {
+            target: "ws://localhost:80",
             ws: true,
             xfwd: true
-            });
+          });
+          */
         }
         else {
-            this.app.addLog("Performing http routing", "debug");
-            sess.proxyServer.web(req, res);
+          sess.proxyServer.web(req, res);
         }
     }
 
+    /*
     getSessionName(userId, projectId) {
         return "rstudio-session-p"+projectId+"u"+userId;
     }
+    */
 
     stopContainer(containerId) {
 

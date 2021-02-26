@@ -9,15 +9,15 @@ class Session {
         this.user = user;
         this.project = project;
         this.port = port;
-        this.port = 8787;
         this.hsApp = hsApp;
         this.volumes = volumes;
         this.accessCode = this.app.sessMan.getContainerAccessCode();
         this.sessionCode = null; //This is identical to the container ID, thus if it is null, there's no container running for this session
         this.fullDockerContainerId = null;
         this.shortDockerContainerId = null;
-        this.rstudioImageName = process.env.RSTUDIO_IMAGE_NAME;
-        this.rstudioPassword = process.env.RSTUDIO_PASSWORD;
+        this.imageName = "";
+        this.localProjectPath = "/home/project";
+        this.containerUser = "";
         this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     }
 
@@ -71,6 +71,7 @@ class Session {
      * Function: loadContainerId
      * This is used to lookup/load the container ID during import of a running session/container, in which case only the userId, projectId and hsApp is known.
      */
+    /*
     async loadContainerId() {
         await new Promise((resolve, reject) => {
             this.docker.container.list().then(containers => {
@@ -99,6 +100,7 @@ class Session {
 
         return this.shortDockerContainerId;
     }
+    */
 
     getContainerName(userId, projectId) {
         let salt = nanoid.nanoid(4);
@@ -108,46 +110,25 @@ class Session {
     importContainerId(dockerContainerId) {
         this.fullDockerContainerId = dockerContainerId.toString('utf8');
         this.shortDockerContainerId = this.fullDockerContainerId.substring(0, 12);
-        this.accessCode = this.shortDockerContainerId;
+        //this.accessCode = this.shortDockerContainerId;
         this.app.addLog("Imported container ID "+this.shortDockerContainerId);
+    }
+
+    /**
+     * Function: getContainerConfig
+     * To be implemented in subclasses
+     */
+    getContainerConfig() {
+        return {};
     }
 
     async createContainer() {
         this.app.addLog("Creating new project container");
-
         this.app.addLog(this.hsApp+" "+this.user.id+" "+this.project.id);
 
         let dockerContainerId = null;
 
-        let mounts = [];
-        for(let key in this.volumes) {
-            mounts.push({
-                Target: this.volumes[key],
-                Source: key,
-                Type: "bind",
-                ReadOnly: true
-            });
-        }
-
-        let containerConfig = {
-            Image: this.rstudioImageName,
-            name: this.getContainerName(this.user.id, this.project.id),
-            Env: [
-                "DISABLE_AUTH=true",
-                "PASSWORD="+this.rstudioPassword
-            ],
-            Labels: {
-                "hs.hsApp": this.hsApp.toString(),
-                "hs.userId": this.user.id.toString(),
-                "hs.projectId": this.project.id.toString(),
-                "hs.accessCode": this.accessCode.toString()
-            },
-            HostConfig: {
-                AutoRemove: true,
-                NetworkMode: "humlab-speech-deployment_hs-net",
-                Mounts: mounts
-            }
-        };
+        let containerConfig = this.getContainerConfig();
 
         this.app.addLog("containerConfig: "+JSON.stringify(containerConfig), "debug");
 
@@ -170,8 +151,7 @@ class Session {
     async setupProxyServerIntoContainer(shortDockerContainerId) {
         //Setting up proxy server
         this.proxyServer = httpProxy.createProxyServer({
-            target: "http://"+shortDockerContainerId+':8787',
-            //port: 8787,
+            target: "http://"+shortDockerContainerId+':'+this.port,
             ws: true
         });
 
@@ -180,11 +160,12 @@ class Session {
         });
 
         this.proxyServer.on('proxyReq', (err, req, res) => {
-            this.app.addLog("Rstudio-router session proxy received request!", "debug");
+            //this.app.addLog("Rstudio-router session proxy received request!", "debug");
         });
 
         this.proxyServer.on('proxyReqWs', (err, req, res) => {
             this.app.addLog("Rstudio-router session proxy received ws request!", "debug");
+            this.app.addLog(req.url);
             //Can we redirect this request to the 17890 port here?
         });
 
@@ -198,9 +179,8 @@ class Session {
         this.app.addLog("Cloning project into container");
         let crendentials = "root:"+process.env.GIT_API_ACCESS_TOKEN;
         let gitRepoUrl = "http://"+crendentials+"@gitlab:80/"+this.project.path_with_namespace+".git";
-        let targetPath = "/home/rstudio/project";
-        await this.runCommand(["git", "clone", gitRepoUrl, targetPath]);
-        await this.runCommand(["chown", "-R", "rstudio:rstudio", targetPath]);
+        await this.runCommand(["git", "clone", gitRepoUrl, this.localProjectPath]);
+        await this.runCommand(["chown", "-R", this.containerUser+":", this.localProjectPath]);
         this.app.addLog("Project cloned into container");
     }
 
@@ -208,9 +188,9 @@ class Session {
         this.app.addLog("Committing project");
         await this.runCommand(["git", "config", "--global", "user.email", this.user.email]);
         await this.runCommand(["git", "config", "--global", "user.name", this.user.name]);
-        await this.runCommand(["bash", "-c", "cd /home/rstudio/project && git add ."]);
-        await this.runCommand(["bash", "-c", "cd /home/rstudio/project && git commit -m 'system-auto-commit'"]);
-        await this.runCommand(["bash", "-c", "cd /home/rstudio/project && git push"]).then((cmdOutput) => {
+        await this.runCommand(["bash", "-c", "cd "+this.localProjectPath+" && git add ."]);
+        await this.runCommand(["bash", "-c", "cd "+this.localProjectPath+" && git commit -m 'system-auto-commit'"]);
+        await this.runCommand(["bash", "-c", "cd "+this.localProjectPath+" && git push"]).then((cmdOutput) => {
             this.app.addLog("Commit cmd output: "+cmdOutput, "debug");
         });
         return this.accessCode;
