@@ -97,20 +97,23 @@ class SessionManager {
         
         this.app.addLog("Route-to-app - request: "+req.url, "debug");
         
+
+        //There doesn't seem to be any need to use the ws-function instead of the web-function in proxyServer when routing websockets, in fact it doesn't work when using ws, so just always use web
+        sess.proxyServer.web(req, res);
+        /*
         if(ws) {
           this.app.addLog("Performing websocket routing");
-          sess.proxyServer.web(req, res);
-          /*
           sess.proxyServer.ws(req, socket, {
             target: "ws://localhost:80",
             ws: true,
             xfwd: true
           });
-          */
+          
         }
         else {
           sess.proxyServer.web(req, res);
         }
+        */
     }
 
     /*
