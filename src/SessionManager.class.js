@@ -81,28 +81,33 @@ class SessionManager {
         return sessionAccessCode;
       }
 
+    
+
     routeToApp(req, res = null, socket = null, ws = false, head = null) {
         let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
         if(sessionAccessCode === false) {
-            console.warn("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request!");
-            return false;
+          this.app.addLog("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request!", "warn");
+          return false;
         }
         
         let sess = this.getSessionByCode(sessionAccessCode);
         if(sess === false) {
-            console.warn("Couldn't find a session with code", sessionAccessCode);
-            this.app.addLog(this.sessions);
-            return false;
+          this.app.addLog("Couldn't find a session with code "+sessionAccessCode, "warn");
+          this.app.addLog(this.sessions);
+          return false;
         }
         
         this.app.addLog("Route-to-app - request: "+req.url, "debug");
         
 
-        //There doesn't seem to be any need to use the ws-function instead of the web-function in proxyServer when routing websockets, in fact it doesn't work when using ws, so just always use web
         sess.proxyServer.web(req, res);
+        
+        
         /*
         if(ws) {
-          this.app.addLog("Performing websocket routing");
+          this.app.addLog("Performing websocket routing", "debug");
+          //sess.proxyServer.ws(req, socket, head);
+          
           sess.proxyServer.ws(req, socket, {
             target: "ws://localhost:80",
             ws: true,
@@ -111,9 +116,31 @@ class SessionManager {
           
         }
         else {
+          this.app.addLog("Performing http routing", "debug");
           sess.proxyServer.web(req, res);
         }
         */
+    }
+
+    routeToAppWs(req, socket, head) {
+      let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
+      if(sessionAccessCode === false) {
+        this.app.addLog("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request!", "warn");
+        return false;
+      }
+      
+      let sess = this.getSessionByCode(sessionAccessCode);
+      if(sess === false) {
+        this.app.addLog("Couldn't find a session with code "+sessionAccessCode, "warn");
+        this.app.addLog(this.sessions);
+        return false;
+      }
+      
+      this.app.addLog("Route-to-app ws - request: "+req.url, "debug");
+
+      //socket.on('message', message => this.addLog("routeToAppWs - ws msg: "+message, "debug"));
+
+      sess.proxyServer.ws(req, socket, head);
     }
 
     /*

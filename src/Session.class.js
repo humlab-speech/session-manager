@@ -150,12 +150,20 @@ class Session {
 
     async setupProxyServerIntoContainer(shortDockerContainerId) {
         //Setting up proxy server
+        /*
         this.proxyServer = httpProxy.createProxyServer({
-            target: "http://"+shortDockerContainerId+':'+this.port,
-            ws: true
+            target: "http://"+shortDockerContainerId+':'+this.port
+        });
+        */
+
+        this.proxyServer = httpProxy.createProxyServer({
+            target: {
+                host: shortDockerContainerId,
+                port: this.port
+            }
         });
 
-        this.proxyServer.on('error', function (err, req, res) {
+        this.proxyServer.on('error', (err, req, res) => {
             this.app.addLog("Proxy error: "+err, "error");
         });
 
