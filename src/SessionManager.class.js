@@ -194,6 +194,10 @@ class SessionManager {
     }
 
     getSessionByCode(code) {
+      if(typeof code != "string") {
+        this.app.addLog("getSessionByCode received non-string argument: "+code, "error");
+        return false;
+      }
       code = code.toString('utf8');
       for(let key in this.sessions) {
         this.app.addLog(this.sessions[key].accessCode+" "+code);

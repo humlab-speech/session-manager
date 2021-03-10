@@ -16,7 +16,7 @@ class Session {
         this.fullDockerContainerId = null;
         this.shortDockerContainerId = null;
         this.imageName = "";
-        this.localProjectPath = "/home/project";
+        this.localProjectPath = "/home/humlabspeech";
         this.containerUser = "";
         this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     }
@@ -37,7 +37,7 @@ class Session {
         });
     }
 
-    async runCommand(cmd) {
+    async runCommand(cmd, env = []) {
         if(!Array.isArray(cmd)) {
             cmd = [cmd];
         }
@@ -53,6 +53,7 @@ class Session {
             return this.container.exec.create({
                 AttachStdout: true,
                 AttachStderr: true,
+                Env: env,
                 Cmd: cmd
             })
             .then((exec) => {

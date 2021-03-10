@@ -130,10 +130,15 @@ class ApiServer {
         this.expressApp.post('/api/session/run', (req, res) => {
             let sessionId = req.body.appSession;
             let runCmd = JSON.parse(req.body.cmd);
+            this.app.addLog("req.body.env:"+req.body.env);
+            let env = [];
+            if(req.body.env) {
+                env = JSON.parse(req.body.env);
+            }
             let sess = this.app.sessMan.getSessionByCode(sessionId);
             if(sess !== false) {
             this.app.addLog("Running cmd in session "+sess.shortDockerContainerId+": "+runCmd, "debug");
-            sess.runCommand(runCmd).then((cmdOutput) => {
+            sess.runCommand(runCmd, env).then((cmdOutput) => {
                 this.app.addLog("cmd output: "+cmdOutput, "debug");
                 res.sendStatus(200);
             });
