@@ -2,6 +2,8 @@ const nanoid = require('nanoid');
 const httpProxy = require('http-proxy');
 const { Docker } = require('node-docker-api');
 const { ApiResponse } = require('./ApiResponse.class');
+const fetch = require('node-fetch');
+const { PerformanceObserver, performance } = require('perf_hooks');
 
 class Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
@@ -29,11 +31,16 @@ class Session {
         let streamData = "";
         return new Promise((resolve, reject) => {
           stream.on('data', data => {
-            this.app.addLog("Stream data:"+data.toString());
+            this.app.addLog("Stream data: "+data.toString());
             streamData += data.toString();
           });
-          stream.on('end', resolve);
-          stream.on('error', reject);
+          stream.on('end', () => {
+            resolve(streamData);
+          });
+          stream.on('error', (data) => {
+            this.app.addLog("Stream data: "+data.toString(), "error");
+            reject();
+          });
         });
     }
 
@@ -41,31 +48,36 @@ class Session {
         if(!Array.isArray(cmd)) {
             cmd = [cmd];
         }
+
+        if(!Array.isArray(env)) {
+            env = [env];
+        }
+
+        let envFlat = "";
+        env.map((value) => {
+            envFlat += value+" ";
+        });
         
         let cmdFlat = "";
         cmd.map((value) => {
             cmdFlat += value+" ";
         })
 
-        this.app.addLog("Executing command in session container: "+cmdFlat);
+        this.app.addLog("Executing command in session container: "+cmdFlat+" with ENV: "+envFlat);
 
-        return new Promise((resolve, reject) => {
-            return this.container.exec.create({
-                AttachStdout: true,
-                AttachStderr: true,
-                Env: env,
-                Cmd: cmd
-            })
-            .then((exec) => {
-                return exec.start({ Detach: false })
-            })
-            .then(stream => {
-                this.promisifyStream(stream).then((data) => {
-                    resolve(data);
-                });
-            })
-            .catch((error) => this.app.addLog(error, "error"));
-        });
+        return this.container.exec.create({
+            AttachStdout: true,
+            AttachStderr: true,
+            Env: env,
+            Cmd: cmd
+        })
+        .then((exec) => {
+            return exec.start({ Detach: false })
+        })
+        .then(stream => {
+            return this.promisifyStream(stream);
+        })
+        .catch((error) => this.app.addLog(error, "error"));
     }
 
     /**
@@ -105,14 +117,19 @@ class Session {
 
     getContainerName(userId, projectId) {
         let salt = nanoid.nanoid(4);
-        return "rstudio-session-p"+projectId+"u"+userId+"-"+salt;
+        return "hsapp-session-p"+projectId+"u"+userId+"-"+salt;
     }
 
     importContainerId(dockerContainerId) {
+        if(dockerContainerId.length == 12) {
+            this.app.addLog("importContainerId was fed the short container id, expected full id.", "warn");
+            this.shortDockerContainerId = dockerContainerId;
+            return this.shortDockerContainerId;
+        }
         this.fullDockerContainerId = dockerContainerId.toString('utf8');
         this.shortDockerContainerId = this.fullDockerContainerId.substring(0, 12);
-        //this.accessCode = this.shortDockerContainerId;
         this.app.addLog("Imported container ID "+this.shortDockerContainerId);
+        return this.shortDockerContainerId;
     }
 
     /**
@@ -133,29 +150,61 @@ class Session {
 
         this.app.addLog("containerConfig: "+JSON.stringify(containerConfig), "debug");
 
-        return await this.docker.container.create(containerConfig)
-            .then(container => container.start())
+        let shortDockerContainerId = await this.docker.container.create(containerConfig)
+            .then(container => {
+                this.app.addLog("Container created - starting");
+                return container.start();
+            })
             .then(async (container) => {
+                this.app.addLog("Container id:"+container.data.Id);
                 dockerContainerId = container.data.Id;
                 this.container = container;
                 this.importContainerId(dockerContainerId);
                 this.app.addLog("Container ID is "+this.shortDockerContainerId);
                 this.app.addLog("Setting up proxy server");
-                await this.setupProxyServerIntoContainer(this.shortDockerContainerId);
+                this.setupProxyServerIntoContainer(this.shortDockerContainerId);
                 this.app.addLog("Proxy server online");
                 return this.shortDockerContainerId;
             })
             .catch(error => this.app.addLog("Docker container failed to start: "+error, "error"));
-        
+
+            this.app.addLog("Waiting for session to become ready");
+            let isSessionReady = false;
+            let t0 = performance.now();
+            while(!isSessionReady) {
+                isSessionReady = await this.isSessionReady();
+            }
+            let t1 = performance.now()
+            this.app.addLog("Session is ready after "+(t1 - t0)+" ms");
     }
 
-    async setupProxyServerIntoContainer(shortDockerContainerId) {
-        //Setting up proxy server
-        /*
-        this.proxyServer = httpProxy.createProxyServer({
-            target: "http://"+shortDockerContainerId+':'+this.port
+    /**
+     * Function: isSessionReady
+     * 
+     * This will perform a standard "HTTP GET /" towards the container attached to this session to see if the service inside it is ready to accept requests
+     * 
+     * @returns 
+     */
+    async isSessionReady() {
+        let isSessionReady = false;
+
+        await fetch("http://"+this.shortDockerContainerId+":"+this.port, {
+            timeout: 1000
+        })
+        .then(res => res.text())
+        .then(body => {
+            //this.app.addLog("isSessionReady response: "+body, "DEBUG")
+            isSessionReady = true;
+        })
+        .catch(error => {
+            //this.app.addLog("isSessionReady error: "+error, "ERROR");
+            isSessionReady = false;
         });
-        */
+            
+        return isSessionReady;
+    }
+
+    setupProxyServerIntoContainer(shortDockerContainerId) {
 
         this.proxyServer = httpProxy.createProxyServer({
             target: {
@@ -172,44 +221,71 @@ class Session {
             //this.app.addLog("Rstudio-router session proxy received request!", "debug");
         });
 
+        this.proxyServer.on('open', (proxySocket) => {
+            this.app.addLog("Proxy open", "debug");
+            //proxySocket.on('data', hybiParseAndLogMessage);
+        });
+
         this.proxyServer.on('proxyReqWs', (err, req, res) => {
             this.app.addLog("Rstudio-router session proxy received ws request!", "debug");
             this.app.addLog(req.url);
-            //Can we redirect this request to the 17890 port here?
         });
 
         this.proxyServer.on('upgrade', function (req, socket, head) {
             this.app.addLog("Rstudio-router session proxy received upgrade!", "debug");
             //this.proxyServer.proxy.ws(req, socket, head);
         });
+
     }
 
     async cloneProjectFromGit() {
         this.app.addLog("Cloning project into container");
         let crendentials = "root:"+process.env.GIT_API_ACCESS_TOKEN;
         let gitRepoUrl = "http://"+crendentials+"@gitlab:80/"+this.project.path_with_namespace+".git";
-        await this.runCommand(["git", "clone", gitRepoUrl, this.localProjectPath]);
-        await this.runCommand(["chown", "-R", this.containerUser+":", this.localProjectPath]);
+
+        await this.runCommand(["R", "-f", "/scripts/gitClone.r"], [
+            "GIT_REPOSITORY_URL="+gitRepoUrl,
+            "PROJECT_PATH="+this.localProjectPath
+        ]).then(output => {
+            this.app.addLog("clone cmdResult: "+output, "DEBUG");
+        });
+
+        this.app.addLog("CLONE COMPLETE", "DEBUG");
+
+        await this.runCommand(["chown", "-R", this.containerUser+":", this.localProjectPath]).then(output => {
+            this.app.addLog("chown cmdResult: "+output, "DEBUG");
+        });
+
         this.app.addLog("Project cloned into container");
     }
 
     async commit() {
         this.app.addLog("Committing project");
-        await this.runCommand(["git", "config", "--global", "user.email", this.user.email]);
-        await this.runCommand(["git", "config", "--global", "user.name", this.user.name]);
-        await this.runCommand(["bash", "-c", "cd "+this.localProjectPath+" && git add ."]);
-        await this.runCommand(["bash", "-c", "cd "+this.localProjectPath+" && git commit -m 'system-auto-commit'"]);
-        await this.runCommand(["bash", "-c", "cd "+this.localProjectPath+" && git push"]).then((cmdOutput) => {
-            this.app.addLog("Commit cmd output: "+cmdOutput, "debug");
+        return await this.runCommand(["R", "-f", "/scripts/gitCommit.r"], [
+            "GIT_USER_NAME="+this.user.name,
+            "GIT_USER_EMAIL="+this.user.email,
+            "PROJECT_PATH="+this.localProjectPath
+        ]).then(cmdResult => {
+            if(cmdResult.indexOf("Nothing added to commit") != -1) {
+                this.app.addLog("Commit failed because of nothing to commit.", "WARN");
+                return {
+                    status: "error",
+                    messages: ["Commit failed because of nothing to commit"]
+                };
+            }
+            return {
+                status: "ok"
+            };
         });
-        return this.accessCode;
     }
+
 
     async delete() {
         this.app.addLog("Deleting session "+this.accessCode);
         
         //This will stop new connections but not close existing ones
         try {
+            this.proxyServer.off("open");
             this.proxyServer.off("error");
             this.proxyServer.off("proxyReq");
             this.proxyServer.off("proxyReqWs");
@@ -226,16 +302,10 @@ class Session {
         catch(error) {
             this.app.addLog("Session error at container stop: "+error, "error");
         }
-        /*
-        try {
-            await this.container.delete();
-        }
-        catch(error) {
-            this.app.addLog("Session error at container delete: "+error, "error");
-        }
-        */
         
-        return this.accessCode;
+        return {
+            status: "ok"
+        };
     }
 };
 

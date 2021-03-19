@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const bodyParser = require('body-parser');
+const ApiResponse = require('./ApiResponse.class');
 
 class ApiServer {
     constructor(app) {
@@ -15,72 +16,22 @@ class ApiServer {
     }
 
     startServer() {
-
-        this.app.sessMan.importRunningContainers().then(() => {
-            this.app.addLog("Import of running containers complete");
-
-            this.httpServer = http.createServer(this.expressApp);
-
-            
-            this.httpServer.on('request', (req, res) => {
-            this.app.addLog("Proxy http req");
+        this.httpServer = http.createServer(this.expressApp);
+        this.httpServer.on('request', (req, res) => {
             if(!req.headers.hs_api_access_token) {
                 this.app.sessMan.routeToApp(req, res);
             }
-            else {
-                this.app.addLog("Not routing to app: "+req.url);
-            }
-            
-            //proxy.web(req, res);
-            });
-            
-            this.httpServer.on('upgrade', (req, socket, head) => {
-            this.app.addLog("Proxy ws req");
-            this.app.sessMan.routeToAppWs(req, socket, head);
-            //proxy.ws(req, socket, head);
-            });
-
-            this.httpServer.listen(this.port);
-
-            /*
-            this.server = this.expressApp.listen(this.port, () => {
-                this.app.addLog("Session Manager online");
-                this.app.addLog("Listening on port "+this.port);
-            });
-            */
-            
         });
+        
+        this.httpServer.on('upgrade', (req, socket, head) => {
+            this.app.addLog("Proxy ws req", "debug");
+            this.app.sessMan.routeToAppWs(req, socket, head);
+        });
+        this.httpServer.listen(this.port);
     }
 
 
     setupEndpoints() {
-
-        /*
-        this.expressApp.all('/*', (req, res, next) => {
-            this.trafficDivider(req, res, next);
-        });
-        */
-        /*
-        this.expressApp.get('/*', (req, res, next) => {
-            this.trafficDivider(req, res, next);
-        });
-
-        this.expressApp.post('/*', (req, res, next) => {
-            this.trafficDivider(req, res, next);
-        });
-
-        this.expressApp.put('/*', (req, res, next) => {
-            this.trafficDivider(req, res, next);
-        });
-
-        this.expressApp.patch('/*', (req, res, next) => {
-            this.trafficDivider(req, res, next);
-        });
-
-        this.expressApp.delete('/*', (req, res, next) => {
-            this.trafficDivider(req, res, next);
-        });
-        */
 
         this.expressApp.get('/api/sessions/:user_id', (req, res) => {
             this.app.addLog('/api/sessions/:user_id '+req.params.user_id);
@@ -96,52 +47,38 @@ class ApiServer {
             res.end(`{ "msg": "Session does not exist", "level": "error" }`);
             }
             sess.commit().then((result) => {
-            this.app.addLog(result);
-            res.end(`{ "msg": "Committed ${result}", "level": "info" }`);
+                let ar = new ApiResponse(200, result);
+                res.status(ar.code);
+                res.end(ar.toJSON());
             }).catch((e) => {
-            this.app.addLog("Error:"+e.toString('utf8'), 'error');
+                this.app.addLog("Error:"+e.toString('utf8'), 'error');
             });
         });
 
         this.expressApp.get('/api/session/:session_id/delete', (req, res) => {
             this.app.addLog('/api/session/:session_id/delete '+req.params.session_id);
             this.app.sessMan.deleteSession(req.params.session_id).then((ar) => {
-            res.status(ar.code).end(JSON.stringify(ar.body));
+                res.status(ar.code).end(JSON.stringify(ar.body));
             });
-            
-            /*
-            let sess = this.app.sessMan.getSessionByCode(req.params.session_id);
-            if(sess === false) {
-            this.app.addLog("Error on delete: Session not found!", 'error');
-            res.end(`{ "msg": "Error on delete: Session not found! Session id:${req.params.session_id}", "level": "error" }`);
-            return false;
-            }
-            sess.delete().then(() => {
-            let sessId = sess.accessCode;
-            this.app.addLog("Deleting session "+sessId);
-            this.app.sessMan.removeSession(sess);
-            res.end(`{ "deleted": "${sessId}" }`);
-            }).catch((e) => {
-            this.app.addLog(e.toString('utf8'));
-            });
-            */
         });
 
         this.expressApp.post('/api/session/run', (req, res) => {
             let sessionId = req.body.appSession;
             let runCmd = JSON.parse(req.body.cmd);
+            //let runCmd = req.body.cmd;
             this.app.addLog("req.body.env:"+req.body.env);
+            
             let env = [];
             if(req.body.env) {
                 env = JSON.parse(req.body.env);
             }
+            
             let sess = this.app.sessMan.getSessionByCode(sessionId);
             if(sess !== false) {
-            this.app.addLog("Running cmd in session "+sess.shortDockerContainerId+": "+runCmd, "debug");
-            sess.runCommand(runCmd, env).then((cmdOutput) => {
-                this.app.addLog("cmd output: "+cmdOutput, "debug");
-                res.sendStatus(200);
-            });
+                sess.runCommand(runCmd, env).then((cmdOutput) => {
+                    this.app.addLog("cmd output: "+cmdOutput, "debug");
+                    res.sendStatus(200);
+                });
             }
         });
 
@@ -173,9 +110,9 @@ class ApiServer {
 
                 return session;
             })().then((session) => {
-                this.app.addLog("Creating container complete, sending project access code to api/proxy");
+                this.app.addLog("Creating container complete, sending project access code ("+session.accessCode+") to api/proxy");
                 res.end(JSON.stringify({
-                sessionAccessCode: session.accessCode
+                    sessionAccessCode: session.accessCode
                 }));
             });
             }
@@ -198,7 +135,7 @@ class ApiServer {
             this.app.addLog("Received request access session for user "+user.id+" and project "+project.id+" with session "+req.body.appSession);
             this.app.addLog("Volumes:");
             for(let key in volumes) {
-            this.app.addLog("Volumes: "+key+":"+volumes[key]);
+                this.app.addLog("Volumes: "+key+":"+volumes[key].source+" => "+volumes[key].target);
             }
 
             (async () => {

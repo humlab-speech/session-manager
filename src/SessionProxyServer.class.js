@@ -13,14 +13,10 @@ class SessionProxyServer {
         this.httpServer = http.createServer();
 
         this.httpServer.on('request', (req, res) => {
-            console.log("Proxy http req");
             this.app.sessMan.routeToApp(req, res);
-            //proxy.web(req, res);
         });
         this.httpServer.on('upgrade', (req, socket, head) => {
-            console.log("Proxy ws req");
             this.app.sessMan.routeToAppWs(req, socket, head);
-            //proxy.ws(req, socket, head);
         });
 
         this.httpServer.listen(this.port);

@@ -17,8 +17,8 @@ class JupyterSession extends Session {
         let mounts = [];
         for(let key in this.volumes) {
             mounts.push({
-                Target: this.volumes[key],
-                Source: key,
+                Target: this.volumes[key]['target'],
+                Source: this.volumes[key]['source'],
                 Type: "bind",
                 ReadOnly: false
             });

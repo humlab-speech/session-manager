@@ -11,6 +11,34 @@ class SessionManager {
       this.app = app;
       this.sessions = [];
       this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
+
+      /*
+      this.app.addLog("Waiting for Gitlab to come up...");
+      this.isGitlabReadyInterval = setInterval(async () => {
+        if(await this.isGitlabReady()) {
+          clearInterval(this.isGitlabReadyInterval);
+          this.importRunningContainers();
+        }
+      }, 2000);
+      */
+
+    }
+
+    async isGitlabReady() {
+      return await fetch(this.app.gitlabAddress+"/api/v4/version?private_token="+this.app.gitlabAccessToken)
+      .then((res) => {
+        if (res.ok) { // res.status >= 200 && res.status < 300
+          this.app.addLog("Gitlab is up");
+          return true;
+        } else {
+          this.app.addLog("Gitlab is down (1)");
+          return false;
+        }
+      })
+      .catch(err => {
+        this.app.addLog("Gitlab is down (2)");
+        return false;
+      });
     }
     
     getContainerAccessCode() {
@@ -38,7 +66,7 @@ class SessionManager {
           userSessions.push({
             sessionCode: this.sessions[key].accessCode,
             projectId: this.sessions[key].project.id,
-            type: this.sessions.hsApp
+            type: this.sessions[key].hsApp
           });
         }
       }
@@ -96,30 +124,8 @@ class SessionManager {
           this.app.addLog(this.sessions);
           return false;
         }
-        
-        this.app.addLog("Route-to-app - request: "+req.url, "debug");
-        
-
+        //this.app.addLog("Route-to-app - request: "+req.url, "debug");
         sess.proxyServer.web(req, res);
-        
-        
-        /*
-        if(ws) {
-          this.app.addLog("Performing websocket routing", "debug");
-          //sess.proxyServer.ws(req, socket, head);
-          
-          sess.proxyServer.ws(req, socket, {
-            target: "ws://localhost:80",
-            ws: true,
-            xfwd: true
-          });
-          
-        }
-        else {
-          this.app.addLog("Performing http routing", "debug");
-          sess.proxyServer.web(req, res);
-        }
-        */
     }
 
     routeToAppWs(req, socket, head) {
@@ -157,19 +163,6 @@ class SessionManager {
         let containers = this.getRunningSessions();
         return containers;
     }
-
-    /*
-    async fetchSessionContainers() {
-      return await docker.container.list()
-      .then((containers) => {
-          let filteredList = containers.filter((container) => {
-            return container.data.Image == "hird-rstudio-emu";
-          });
-
-          return filteredList;
-        });
-    }
-    */
       
     /**
      * Function: getSession
@@ -200,7 +193,6 @@ class SessionManager {
       }
       code = code.toString('utf8');
       for(let key in this.sessions) {
-        this.app.addLog(this.sessions[key].accessCode+" "+code);
         if(this.sessions[key].accessCode == code) {
           return this.sessions[key];
         }
@@ -248,7 +240,7 @@ class SessionManager {
       return new Promise((resolve, reject) => {
         let sess = this.getSessionByCode(sessionId);
         if(sess === false) {
-          reject(new ApiResponse(400, "Could not find session "+sessionId));
+          reject(new ApiResponse(200, "Could not find session "+sessionId));
         }
 
         sess.delete().then(() => {
@@ -260,24 +252,26 @@ class SessionManager {
 
     /**
      * Function: importRunningContainers
-     * This is indented to import any existing running sessions, in case the cluster was restarted while sessians were active
+     * This is indented to import any existing running sessions, in case the cluster was restarted while sessians were active.
+     * However it doesn't work fully since we can only get an instance of the node-docker-api container class at creation time. This is functional in the way that it will re-enter the container into the local registry and allow users to proxy into the container, but there's no possibility of saving/commiting data or deleting the container form the portal site interface.
      */
     async importRunningContainers() {
       this.app.addLog("Importing existing session containers");
 
-      await new Promise((resolve, reject) => {
+      return await new Promise((resolve, reject) => {
 
         this.docker.container.list().then(containers => {
           let filteredList = containers.filter((container) => {
-            return container.data.Image == "hird-rstudio-emu";
+            return typeof container.data.Labels['hs.hsApp'] != "undefined";
+            //return container.data.Image == "hird-rstudio-emu";
           });
+
+          this.app.addLog("Found "+filteredList.length+" session containers");
   
           let userIds = [];
           let users = [];
-  
           let projectIds = [];
           let projects = [];
-  
           let fetchPromises = [];
   
           filteredList.forEach((c) => {
@@ -286,7 +280,6 @@ class SessionManager {
             let projectId = c.data.Labels['hs.projectId'];
             let accessCode = c.data.Labels['hs.accessCode'];
             
-  
             //Only fetch if we are not already fetching info for this user
             if(userIds.indexOf(userId) == -1) {
               this.app.addLog("Fetching user "+userId);
@@ -316,6 +309,7 @@ class SessionManager {
           });
   
           Promise.all(fetchPromises).then(data => {
+
             filteredList.forEach((c) => {
               let hsApp = c.data.Labels['hs.hsApp'];
               let userId = c.data.Labels['hs.userId'];
@@ -335,16 +329,12 @@ class SessionManager {
                 }
               });
   
-              this.app.addLog("Importing existing session: App:"+hsApp+" User:"+userObj.id+" Proj:"+projObj.id);
+              //this.app.addLog("Importing existing session: App:"+hsApp+" User:"+userObj.id+" Proj:"+projObj.id, "debug");
               
-              let session = new Session(this.app, userObj, projObj, this.getAvailableSessionProxyPort(), hsApp);
+              let session = this.createSession(userObj, projObj, hsApp);
               session.setAccessCode(accessCode);
-              session.loadContainerId().then((shortDockerContainerId) => {
-                session.setupProxyServerIntoContainer(shortDockerContainerId);
-              });
-              
-              this.sessions.push(session);
-  
+              let shortDockerContainerId = session.importContainerId(c.id);
+              session.setupProxyServerIntoContainer(shortDockerContainerId);
             });
 
             resolve();
