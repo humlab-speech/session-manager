@@ -270,9 +270,20 @@ class Session {
                 this.app.addLog("Commit failed because of nothing to commit.", "WARN");
                 return {
                     status: "error",
+                    errorType: "nothing-to-commit",
                     messages: ["Commit failed because of nothing to commit"]
                 };
             }
+
+            if(cmdResult.indexOf("cannot push because a reference that you are trying to update on the remote contains commits that are not present locally") != -1) {
+                this.app.addLog("Commit failed because of conflict.", "WARN");
+                return {
+                    status: "error",
+                    errorType: "conflict-on-commit",
+                    messages: ["Commit failed because of repository having changed"]
+                };
+            }
+
             return {
                 status: "ok"
             };
