@@ -3,6 +3,9 @@ const http = require('http');
 const bodyParser = require('body-parser');
 const ApiResponse = require('./ApiResponse.class');
 
+const { Container } = require('node-docker-api/lib/container');
+const Modem = require('docker-modem');
+
 class ApiServer {
     constructor(app) {
         this.app = app;
@@ -30,8 +33,22 @@ class ApiServer {
         this.httpServer.listen(this.port);
     }
 
+    async importContainerTest() {
+        let containerId = "b8e26a40bcc364808d9681ccedae8000bdb35ecabdc6e6c9ade2643110921308";
+        let modem = new Modem('/var/run/docker.sock');
+        let container = new Container(modem, containerId);
+        console.log(container);
+
+        return new ApiResponse(200, JSON.stringify(container));
+    }
 
     setupEndpoints() {
+        this.expressApp.get('/api/importtest', (req, res) => {
+            this.app.addLog('importtest');
+            this.importContainerTest().then((ar) => {
+                res.status(ar.code).end("ok");
+            });
+        });
 
         this.expressApp.get('/api/sessions/:user_id', (req, res) => {
             this.app.addLog('/api/sessions/:user_id '+req.params.user_id);

@@ -20,9 +20,35 @@ class Session {
         this.imageName = "";
         this.localProjectPath = "/home/humlabspeech";
         this.containerUser = "";
+        this.container = null;
         this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     }
 
+    overrideImage(image) {
+        this.imageName = image.id;
+    }
+
+    exportToImage() {
+        if(this.container == null) {
+            return false;
+        }
+
+        let imageTag = new Date().toISOString().substr(0, 10);
+        imageTag += "-"+this.hsApp;
+        imageTag += "-u"+this.user.id;
+        imageTag += "p"+this.project.id;
+
+        this.container.commit({
+            tag: imageTag,
+            comment: "hs suspended session",
+            author: "hs",
+            repo: "hs-suspended-session",
+            pause: true
+        }).then((image) => {
+            console.log("Committed container "+this.shortDockerContainerId+" as image "+image.id);
+        });
+    }
+    
     setAccessCode(code) {
         this.accessCode = code;
     }
@@ -139,6 +165,7 @@ class Session {
     getContainerConfig() {
         return {};
     }
+    
 
     async createContainer() {
         this.app.addLog("Creating new project container");
@@ -243,7 +270,10 @@ class Session {
         let crendentials = "root:"+process.env.GIT_API_ACCESS_TOKEN;
         let gitRepoUrl = "http://"+crendentials+"@gitlab:80/"+this.project.path_with_namespace+".git";
 
-        await this.runCommand(["R", "-f", "/scripts/gitClone.r"], [
+
+        await this.runCommand(["node", "/scripts/git-agent/main.js", "clone"], [
+            "GIT_USER_NAME="+this.user.name,
+            "GIT_USER_EMAIL="+this.user.email,
             "GIT_REPOSITORY_URL="+gitRepoUrl,
             "PROJECT_PATH="+this.localProjectPath
         ]).then(output => {
@@ -259,35 +289,46 @@ class Session {
         this.app.addLog("Project cloned into container");
     }
 
-    async commit() {
+    async commit(branch = "master") {
         this.app.addLog("Committing project");
-        return await this.runCommand(["R", "-f", "/scripts/gitCommit.r"], [
+        return await this.runCommand(["node", "/scripts/git-agent/main.js", "save"], [
             "GIT_USER_NAME="+this.user.name,
             "GIT_USER_EMAIL="+this.user.email,
+            "GIT_BRANCH="+branch,
             "PROJECT_PATH="+this.localProjectPath
-        ]).then(cmdResult => {
-            if(cmdResult.indexOf("Nothing added to commit") != -1) {
-                this.app.addLog("Commit failed because of nothing to commit.", "WARN");
-                return {
-                    status: "error",
-                    errorType: "nothing-to-commit",
-                    messages: ["Commit failed because of nothing to commit"]
-                };
-            }
-
-            if(cmdResult.indexOf("cannot push because a reference that you are trying to update on the remote contains commits that are not present locally") != -1) {
-                this.app.addLog("Commit failed because of conflict.", "WARN");
-                return {
-                    status: "error",
-                    errorType: "conflict-on-commit",
-                    messages: ["Commit failed because of repository having changed"]
-                };
-            }
-
-            return {
-                status: "ok"
-            };
+        ]).then(cmdResultString => {
+            //Strip everything preceding the first { since it will just be garbage
+            cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
+            let cmdResult = JSON.parse(cmdResultString);
+            return cmdResult.msg;
         });
+    }
+
+    /**
+     * getGitResultBasedOnOutput
+     * 
+     * This method just tries to figure out the return status of the git operation based on the text output, it's primitive and fragile and should
+     * be replaced by a better method at some point.
+     * 
+     * @param {*} msg 
+     * @returns 
+     */
+    getGitResultBasedOnOutput(msg) {
+        if(msg.indexOf("Nothing added to commit") != -1) {
+            return "nothing-to-commit";
+        }
+        if(msg.indexOf("cannot push because a reference that you are trying to update on the remote contains commits that are not present locally") != -1) {
+            return "conflict-on-commit";
+        }
+
+        return "no-error";
+    }
+
+    getGitFriendlyDateString() {
+        let dateString = new Date().toISOString();
+        dateString = dateString.replace(/:/g, "");
+        dateString = dateString.substr(0, dateString.indexOf("."));
+        return dateString;
     }
 
 

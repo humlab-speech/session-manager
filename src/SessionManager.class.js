@@ -17,11 +17,52 @@ class SessionManager {
       this.isGitlabReadyInterval = setInterval(async () => {
         if(await this.isGitlabReady()) {
           clearInterval(this.isGitlabReadyInterval);
-          this.importRunningContainers();
+          this.importSuspendedSessions();
         }
       }, 2000);
       */
+      
+    }
 
+    importSuspendedSessions() {
+      this.app.addLog('Importing suspended sessions');
+      this.docker.image.list().then(sessionImages => {
+        let imageShortList = [];
+        sessionImages.forEach(si => {
+          si.data.RepoTags.forEach((tag) => {
+            let tagParts = tag.split(":");
+            let tagName = tagParts[0];
+            let tagVersion = tagParts[1];
+
+            if(tagName == "hs-suspended-session") {
+              imageShortList.push(si);
+            }
+          });
+        });
+
+        imageShortList.forEach((image) => {
+          this.app.addLog("Importing suspended session: "+image.data.Labels['hs.hsApp']+"/"+"u"+image.data.Labels['hs.userId']+"/p"+image.data.Labels['hs.projectId']);
+
+          let fetchPromises = [];
+          fetchPromises.push(this.fetchUserById(image.data.Labels['hs.userId']));
+          fetchPromises.push(this.fetchProjectById(image.data.Labels['hs.projectId']));
+          Promise.all(fetchPromises).then((data) => {
+            let user = data[0];
+            let project = data[1];
+            let sess = this.createSession(user, project, image.data.Labels['hs.hsApp']);
+            sess.overrideImage(image);
+            sess.createContainer();
+          });
+          
+          
+        });
+      });
+    }
+
+    exportRunningSessions() {
+      this.sessions.forEach(session => {
+        session.exportToImage();
+      });
     }
 
     async isGitlabReady() {
@@ -85,7 +126,6 @@ class SessionManager {
         default:
           this.app.addLog("Unknown hsApp type: "+hsApp, "error");
       }
-      //let sess = new Session(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
       
       this.sessions.push(sess);
       return sess;
@@ -246,6 +286,26 @@ class SessionManager {
         sess.delete().then(() => {
           this.removeSession(sess);
           resolve(new ApiResponse(200, "Session "+sessionId+" deleted"));
+        });
+      });
+    }
+
+    async fetchUserById(userId) {
+      return new Promise((resolve, reject) => {
+        fetch(this.app.gitlabAddress+"/api/v4/users?id="+userId+"&private_token="+this.app.gitlabAccessToken)
+        .then(response => response.json())
+        .then(data => {
+          resolve(data[0]);
+        });
+      });
+    }
+
+    async fetchProjectById(projectId) {
+      return new Promise((resolve, reject) => {
+      fetch(this.app.gitlabAddress+"/api/v4/projects?id="+projectId+"&private_token="+this.app.gitlabAccessToken)
+        .then(response => response.json())
+        .then(data => {
+          resolve(data[0]);
         });
       });
     }

@@ -45,6 +45,23 @@ class Application {
         fs.appendFileSync(logFile, logMsg);
     }
   }
+
+  shutdown() {
+    this.addLog('Shutdown requested. Exporting live sessions...');
+    this.sessMan.exportRunningSessions();
+  }
+  
 }
 
-const application = new Application();
+let application = null;
+/*
+process.on('SIGINT', () => {
+  application.shutdown();
+});
+
+process.on('SIGTERM', () => {
+  application.shutdown();
+});
+*/
+application = new Application();
+
