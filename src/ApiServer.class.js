@@ -104,6 +104,7 @@ class ApiServer {
             let user = JSON.parse(req.body.gitlabUser);
             let project = JSON.parse(req.body.project);
             let hsApp = req.body.hsApp;
+            let gitlabPat = req.body.personalAccessToken;
             let volumes = [];
             if(typeof req.body.volumes != "undefined") {
                 volumes = JSON.parse(req.body.volumes);
@@ -123,7 +124,7 @@ class ApiServer {
 
                 let session = this.app.sessMan.createSession(user, project, hsApp);
                 let containerId = await session.createContainer();
-                let gitOutput = await session.cloneProjectFromGit();
+                let gitOutput = await session.cloneProjectFromGit(gitlabPat);
 
                 return session;
             })().then((session) => {
