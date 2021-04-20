@@ -20,7 +20,9 @@ class JupyterSession extends Session {
                 Target: this.volumes[key]['target'],
                 Source: this.volumes[key]['source'],
                 Type: "bind",
-                ReadOnly: false
+                Mode: "ro,Z",
+                RW: false,
+                ReadOnly: true
             });
         }
 
