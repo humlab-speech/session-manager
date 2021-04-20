@@ -265,9 +265,8 @@ class Session {
 
     }
 
-    async cloneProjectFromGit(gitlabPat) {
+    async cloneProjectFromGit(credentials) {
         this.app.addLog("Cloning project into container");
-        let credentials = "root:"+gitlabPat;
         let gitRepoUrl = "http://"+credentials+"@gitlab:80/"+this.project.path_with_namespace+".git";
 
         await this.runCommand(["node", "/scripts/git-agent/main.js", "clone"], [

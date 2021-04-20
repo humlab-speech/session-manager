@@ -120,11 +120,13 @@ class ApiServer {
             let session = this.app.sessMan.getSession(user.id, project.id, hsApp);
             if(session === false) {
             this.app.addLog("No existing session was found, creating container");
+            
             (async () => {
 
                 let session = this.app.sessMan.createSession(user, project, hsApp);
                 let containerId = await session.createContainer();
-                let gitOutput = await session.cloneProjectFromGit(gitlabPat);
+                let credentials = user.username+":"+gitlabPat;
+                let gitOutput = await session.cloneProjectFromGit(credentials);
 
                 return session;
             })().then((session) => {
@@ -148,6 +150,7 @@ class ApiServer {
             let user = JSON.parse(req.body.gitlabUser);
             let project = JSON.parse(req.body.project);
             let hsApp = req.body.hsApp;
+            let gitlabPat = req.body.personalAccessToken;
             let volumes = JSON.parse(req.body.volumes);
             
             this.app.addLog("Received request access session for user "+user.id+" and project "+project.id+" with session "+req.body.appSession);
@@ -157,9 +160,11 @@ class ApiServer {
             }
 
             (async () => {
+
                 let session = this.app.sessMan.createSession(user, project, hsApp, volumes);
                 let containerId = await session.createContainer();
-                let gitOutput = await session.cloneProjectFromGit();
+                let credentials = user.username+":"+gitlabPat;
+                let gitOutput = await session.cloneProjectFromGit(credentials);
                 
 
                 return session;
