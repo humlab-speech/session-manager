@@ -269,7 +269,7 @@ class Session {
         this.app.addLog("Cloning project into container");
         let gitRepoUrl = "http://"+credentials+"@gitlab:80/"+this.project.path_with_namespace+".git";
 
-        await this.runCommand(["node", "/scripts/git-agent/main.js", "clone"], [
+        await this.runCommand(["node", "/scripts/container-agent/main.js", "clone"], [
             "GIT_USER_NAME="+this.user.name,
             "GIT_USER_EMAIL="+this.user.email,
             "GIT_REPOSITORY_URL="+gitRepoUrl,
@@ -289,13 +289,25 @@ class Session {
 
     async commit(branch = "master") {
         this.app.addLog("Committing project");
-        return await this.runCommand(["node", "/scripts/git-agent/main.js", "save"], [
+        return await this.runCommand(["node", "/scripts/container-agent/main.js", "save"], [
             "GIT_USER_NAME="+this.user.name,
             "GIT_USER_EMAIL="+this.user.email,
             "GIT_BRANCH="+branch,
             "PROJECT_PATH="+this.localProjectPath
         ]).then(cmdResultString => {
             //Strip everything preceding the first { since it will just be garbage
+            cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
+            let cmdResult = JSON.parse(cmdResultString);
+            return cmdResult.msg;
+        });
+    }
+
+    async copyUploadedFiles() {
+        this.app.addLog("Copying uploaded files");
+        return await this.runCommand(["node", "/scripts/container-agent/main.js", "copy-docs"], [
+            "PROJECT_PATH="+this.localProjectPath
+        ]).then(cmdResultString => {
+            //Strip everything preceding the first '{' since it will just be garbage
             cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
             let cmdResult = JSON.parse(cmdResultString);
             return cmdResult.msg;

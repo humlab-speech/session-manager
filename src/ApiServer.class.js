@@ -72,6 +72,22 @@ class ApiServer {
             });
         });
 
+        this.expressApp.get('/api/session/:session_id/copyuploadedfiles', (req, res) => {
+            let sess = this.app.sessMan.getSessionByCode(req.params.session_id);
+            if(sess === false) {
+            //Todo: Add error handling here if session doesn't exist
+            res.end(`{ "msg": "Session does not exist", "level": "error" }`);
+            }
+            sess.copyUploadedFiles().then((result) => {
+                let ar = new ApiResponse(200, result);
+                res.status(ar.code);
+                res.end(ar.toJSON());
+            }).catch((e) => {
+                this.app.addLog("Error:"+e.toString('utf8'), 'error');
+            });
+        });
+        
+
         this.expressApp.get('/api/session/:session_id/delete', (req, res) => {
             this.app.addLog('/api/session/:session_id/delete '+req.params.session_id);
             this.app.sessMan.deleteSession(req.params.session_id).then((ar) => {
