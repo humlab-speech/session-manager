@@ -10,7 +10,7 @@ class RstudioSession extends Session {
         this.imageName = "hs-rstudio-session";
         this.port = 8787;
         this.rstudioPassword = process.env.RSTUDIO_PASSWORD;
-        this.localProjectPath = "/home/rstudio/humlabspeech";
+        this.localProjectPath = "/home/rstudio/project";
         this.containerUser = "rstudio";
     }
 

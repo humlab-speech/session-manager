@@ -9,7 +9,7 @@ class JupyterSession extends Session {
         super(app, user, project, port, hsApp, volumes);
         this.imageName = "hs-jupyter-session";
         this.port = 8888;
-        this.localProjectPath = "/home/jovyan/humlabspeech";
+        this.localProjectPath = "/home/jovyan/project";
         this.containerUser = "jovyan";
     }
 

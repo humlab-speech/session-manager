@@ -18,7 +18,7 @@ class Session {
         this.fullDockerContainerId = null;
         this.shortDockerContainerId = null;
         this.imageName = "";
-        this.localProjectPath = "/home/humlabspeech";
+        this.localProjectPath = "/home/project";
         this.containerUser = "";
         this.container = null;
         this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
