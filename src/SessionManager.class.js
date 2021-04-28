@@ -59,7 +59,7 @@ class SessionManager {
       });
     }
 
-    commitRunningSessions() {
+    commitRunningSessions(shutdownWhenDone = true) {
       let promises = [];
       this.sessions.forEach(session => {
         promises.push(session.commit());
@@ -67,6 +67,17 @@ class SessionManager {
 
       Promise.all(promises).then(() => {
         this.app.addLog('All running sessions committed');
+        if(shutdownWhenDone) {
+          promises = [];
+          this.sessions.forEach(session => {
+            promises.push(session.delete());
+          });
+
+          Promise.all(promises).then(() => {
+            this.app.addLog('All running sessions shutdown');
+          });
+
+        }
       });
     }
 
