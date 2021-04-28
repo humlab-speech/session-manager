@@ -59,6 +59,17 @@ class SessionManager {
       });
     }
 
+    commitRunningSessions() {
+      let promises = [];
+      this.sessions.forEach(session => {
+        promises.push(session.commit());
+      });
+
+      Promise.all(promises).then(() => {
+        this.app.addLog('All running sessions committed');
+      });
+    }
+
     exportRunningSessions() {
       this.sessions.forEach(session => {
         session.exportToImage();

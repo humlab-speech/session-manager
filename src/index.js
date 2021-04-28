@@ -47,21 +47,24 @@ class Application {
   }
 
   shutdown() {
-    this.addLog('Shutdown requested. Exporting live sessions...');
-    this.sessMan.exportRunningSessions();
+    this.addLog('Shutdown requested. Committing live sessions...');
+    //this.sessMan.exportRunningSessions();
+    this.sessMan.commitRunningSessions();
   }
   
 }
 
 let application = null;
-/*
+
 process.on('SIGINT', () => {
+  console.log("SIGINT received");
   application.shutdown();
 });
 
 process.on('SIGTERM', () => {
+  console.log("SIGTERM received");
   application.shutdown();
 });
-*/
+
 application = new Application();
 
