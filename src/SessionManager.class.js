@@ -5,6 +5,7 @@ const { Docker } = require('node-docker-api');
 const ApiResponse = require('./ApiResponse.class');
 const RstudioSession = require('./Sessions/RstudioSession.class');
 const JupyterSession = require('./Sessions/JupyterSession.class');
+const OperationsSession = require('./Sessions/OperationsSession.class');
 
 class SessionManager {
     constructor(app) {
@@ -145,6 +146,9 @@ class SessionManager {
         case "jupyter":
           sess = new JupyterSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
         break;
+        case "operations":
+          sess = new OperationsSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
+          break;
         default:
           this.app.addLog("Unknown hsApp type: "+hsApp, "error");
       }

@@ -43,6 +43,14 @@ class ApiServer {
     }
 
     setupEndpoints() {
+        
+        this.expressApp.get('/api/isgitlabready', (req, res) => {
+            this.app.addLog('isGitlabReady');
+            this.app.sessMan.isGitlabReady().then((gitlabIsReady) => {
+                res.status(200).end(new ApiResponse(200, { gitlabIsReady: gitlabIsReady }).toJSON());
+            });
+        });
+
         this.expressApp.get('/api/importtest', (req, res) => {
             this.app.addLog('importtest');
             this.importContainerTest().then((ar) => {
