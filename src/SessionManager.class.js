@@ -92,7 +92,7 @@ class SessionManager {
       return await fetch(this.app.gitlabAddress+"/api/v4/version?private_token="+this.app.gitlabAccessToken)
       .then((res) => {
         if (res.ok) { // res.status >= 200 && res.status < 300
-          this.app.addLog("Gitlab is up");
+          //this.app.addLog("Gitlab is up");
           return true;
         } else {
           this.app.addLog("Gitlab is down (1)");
