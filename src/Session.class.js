@@ -298,7 +298,7 @@ class Session {
             //Strip everything preceding the first { since it will just be garbage
             cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
             let cmdResult = JSON.parse(cmdResultString);
-            return cmdResult.msg;
+            return cmdResult.body;
         });
     }
 
