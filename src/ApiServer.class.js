@@ -118,7 +118,8 @@ class ApiServer {
             if(sess !== false) {
                 sess.runCommand(runCmd, env).then((cmdOutput) => {
                     this.app.addLog("cmd output: "+cmdOutput, "debug");
-                    res.sendStatus(200);
+                    //res.sendStatus(200);
+                    res.status(200).send(JSON.parse(cmdOutput).body).end();
                 });
             }
         });

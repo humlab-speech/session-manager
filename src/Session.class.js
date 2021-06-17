@@ -61,6 +61,13 @@ class Session {
             streamData += data.toString();
           });
           stream.on('end', () => {
+            let startOfJson = streamData.indexOf("{");
+            if(startOfJson == -1) {
+                this.app.addLog("Cmd stream returned non-json data: "+streamData);
+            }
+            else {
+                streamData = streamData.substr(startOfJson); //Strip leading garbage
+            }
             resolve(streamData);
           });
           stream.on('error', (data) => {
