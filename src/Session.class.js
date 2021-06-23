@@ -127,9 +127,9 @@ class Session {
     
                 let containerId = false;
                 filteredList.forEach((c) => {
-                    let hsApp = c.data.Labels['hs.hsApp'];
-                    let userId = c.data.Labels['hs.userId'];
-                    let projectId = c.data.Labels['hs.projectId'];
+                    let hsApp = c.data.Labels['visp.hsApp'];
+                    let userId = c.data.Labels['visp.userId'];
+                    let projectId = c.data.Labels['visp.projectId'];
                     if(this.hsApp == hsApp && userId == this.user.id && projectId == this.project.id) {
                             containerId = c.id;
                     }

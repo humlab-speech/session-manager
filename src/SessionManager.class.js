@@ -42,15 +42,15 @@ class SessionManager {
         });
 
         imageShortList.forEach((image) => {
-          this.app.addLog("Importing suspended session: "+image.data.Labels['hs.hsApp']+"/"+"u"+image.data.Labels['hs.userId']+"/p"+image.data.Labels['hs.projectId']);
+          this.app.addLog("Importing suspended session: "+image.data.Labels['visp.hsApp']+"/"+"u"+image.data.Labels['visp.userId']+"/p"+image.data.Labels['visp.projectId']);
 
           let fetchPromises = [];
-          fetchPromises.push(this.fetchUserById(image.data.Labels['hs.userId']));
-          fetchPromises.push(this.fetchProjectById(image.data.Labels['hs.projectId']));
+          fetchPromises.push(this.fetchUserById(image.data.Labels['visp.userId']));
+          fetchPromises.push(this.fetchProjectById(image.data.Labels['visp.projectId']));
           Promise.all(fetchPromises).then((data) => {
             let user = data[0];
             let project = data[1];
-            let sess = this.createSession(user, project, image.data.Labels['hs.hsApp']);
+            let sess = this.createSession(user, project, image.data.Labels['visp.hsApp']);
             sess.overrideImage(image);
             sess.createContainer();
           });
@@ -348,7 +348,7 @@ class SessionManager {
 
         this.docker.container.list().then(containers => {
           let filteredList = containers.filter((container) => {
-            return typeof container.data.Labels['hs.hsApp'] != "undefined";
+            return typeof container.data.Labels['visp.hsApp'] != "undefined";
             //return container.data.Image == "hird-rstudio-emu";
           });
 
@@ -361,10 +361,10 @@ class SessionManager {
           let fetchPromises = [];
   
           filteredList.forEach((c) => {
-            let hsApp = c.data.Labels['hs.hsApp'];
-            let userId = c.data.Labels['hs.userId'];
-            let projectId = c.data.Labels['hs.projectId'];
-            let accessCode = c.data.Labels['hs.accessCode'];
+            let hsApp = c.data.Labels['visp.hsApp'];
+            let userId = c.data.Labels['visp.userId'];
+            let projectId = c.data.Labels['visp.projectId'];
+            let accessCode = c.data.Labels['visp.accessCode'];
             
             //Only fetch if we are not already fetching info for this user
             if(userIds.indexOf(userId) == -1) {
@@ -397,10 +397,10 @@ class SessionManager {
           Promise.all(fetchPromises).then(data => {
 
             filteredList.forEach((c) => {
-              let hsApp = c.data.Labels['hs.hsApp'];
-              let userId = c.data.Labels['hs.userId'];
-              let projectId = c.data.Labels['hs.projectId'];
-              let accessCode = c.data.Labels['hs.accessCode'];
+              let hsApp = c.data.Labels['visp.hsApp'];
+              let userId = c.data.Labels['visp.userId'];
+              let projectId = c.data.Labels['visp.projectId'];
+              let accessCode = c.data.Labels['visp.accessCode'];
   
               let userObj = null;
               users.forEach(user => {
