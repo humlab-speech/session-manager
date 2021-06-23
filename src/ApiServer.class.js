@@ -1,21 +1,35 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const bodyParser = require('body-parser');
 const ApiResponse = require('./ApiResponse.class');
-
+const WebSocket = require('ws');
 const { Container } = require('node-docker-api/lib/container');
 const Modem = require('docker-modem');
+const WebSocketMessage = require('./WebSocketMessage.class');
+const Rx = require('rxjs');
 
 class ApiServer {
     constructor(app) {
         this.app = app;
         this.port = 8080;
+        this.wsPort = 8020;
+        this.wsClients = [];
 
         this.expressApp = express();
         this.expressApp.use(bodyParser.urlencoded({ extended: true }));
 
         this.setupEndpoints();
         this.startServer();
+        this.startWsServer();
+
+        /*
+        setInterval(() => {
+            this.wsClients.forEach(client => {
+                client.socket.send('heartbeat');
+            });
+        }, 1000);
+        */
     }
 
     startServer() {
@@ -31,6 +45,191 @@ class ApiServer {
             this.app.sessMan.routeToAppWs(req, socket, head);
         });
         this.httpServer.listen(this.port);
+    }
+
+    startWsServer() {
+        //We need a regular https-server which then can be 'upgraded' to a websocket server
+        this.httpWsServer = http.createServer((req, res) => {
+        });
+
+        this.wss = new WebSocket.Server({ noServer: true });
+
+        this.httpWsServer.on('upgrade', (request, socket, head) => {
+            this.app.addLog("Client requested WS upgrade - authenticating");
+            this.wss.handleUpgrade(request, socket, head, (ws) => {
+                this.authenticateWebSocketUser(request).then((authResult) => {
+                    if(authResult.authenticated) {
+                        this.wss.emit('connection', ws, request);
+
+                        let client = {
+                            socket: ws,
+                            userSession: authResult.userSession
+                        };
+
+                        this.wsClients.push(client);
+                        
+                        ws.on('message', message => this.handleIncomingWebSocketMessage(ws, message));
+                        ws.on('close', () => {
+                            this.handleConnectionClosed(client);
+                        });
+
+                        ws.send(new WebSocketMessage('0', 'status-update', 'Authenticated '+authResult.userSession.username).toJSON());
+                    }
+                    else {
+                        ws.send(new WebSocketMessage('0', 'status-update', 'Authenticated failed of '+authResult.userSession.username).toJSON());
+                        ws.close(1000);
+                    }
+                });
+            });
+        });
+
+        this.httpWsServer.listen(this.wsPort);
+    }
+
+    handleConnectionClosed(client) {
+        //If this client has any active operations-sessions, kill them
+        if(client.userSession) {
+            this.app.sessMan.getUserSessions(client.userSession.gitlabUser.id).forEach((session) => {
+                if(session.type == "operations") {
+                    this.shutdownSessionContainer(session.sessionCode);
+                }
+            });
+        }
+        
+        if(this.deleteWsClient(client)) {
+            this.app.addLog("Deleted websocket client");
+        }
+        else {
+            this.app.addLog("Failed deleting websocket client", "error");
+        }
+    }
+
+    deleteWsClient(client) {
+        for(let key in this.wsClients) {
+            if(this.wsClients[key] === client) {
+                this.wsClients.splice(key, 1);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    handleIncomingWebSocketMessage(ws, message) {
+        //this.app.addLog('received: '+message);
+        //received: {"cmd":"fetchOperationsSession","projectId":105}
+        let msg = JSON.parse(message);
+
+        if(msg.type == "cmd") {
+            switch(msg.message) {
+                case "fetchOperationsSession":
+                    this.getSessionContainer(msg.params.user, msg.params.project).subscribe(data => {
+                        if(data.type == "status-update") {
+                            ws.send(new WebSocketMessage(msg.context, 'status-update', data.message).toJSON());
+                        }
+                        if(data.type == "data") {
+                            ws.send(new WebSocketMessage(msg.context, 'data', data.accessCode).toJSON());
+                        }
+                    });
+                    break;
+            }
+        }
+
+        if(msg.cmd == "fetchOperationsSession") {
+            //ws.send("Will totally spawn a new session container for you with "+msg.user.gitlabUsername+" and "+msg.project.id);
+            this.getSessionContainer(ws, msg.user, msg.project).then(session => {
+                ws.send(new WebSocketMessage(msg.context, 'data', session.accessCode).toJSON());
+                //ws.send(JSON.stringify({ type: "data", sessionAccessCode: session.accessCode }));
+            });
+        }
+
+        if(msg.cmd == "shutdownOperationsSession") {
+            this.app.addLog("Shutdown of session "+msg.sessionAccessCode);
+            this.shutdownSessionContainer(msg.sessionAccessCode).then((result) => {
+                ws.send(JSON.stringify({ type: "status-update", sessionClosed: msg.sessionAccessCode }));
+                //ws.close();
+            });
+        }
+
+        if(msg.cmd == "scanEmuDb") {
+            this.app.addLog("Scanning emuDb in session "+msg.sessionAccessCode);
+            let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
+            session.runCommand("node /container-agent/main.js emudb-scan", []).then((emuDbScanResult) => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
+            });
+        }
+    }
+
+    getSessionContainer( user, project, hsApp = "operations", volumes  = []) {
+        return new Rx.Observable(async (observer) => {
+            observer.next({ type: "status-update", message: "Creating session" });
+            let session = this.app.sessMan.createSession(user, project, hsApp, volumes);
+            observer.next({ type: "status-update", message: "Spawning container" });
+            let containerId = await session.createContainer();
+            let credentials = user.username+":"+user.personalAccessToken;
+            observer.next({ type: "status-update", message: "Cloning project" });
+            let gitOutput = await session.cloneProjectFromGit(credentials);
+            observer.next({ type: "status-update", message: "Session ready" });
+            this.app.addLog("Creating container complete");
+            observer.next({ type: "data", accessCode: session.accessCode });
+        });
+    }
+
+    async shutdownSessionContainer(sessionAccessCode) {
+        let session = this.app.sessMan.getSessionByCode(sessionAccessCode);
+        if(session) {
+            return this.app.sessMan.deleteSession(sessionAccessCode);
+        }
+        return false;
+    }
+
+    async authenticateWebSocketUser(request) {
+        let cookies = this.parseCookies(request);
+        let phpSessionId = cookies.PHPSESSID;
+
+        this.app.addLog('Validating phpSessionId '+phpSessionId);
+
+        let options = {
+            headers: {
+                'Cookie': "PHPSESSID="+phpSessionId
+            }
+        }
+
+        return new Promise((resolve, reject) => {
+            http.get("http://edge-router/api/api.php?f=session", options, (incMsg) => {
+                let body = "";
+                incMsg.on('data', (data) => {
+                    body += data;
+                });
+                incMsg.on('end', () => {
+                    let responseBody = JSON.parse(body);
+                    if(responseBody.body == "[]") {
+                        this.app.addLog("User not identified");
+                        resolve({
+                            authenticated: false
+                        });
+                        return;
+                    }
+
+                    let userSession = JSON.parse(JSON.parse(body).body);
+                    this.app.addLog("Welcome user "+userSession.username);
+                    resolve({
+                        authenticated: true,
+                        userSession: userSession
+                    });
+                });
+            });
+        });
+    }
+
+    parseCookies (request) {
+        var list = {},
+            rc = request.headers.cookie;
+
+        rc && rc.split(';').forEach(function( cookie ) {
+            var parts = cookie.split('=');
+            list[parts.shift().trim()] = decodeURI(parts.join('='));
+        });
+        return list;
     }
 
     async importContainerTest() {
