@@ -296,6 +296,10 @@ class Session {
 
     async commit(branch = "master") {
         this.app.addLog("Committing project");
+        this.app.addLog("GIT_USER_NAME="+this.user.name);
+        this.app.addLog("GIT_USER_EMAIL="+this.user.email);
+        this.app.addLog("GIT_BRANCH="+branch);
+        this.app.addLog("PROJECT_PATH="+this.localProjectPath);
         return await this.runCommand(["node", "/container-agent/main.js", "save"], [
             "GIT_USER_NAME="+this.user.name,
             "GIT_USER_EMAIL="+this.user.email,
@@ -311,6 +315,7 @@ class Session {
 
     async copyUploadedFiles() {
         this.app.addLog("Copying uploaded files");
+        this.app.addLog("PROJECT_PATH="+this.localProjectPath);
         return await this.runCommand(["node", "/container-agent/main.js", "copy-docs"], [
             "PROJECT_PATH="+this.localProjectPath
         ]).then(cmdResultString => {

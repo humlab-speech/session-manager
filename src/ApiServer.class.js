@@ -8,6 +8,9 @@ const { Container } = require('node-docker-api/lib/container');
 const Modem = require('docker-modem');
 const WebSocketMessage = require('./WebSocketMessage.class');
 const Rx = require('rxjs');
+const validator = require('validator');
+const axios = require('axios');
+const fs = require('fs');
 
 class ApiServer {
     constructor(app) {
@@ -76,7 +79,7 @@ class ApiServer {
                         ws.send(new WebSocketMessage('0', 'status-update', 'Authenticated '+authResult.userSession.username).toJSON());
                     }
                     else {
-                        ws.send(new WebSocketMessage('0', 'status-update', 'Authenticated failed of '+authResult.userSession.username).toJSON());
+                        ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed').toJSON());
                         ws.close(1000);
                     }
                 });
@@ -85,6 +88,16 @@ class ApiServer {
 
         this.httpWsServer.listen(this.wsPort);
     }
+
+    getUserSessionBySocket(ws) {
+        for(let key in this.wsClients) {
+            if(this.wsClients[key].socket === ws) {
+                return this.wsClients[key].userSession;
+            }
+        }
+        return false;
+    }
+
 
     handleConnectionClosed(client) {
         //If this client has any active operations-sessions, kill them
@@ -157,6 +170,132 @@ class ApiServer {
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
             });
         }
+
+        if(msg.cmd == "createProject") {
+            this.createProject(ws, msg);
+        }
+    }
+
+    async createProject(ws, msg) {
+        let context = msg.data.context;
+        //sanitize input
+        let projectName = validator.escape(msg.data.form.projectName);
+
+        console.log("Creating project "+projectName);
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "1", result: "Creating project "+projectName }));
+        
+        //createGitlabProject
+        let userSession = this.getUserSessionBySocket(ws);
+        let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/projects/user/"+userSession.gitlabUser.id+"?private_token="+this.app.gitlabAccessToken;
+
+        let result = await axios.post(gitlabApiRequest, {
+            name: projectName
+        });
+
+        const gitlabProject = result.data;
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "2", result: "Creating container" }));
+
+        let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
+        if(!fs.existsSync(uploadsSrcDir)) {
+            fs.mkdirSync(uploadsSrcDir, {
+                recursive: true
+            });
+        }
+        
+        //createSession
+        const uploadsVolume = {
+            source: uploadsSrcDir,
+            target: "/home/uploads"
+        }
+        const projectDirectoryTemplateVolume = {
+            source: this.app.absRootPath+"/docker/session-manager/project-template-structure",
+            target: "/project-template-structure"
+        }
+        let volumes = [
+            uploadsVolume,
+            projectDirectoryTemplateVolume
+        ];
+        const session = this.app.sessMan.createSession(userSession.gitlabUser, gitlabProject, 'operations', volumes);
+        await session.createContainer();
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "3", result: "Fetching from Git" }));
+        let credentials = userSession.gitlabUser.username+":"+this.app.gitlabAccessToken;
+        let gitOutput = await session.cloneProjectFromGit(credentials);
+        
+        let envVars = [
+            "PROJECT_PATH=/home/project-setup",
+            "UPLOAD_PATH=/home/uploads"
+        ];
+        //createStandardDirectoryStructure
+        if(msg.data.form.standardDirectoryStructure) {
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "4", result: "Creating standard directory structure" }));
+            let sessionsEncoded = Buffer.from(JSON.stringify(msg.data.form.sessions)).toString('base64');
+
+            envVars.push("EMUDB_SESSIONS="+sessionsEncoded);
+            await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "copy-project-template-directory"], envVars);
+
+            if(msg.data.form.createEmuDb) {
+                //createEmuDb
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "5", result: "Creating EmuDB" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
+                //emudb-create-sessions
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "6", result: "Creating EmuDB sessions" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+                //emudb-create-bundlelist
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "7", result: "Creating EmuDB bundlelist" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
+
+                //emudb-create-annotlevels
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "8", result: "Creating EmuDB annotation levels" }));
+                for(let key in msg.data.form.annotLevels) {
+                    let env = [];
+                    let annotLevel = msg.data.form.annotLevels[key];
+                    env.push("ANNOT_LEVEL_DEF_NAME="+annotLevel.name);
+                    env.push("ANNOT_LEVEL_DEF_TYPE="+annotLevel.type);
+                    await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevels"], env.concat(envVars));
+                }
+
+                //emudb-create-annotlevellinks
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "9", result: "Creating EmuDB annotation level links" }));
+                for(let key in msg.data.form.annotLevelLinks) {
+                    let env = [];
+                    let annotLevelLink = msg.data.form.annotLevelLinks[key];
+                    env.push("ANNOT_LEVEL_LINK_SUPER="+annotLevelLink.superLevel);
+                    env.push("ANNOT_LEVEL_LINK_SUB="+annotLevelLink.subLevel);
+                    env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
+                    await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellinks"], env.concat(envVars));
+                }
+
+                //emudb-setlevelcanvasesorder
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "10", result: "Setting level canvases order" }));
+                let env = [];
+                env.push("ANNOT_LEVELS="+Buffer.from(JSON.stringify(msg.data.form.annotLevels)).toString('base64'));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
+                
+                //emudb-add-default-perspectives
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "11", result: "Adding default perspectives to EmuDB" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
+
+                //emudb-ssff-track-definitions
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "12", result: "Adding ssff track definitions" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-ssff-track-definitions"], env.concat(envVars));
+            }
+        }
+        else {
+            console.log("Skipping creation of standard directory structure");
+        }
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "13", result: "Copying documents" }));
+        await session.copyUploadedFiles();
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "14", result: "Copying project files to destination" }));
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "full-recursive-copy", "/home/project-setup", "/home/rstudio/project"], envVars);
+        
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "15", result: "Pushing to Git" }));
+        await session.commit();
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "end", result: "Done" }));
     }
 
     getSessionContainer( user, project, hsApp = "operations", volumes  = []) {
@@ -201,9 +340,18 @@ class ApiServer {
                     body += data;
                 });
                 incMsg.on('end', () => {
-                    let responseBody = JSON.parse(body);
-                    if(responseBody.body == "[]") {
-                        this.app.addLog("User not identified");
+                    try {
+                        let responseBody = JSON.parse(body);
+                        if(responseBody.body == "[]") {
+                            this.app.addLog("User not identified");
+                            resolve({
+                                authenticated: false
+                            });
+                            return;
+                        }
+                    }
+                    catch(error) {
+                        this.app.addLog("Failed parsing authentication response data", "error");
                         resolve({
                             authenticated: false
                         });
@@ -211,6 +359,12 @@ class ApiServer {
                     }
 
                     let userSession = JSON.parse(JSON.parse(body).body);
+                    if(typeof userSession.username == "undefined") {
+                        resolve({
+                            authenticated: false
+                        });
+                        return;
+                    }
                     this.app.addLog("Welcome user "+userSession.username);
                     resolve({
                         authenticated: true,
@@ -317,8 +471,15 @@ class ApiServer {
             if(sess !== false) {
                 sess.runCommand(runCmd, env).then((cmdOutput) => {
                     this.app.addLog("cmd output: "+cmdOutput, "debug");
+                    let cmdOutputParsed = "";
+                    try {
+                        cmdOutputParsed = JSON.parse(cmdOutput).body;
+                    }
+                    catch(error) {
+                        cmdOutputParsed = cmdOutput;
+                    }
                     //res.sendStatus(200);
-                    res.status(200).send(JSON.parse(cmdOutput).body).end();
+                    res.status(200).send(cmdOutputParsed).end();
                 });
             }
         });
