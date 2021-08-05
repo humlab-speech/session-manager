@@ -195,11 +195,15 @@ class ApiServer {
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "2", result: "Creating container" }));
 
+        //this is the path from within this container
+        let uploadsSrcDirLocal = "/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
+        
+        //this is the path from the os root
         let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
         console.log("Checking if directory "+uploadsSrcDir+" exists");
-        if(!fs.existsSync(uploadsSrcDir)) {
+        if(!fs.existsSync(uploadsSrcDirLocal)) {
             console.log("Directory "+uploadsSrcDir+" does not exist, creating it");
-            fs.mkdirSync(uploadsSrcDir, {
+            fs.mkdirSync(uploadsSrcDirLocal, {
                 recursive: true
             });
         }
