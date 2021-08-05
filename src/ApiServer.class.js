@@ -181,7 +181,6 @@ class ApiServer {
         //sanitize input
         let projectName = validator.escape(msg.data.form.projectName);
 
-        console.log("Creating project "+projectName);
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "1", result: "Creating project "+projectName }));
         
         //createGitlabProject
@@ -197,7 +196,9 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "2", result: "Creating container" }));
 
         let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
+        console.log("Checking if directory "+uploadsSrcDir+" exists");
         if(!fs.existsSync(uploadsSrcDir)) {
+            console.log("Directory "+uploadsSrcDir+" does not exist, creating it");
             fs.mkdirSync(uploadsSrcDir, {
                 recursive: true
             });
