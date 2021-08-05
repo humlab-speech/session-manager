@@ -200,9 +200,8 @@ class ApiServer {
         
         //this is the path from the os root
         let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
-        console.log("Checking if directory "+uploadsSrcDir+" exists");
         if(!fs.existsSync(uploadsSrcDirLocal)) {
-            console.log("Directory "+uploadsSrcDir+" does not exist, creating it");
+            this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
             fs.mkdirSync(uploadsSrcDirLocal, {
                 recursive: true
             });
