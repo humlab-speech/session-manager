@@ -7,7 +7,7 @@ const Session = require('../Session.class');
 class RstudioSession extends Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
         super(app, user, project, port, hsApp, volumes);
-        this.imageName = "hs-rstudio-session";
+        this.imageName = "visp-rstudio-session";
         this.port = 8787;
         this.rstudioPassword = process.env.RSTUDIO_PASSWORD;
         this.localProjectPath = "/home/rstudio/project";
@@ -35,14 +35,14 @@ class RstudioSession extends Session {
                 "PASSWORD="+this.rstudioPassword
             ],
             Labels: {
-                "hs.hsApp": this.hsApp.toString(),
-                "hs.userId": this.user.id.toString(),
-                "hs.projectId": this.project.id.toString(),
-                "hs.accessCode": this.accessCode.toString()
+                "visp.hsApp": this.hsApp.toString(),
+                "visp.userId": this.user.id.toString(),
+                "visp.projectId": this.project.id.toString(),
+                "visp.accessCode": this.accessCode.toString()
             },
             HostConfig: {
                 AutoRemove: true,
-                NetworkMode: "humlab-speech-deployment_hs-net",
+                NetworkMode: "humlab-speech-deployment_visp-net",
                 Mounts: mounts
             }
         };
