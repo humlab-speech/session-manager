@@ -308,7 +308,16 @@ class Session {
         ]).then(cmdResultString => {
             //Strip everything preceding the first { since it will just be garbage
             cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
-            let cmdResult = JSON.parse(cmdResultString);
+            let cmdResult = null;
+            try {
+                cmdResult = JSON.parse(cmdResultString);
+            }
+            catch(error) {
+                this.app.addLog(error, "error");
+                cmdResult = {
+                    body: "error"
+                };
+            }
             return cmdResult.body;
         });
     }

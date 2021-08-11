@@ -11,6 +11,7 @@ const Rx = require('rxjs');
 const validator = require('validator');
 const axios = require('axios');
 const fs = require('fs');
+const UserSession = require('./models/UserSession.class');
 
 class ApiServer {
     constructor(app) {
@@ -64,9 +65,18 @@ class ApiServer {
                     if(authResult.authenticated) {
                         this.wss.emit('connection', ws, request);
 
+                        let userSess = new UserSession(authResult.userSession);
+                        //If we didn't receive a complete dataset, that's bad
+                        if(userSess.isDataValidAndComplete() === false) {
+                            this.app.addLog("WebSocket init failed due to incomplete user session data", "warn");
+                            userSess.printWarnings();
+                            ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed').toJSON());
+                            ws.close(1000);
+                        }
+
                         let client = {
                             socket: ws,
-                            userSession: authResult.userSession
+                            userSession: userSess
                         };
 
                         this.wsClients.push(client);
@@ -102,7 +112,7 @@ class ApiServer {
     handleConnectionClosed(client) {
         //If this client has any active operations-sessions, kill them
         if(client.userSession) {
-            this.app.sessMan.getUserSessions(client.userSession.gitlabUser.id).forEach((session) => {
+            this.app.sessMan.getUserSessions(client.userSession.id).forEach((session) => {
                 if(session.type == "operations") {
                     this.shutdownSessionContainer(session.sessionCode);
                 }
@@ -132,6 +142,7 @@ class ApiServer {
         //received: {"cmd":"fetchOperationsSession","projectId":105}
         let msg = JSON.parse(message);
 
+        /*
         if(msg.type == "cmd") {
             switch(msg.message) {
                 case "fetchOperationsSession":
@@ -146,34 +157,187 @@ class ApiServer {
                     break;
             }
         }
+        */
 
         if(msg.cmd == "fetchOperationsSession") {
             //ws.send("Will totally spawn a new session container for you with "+msg.user.gitlabUsername+" and "+msg.project.id);
-            this.getSessionContainer(ws, msg.user, msg.project).then(session => {
-                ws.send(new WebSocketMessage(msg.context, 'data', session.accessCode).toJSON());
-                //ws.send(JSON.stringify({ type: "data", sessionAccessCode: session.accessCode }));
-            });
+            try {
+                this.getSessionContainer(msg.user, msg.project).then(session => {
+                    ws.send(new WebSocketMessage(msg.context, 'data', session.accessCode).toJSON());
+                    //ws.send(JSON.stringify({ type: "data", sessionAccessCode: session.accessCode }));
+                });
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
         }
 
         if(msg.cmd == "shutdownOperationsSession") {
-            this.app.addLog("Shutdown of session "+msg.sessionAccessCode);
-            this.shutdownSessionContainer(msg.sessionAccessCode).then((result) => {
-                ws.send(JSON.stringify({ type: "status-update", sessionClosed: msg.sessionAccessCode }));
-                //ws.close();
-            });
+            try {
+                this.app.addLog("Shutdown of session "+msg.sessionAccessCode);
+                this.shutdownSessionContainer(msg.sessionAccessCode).then((result) => {
+                    ws.send(JSON.stringify({ type: "status-update", sessionClosed: msg.sessionAccessCode }));
+                    //ws.close();
+                });
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }            
         }
 
-        if(msg.cmd == "scanEmuDb") {
-            this.app.addLog("Scanning emuDb in session "+msg.sessionAccessCode);
-            let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
-            session.runCommand("node /container-agent/main.js emudb-scan", []).then((emuDbScanResult) => {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
-            });
+        if(msg.cmd == "scanEmudb") {
+            try {
+                this.app.addLog("Scanning emuDb in session "+msg.sessionAccessCode);
+                let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
+                let envVars = [
+                    "PROJECT_PATH=/home/rstudio/project",
+                    "UPLOAD_PATH=/home/uploads"
+                ];
+                session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-scan"], envVars).then((emuDbScanResult) => {
+                    console.log(emuDbScanResult);
+                    ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
+                });
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
         }
 
         if(msg.cmd == "createProject") {
-            this.createProject(ws, msg);
+            try {
+                this.createProject(ws, msg);
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
         }
+
+        if(msg.cmd == "fetchSession") {
+            try {
+                let userSession = this.getUserSessionBySocket(ws);
+                let volumes = [];
+                let userSess = new UserSession(userSession);
+
+                //this is the path from within this container
+                const uploadsSrcDirLocal = "/mounts/edge-router/apache/uploads/"+userSession.id;
+                
+                //this is the path from the os root
+                const uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.id;
+                if(!fs.existsSync(uploadsSrcDirLocal)) {
+                    this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
+                    fs.mkdirSync(uploadsSrcDirLocal, {
+                        recursive: true
+                    });
+                }
+
+                volumes.push({
+                    source: uploadsSrcDir,
+                    target: '/home/uploads'
+                });
+
+                this.getSessionContainer(userSess, JSON.parse(msg.data).project, "operations", volumes).subscribe(status => {
+                    if(status.type == "status-update") {
+                        ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchSession", progress: "update", result: status.message }));
+                    }
+                    if(status.type == "data") {
+                        ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchSession", progress: "end", result: status.accessCode }));
+                    }
+                });
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
+        }
+
+        if(msg.cmd == "addSessions") {
+            try {
+                this.addSessions(ws, msg);
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
+        }
+
+        if(msg.cmd == "shutdownSession") {
+            try {
+                this.shutdownSession(ws, msg);
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
+        }
+
+    }
+
+    async addSessions(ws, msg) {
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "addSessions", 
+            progress: "1/5", 
+            result: "Initiating"
+        }));
+        let context = msg.data.context;
+        let form = msg.data.form;
+        let projectId = msg.data.projectId;
+        let sessionAccessCode = msg.data.sessionAccessCode;
+        let userSession = this.getUserSessionBySocket(ws);
+        let containerSession = this.app.sessMan.getSessionByCode(sessionAccessCode);
+        if(!containerSession) {
+            this.app.addLog("Couldn't find session for "+sessionAccessCode, "error");
+            return;
+        }
+
+        this.app.addLog("Will add emudb-session to container-session "+sessionAccessCode);
+
+        let envVars = [];
+        envVars.push("PROJECT_PATH=/home/rstudio/project");
+        let sessionsJsonB64 = Buffer.from(JSON.stringify(form.sessions)).toString("base64");
+        envVars.push("EMUDB_SESSIONS="+sessionsJsonB64);
+        envVars.push("UPLOAD_PATH=/home/uploads/"+context);
+
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "addSessions", 
+            progress: "2", 
+            result: "Creating sessions"
+        }));
+        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "addSessions", 
+            progress: "3", 
+            result: "Creating bundle lists"
+        }));
+        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "addSessions", 
+            progress: "4", 
+            result: "Pushing to Git"
+        }));
+        await containerSession.commit();
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "addSessions", 
+            progress: "5", 
+            result: "Shutting down session"
+        }));
+        await containerSession.delete();
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "addSessions", 
+            progress: "end", 
+            result: "Done"
+        }));
+    }
+
+    async shutdownSession(ws, msg) {
+        this.app.sessMan.deleteSession(msg.sessionAccessCode).then(() => {
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "shutdownSession", progress: "end", result: "Shutdown completed" }));
+        }).catch(() => {
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "shutdownSession", progress: "end", result: "Shutdown failed" }));
+        });
+        
     }
 
     async createProject(ws, msg) {
@@ -185,7 +349,7 @@ class ApiServer {
         
         //createGitlabProject
         let userSession = this.getUserSessionBySocket(ws);
-        let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/projects/user/"+userSession.gitlabUser.id+"?private_token="+this.app.gitlabAccessToken;
+        let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/projects/user/"+userSession.id+"?private_token="+this.app.gitlabAccessToken;
 
         let result = await axios.post(gitlabApiRequest, {
             name: projectName
@@ -196,10 +360,10 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "2", result: "Creating container" }));
 
         //this is the path from within this container
-        let uploadsSrcDirLocal = "/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
+        let uploadsSrcDirLocal = "/mounts/edge-router/apache/uploads/"+userSession.id+"/"+context;
         
         //this is the path from the os root
-        let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.gitlabUser.id+"/"+context;
+        let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.id+"/"+context;
         if(!fs.existsSync(uploadsSrcDirLocal)) {
             this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
             fs.mkdirSync(uploadsSrcDirLocal, {
@@ -220,11 +384,11 @@ class ApiServer {
             uploadsVolume,
             projectDirectoryTemplateVolume
         ];
-        const session = this.app.sessMan.createSession(userSession.gitlabUser, gitlabProject, 'operations', volumes);
+        const session = this.app.sessMan.createSession(userSession, gitlabProject, 'operations', volumes);
         await session.createContainer();
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "3", result: "Fetching from Git" }));
-        let credentials = userSession.gitlabUser.username+":"+this.app.gitlabAccessToken;
+        let credentials = userSession.username+":"+this.app.gitlabAccessToken;
         let gitOutput = await session.cloneProjectFromGit(credentials);
         
         let envVars = [
@@ -302,7 +466,7 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "end", result: "Done" }));
     }
 
-    getSessionContainer( user, project, hsApp = "operations", volumes  = []) {
+    getSessionContainer(user, project, hsApp = "operations", volumes  = []) {
         return new Rx.Observable(async (observer) => {
             observer.next({ type: "status-update", message: "Creating session" });
             let session = this.app.sessMan.createSession(user, project, hsApp, volumes);
