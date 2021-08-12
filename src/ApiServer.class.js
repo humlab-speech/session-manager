@@ -464,6 +464,7 @@ class ApiServer {
         await session.commit();
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "end", result: "Done" }));
+        await session.delete();
     }
 
     getSessionContainer(user, project, hsApp = "operations", volumes  = []) {
