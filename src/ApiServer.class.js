@@ -278,13 +278,17 @@ class ApiServer {
         }));
         let context = msg.data.context;
         let form = msg.data.form;
-        let projectId = msg.data.projectId;
         let sessionAccessCode = msg.data.sessionAccessCode;
-        let userSession = this.getUserSessionBySocket(ws);
         let containerSession = this.app.sessMan.getSessionByCode(sessionAccessCode);
         if(!containerSession) {
             this.app.addLog("Couldn't find session for "+sessionAccessCode, "error");
             return;
+        }
+
+        //Check that names are ok
+        for(let key in msg.data.form.sessions) {
+            msg.data.form.sessions[key].name = validator.escape(msg.data.form.sessions[key].name);
+            msg.data.form.sessions[key].name = msg.data.form.sessions[key].name.replace(/ /g, "_");
         }
 
         this.app.addLog("Will add emudb-session to container-session "+sessionAccessCode);
@@ -344,6 +348,13 @@ class ApiServer {
         let context = msg.data.context;
         //sanitize input
         let projectName = validator.escape(msg.data.form.projectName);
+
+        
+        //Check that names are ok
+        for(let key in msg.data.form.sessions) {
+            msg.data.form.sessions[key].name = validator.escape(msg.data.form.sessions[key].name);
+            msg.data.form.sessions[key].name = msg.data.form.sessions[key].name.replace(/ /g, "_");
+        }
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "1", result: "Creating project "+projectName }));
         
