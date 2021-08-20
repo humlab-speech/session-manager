@@ -11,6 +11,7 @@ const Rx = require('rxjs');
 const validator = require('validator');
 const axios = require('axios');
 const fs = require('fs');
+const mongodb = require('mongodb');
 const UserSession = require('./models/UserSession.class');
 
 class ApiServer {
@@ -19,6 +20,7 @@ class ApiServer {
         this.port = 8080;
         this.wsPort = 8020;
         this.wsClients = [];
+        this.mongoClient = null;
 
         this.expressApp = express();
         this.expressApp.use(bodyParser.urlencoded({ extended: true }));
@@ -51,6 +53,25 @@ class ApiServer {
         this.httpServer.listen(this.port);
     }
 
+    async connectToMongo() {
+        const mongodbUrl = 'mongodb://root:'+process.env.MONGO_ROOT_PASSWORD+'@mongo:27017';
+        this.mongoClient = new mongodb.MongoClient(mongodbUrl);
+        let db = null;
+        try {
+            await this.mongoClient.connect()
+            db = this.mongoClient.db("humlab_speech");
+        } catch(error) {
+            console.error(error);
+        }
+        return db;
+    }
+
+    disconnectFromMongo() {
+        if(this.mongoClient != null) {
+            this.mongoClient.close();
+        }
+    }
+
     startWsServer() {
         //We need a regular https-server which then can be 'upgraded' to a websocket server
         this.httpWsServer = http.createServer((req, res) => {
@@ -61,7 +82,7 @@ class ApiServer {
         this.httpWsServer.on('upgrade', (request, socket, head) => {
             this.app.addLog("Client requested WS upgrade - authenticating");
             this.wss.handleUpgrade(request, socket, head, (ws) => {
-                this.authenticateWebSocketUser(request).then((authResult) => {
+                this.authenticateWebSocketUser(request).then(async (authResult) => {
                     if(authResult.authenticated) {
                         this.wss.emit('connection', ws, request);
 
@@ -70,7 +91,7 @@ class ApiServer {
                         if(userSess.isDataValidAndComplete() === false) {
                             this.app.addLog("WebSocket init failed due to incomplete user session data", "warn");
                             userSess.printWarnings();
-                            ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed').toJSON());
+                            ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed - incomplete data').toJSON());
                             ws.close(1000);
                         }
 
@@ -79,6 +100,27 @@ class ApiServer {
                             userSession: userSess
                         };
 
+                        //If all is well this far, then the user has authenticated via keycloak and now has a valid session
+                        //but we still need to check if this user is also included in the access list or not
+                        const db = await this.connectToMongo();
+                        const usersCollection = db.collection("users");
+                        const usersList = await usersCollection.find({
+                            eppn: client.userSession.eppn
+                        }).toArray();
+                        
+                        this.disconnectFromMongo();
+
+                        if(usersList.length == 0) {
+                            //Couldn't find this user in the db
+                            ws.send(new WebSocketMessage('0', 'authentication-status', false).toJSON());
+                            //ws.close(1000);
+                            client.userSession.accessListValidationPass = false;
+                            return;
+                        }
+                        else {
+                            client.userSession.accessListValidationPass = true;
+                        }
+
                         this.wsClients.push(client);
                         
                         ws.on('message', message => this.handleIncomingWebSocketMessage(ws, message));
@@ -86,10 +128,10 @@ class ApiServer {
                             this.handleConnectionClosed(client);
                         });
 
-                        ws.send(new WebSocketMessage('0', 'status-update', 'Authenticated '+authResult.userSession.username).toJSON());
+                        ws.send(new WebSocketMessage('0', 'authentication-status', true).toJSON());
                     }
                     else {
-                        ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed').toJSON());
+                        ws.send(new WebSocketMessage('0', 'authentication-status', false).toJSON());
                         ws.close(1000);
                     }
                 });
@@ -138,8 +180,13 @@ class ApiServer {
     }
 
     handleIncomingWebSocketMessage(ws, message) {
-        //this.app.addLog('received: '+message);
-        //received: {"cmd":"fetchOperationsSession","projectId":105}
+        let client = this.getUserSessionBySocket(ws);
+        if(!client.accessListValidationPass) {
+            //Disallow the user to call any functions if they are not in the access list
+            this.app.addLog("User tried to call function without being in access list.");
+            ws.send(new WebSocketMessage('0', 'unathorized', 'You are not authorized to use this functionality').toJSON());
+            return;
+        }
         let msg = JSON.parse(message);
 
         /*
@@ -158,6 +205,16 @@ class ApiServer {
             }
         }
         */
+
+        if(msg.cmd == "accessListCheck") {
+            fs.readFile("/access-list.json", (error, data) => {
+                if (error) throw error;
+                console.log(data);
+                const accessList = JSON.parse(data);
+                console.log(accessList);
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "accessListCheck", result: accessList.includes(msg.username) }));
+            });
+        }
 
         if(msg.cmd == "fetchOperationsSession") {
             //ws.send("Will totally spawn a new session container for you with "+msg.user.gitlabUsername+" and "+msg.project.id);

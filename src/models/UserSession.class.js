@@ -18,6 +18,8 @@ class UserSession {
         this.email = userSession.email;
         this.username = userSession.username;
         this.personalAccessToken = userSession.personalAccessToken;
+        this.eppn = userSession.eppn;
+        this.accessListValidationPass = false;
         this.warnings = [];
 
         if(typeof this.id == "undefined") {
@@ -40,6 +42,9 @@ class UserSession {
         }
         if(typeof this.personalAccessToken == "undefined") {
             this.warnings.push("Created a new user session object with incomplete data, missing personalAccessToken");
+        }
+        if(typeof this.eppn == "undefined") {
+            this.warnings.push("Created a new user session object with incomplete data, missing eppn");
         }
     }
 
