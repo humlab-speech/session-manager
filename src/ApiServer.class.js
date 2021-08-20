@@ -28,14 +28,6 @@ class ApiServer {
         this.setupEndpoints();
         this.startServer();
         this.startWsServer();
-
-        /*
-        setInterval(() => {
-            this.wsClients.forEach(client => {
-                client.socket.send('heartbeat');
-            });
-        }, 1000);
-        */
     }
 
     startServer() {
@@ -85,7 +77,6 @@ class ApiServer {
                 this.authenticateWebSocketUser(request).then(async (authResult) => {
                     if(authResult.authenticated) {
                         this.wss.emit('connection', ws, request);
-
                         let userSess = new UserSession(authResult.userSession);
                         //If we didn't receive a complete dataset, that's bad
                         if(userSess.isDataValidAndComplete() === false) {
@@ -94,32 +85,15 @@ class ApiServer {
                             ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed - incomplete data').toJSON());
                             ws.close(1000);
                         }
-
                         let client = {
                             socket: ws,
                             userSession: userSess
                         };
-
                         //If all is well this far, then the user has authenticated via keycloak and now has a valid session
                         //but we still need to check if this user is also included in the access list or not
-                        const db = await this.connectToMongo();
-                        const usersCollection = db.collection("users");
-                        const usersList = await usersCollection.find({
-                            eppn: client.userSession.eppn
-                        }).toArray();
-                        
-                        this.disconnectFromMongo();
-
-                        if(usersList.length == 0) {
-                            //Couldn't find this user in the db
-                            this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not in the access list");
+                        if(await this.authorizeWebSocketUser(client) == false) {
                             ws.send(new WebSocketMessage('0', 'authentication-status', false).toJSON());
-                            //ws.close(1000);
-                            client.userSession.accessListValidationPass = false;
                             return;
-                        }
-                        else {
-                            client.userSession.accessListValidationPass = true;
                         }
 
                         this.wsClients.push(client);
@@ -611,6 +585,32 @@ class ApiServer {
                 });
             });
         });
+    }
+
+    async authorizeWebSocketUser(client) {
+        if(process.env.ACCESS_LIST_ENABLED == false) {
+            //If access list checking is not enabled, always pass the check
+            return true;
+        }
+        const db = await this.connectToMongo();
+        const usersCollection = db.collection("users");
+        const usersList = await usersCollection.find({
+            eppn: client.userSession.eppn
+        }).toArray();
+        
+        this.disconnectFromMongo();
+
+        if(usersList.length == 0) {
+            //Couldn't find this user in the db
+            this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not in the access list", "warn");
+            client.userSession.accessListValidationPass = false;
+        }
+        else {
+            this.app.addLog("User with eppn "+client.userSession.eppn+" authorized by being in the access list",);
+            client.userSession.accessListValidationPass = true;
+        }
+
+        return client.userSession.accessListValidationPass;
     }
 
     parseCookies (request) {
