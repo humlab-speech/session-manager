@@ -112,6 +112,7 @@ class ApiServer {
 
                         if(usersList.length == 0) {
                             //Couldn't find this user in the db
+                            this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not in the access list");
                             ws.send(new WebSocketMessage('0', 'authentication-status', false).toJSON());
                             //ws.close(1000);
                             client.userSession.accessListValidationPass = false;
