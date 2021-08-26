@@ -158,7 +158,7 @@ class ApiServer {
         let client = this.getUserSessionBySocket(ws);
         if(!client.accessListValidationPass) {
             //Disallow the user to call any functions if they are not in the access list
-            this.app.addLog("User tried to call function without being in access list.");
+            this.app.addLog("User ("+client.userSession.username+") tried to call function without being in access list.");
             ws.send(new WebSocketMessage('0', 'unathorized', 'You are not authorized to use this functionality').toJSON());
             return;
         }
@@ -488,9 +488,15 @@ class ApiServer {
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "11", result: "Adding default perspectives to EmuDB" }));
                 await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
 
+                /*
                 //emudb-ssff-track-definitions
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "12", result: "Adding ssff track definitions" }));
                 await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-ssff-track-definitions"], env.concat(envVars));
+                */
+
+                //emudb-track-definitions (reindeer)
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "12", result: "Adding track definitions" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
             }
         }
         else {
