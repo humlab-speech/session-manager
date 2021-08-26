@@ -239,7 +239,6 @@ class Session {
     }
 
     setupProxyServerIntoContainer(shortDockerContainerId) {
-
         this.proxyServer = httpProxy.createProxyServer({
             target: {
                 host: shortDockerContainerId,
