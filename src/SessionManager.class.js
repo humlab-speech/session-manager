@@ -13,15 +13,15 @@ class SessionManager {
       this.sessions = [];
       this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
-      /*
+      
       this.app.addLog("Waiting for Gitlab to come up...");
       this.isGitlabReadyInterval = setInterval(async () => {
         if(await this.isGitlabReady()) {
           clearInterval(this.isGitlabReadyInterval);
-          this.importSuspendedSessions();
+          //this.importSuspendedSessions();
         }
       }, 2000);
-      */
+      
       
     }
 
@@ -95,12 +95,12 @@ class SessionManager {
           //this.app.addLog("Gitlab is up");
           return true;
         } else {
-          this.app.addLog("Gitlab is down (1)");
+          //this.app.addLog("Gitlab is down (1)");
           return false;
         }
       })
       .catch(err => {
-        this.app.addLog("Gitlab is down (2)");
+        //this.app.addLog("Gitlab is down (2)");
         return false;
       });
     }
