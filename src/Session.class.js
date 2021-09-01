@@ -284,7 +284,7 @@ class Session {
             this.app.addLog("clone cmdResult: "+output, "DEBUG");
         });
 
-        this.app.addLog("CLONE COMPLETE", "DEBUG");
+        this.app.addLog("CLONE COMPLETE", "debug");
 
         await this.runCommand(["chown", "-R", this.containerUser+":", this.localProjectPath]).then(output => {
             this.app.addLog("chown cmdResult: "+output, "DEBUG");
