@@ -21,7 +21,7 @@ class ApiServer {
         this.wsPort = 8020;
         this.wsClients = [];
         this.mongoClient = null;
-
+        this.emuDbIntegrationEnabled = new String(process.env.EMUDB_INTEGRATION_ENABLED).toLowerCase() == "true";
         this.expressApp = express();
         this.expressApp.use(bodyParser.urlencoded({ extended: true }));
 
@@ -380,12 +380,13 @@ class ApiServer {
         let context = msg.data.context;
         //sanitize input
         let projectName = validator.escape(msg.data.form.projectName);
-
         
-        //Check that names are ok
-        for(let key in msg.data.form.sessions) {
-            msg.data.form.sessions[key].name = validator.escape(msg.data.form.sessions[key].name);
-            msg.data.form.sessions[key].name = msg.data.form.sessions[key].name.replace(/ /g, "_");
+        if(this.emuDbIntegrationEnabled) {
+            //Check that names are ok
+            for(let key in msg.data.form.sessions) {
+                msg.data.form.sessions[key].name = validator.escape(msg.data.form.sessions[key].name);
+                msg.data.form.sessions[key].name = msg.data.form.sessions[key].name.replace(/ /g, "_");
+            }
         }
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "1", result: "Creating project "+projectName }));
@@ -441,9 +442,12 @@ class ApiServer {
         //createStandardDirectoryStructure
         if(msg.data.form.standardDirectoryStructure) {
             ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "4", result: "Creating standard directory structure" }));
-            let sessionsEncoded = Buffer.from(JSON.stringify(msg.data.form.sessions)).toString('base64');
+            
+            if(this.emuDbIntegrationEnabled) {
+                let sessionsEncoded = Buffer.from(JSON.stringify(msg.data.form.sessions)).toString('base64');
+                envVars.push("EMUDB_SESSIONS="+sessionsEncoded);
+            }
 
-            envVars.push("EMUDB_SESSIONS="+sessionsEncoded);
             await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "copy-project-template-directory"], envVars);
 
             if(msg.data.form.createEmuDb) {
@@ -500,7 +504,7 @@ class ApiServer {
             }
         }
         else {
-            console.log("Skipping creation of standard directory structure");
+            this.app.addLog("Skipping creation of standard directory structure");
         }
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "13", result: "Copying documents" }));
