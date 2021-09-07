@@ -5,6 +5,7 @@ const { Docker } = require('node-docker-api');
 const ApiResponse = require('./ApiResponse.class');
 const RstudioSession = require('./Sessions/RstudioSession.class');
 const JupyterSession = require('./Sessions/JupyterSession.class');
+const VscodeSession = require('./Sessions/VscodeSession.class');
 const OperationsSession = require('./Sessions/OperationsSession.class');
 
 class SessionManager {
@@ -149,11 +150,17 @@ class SessionManager {
         case "operations":
           sess = new OperationsSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
           break;
+        case "vscode":
+          sess = new VscodeSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
+          break;
         default:
           this.app.addLog("Unknown hsApp type: "+hsApp, "error");
       }
       
-      this.sessions.push(sess);
+      if(sess != null) {
+        this.sessions.push(sess);
+      }
+      
       return sess;
     }
 
@@ -418,9 +425,14 @@ class SessionManager {
               //this.app.addLog("Importing existing session: App:"+hsApp+" User:"+userObj.id+" Proj:"+projObj.id, "debug");
               
               let session = this.createSession(userObj, projObj, hsApp);
-              session.setAccessCode(accessCode);
-              let shortDockerContainerId = session.importContainerId(c.id);
-              session.setupProxyServerIntoContainer(shortDockerContainerId);
+              if(session == null) {
+                reject();
+              }
+              else {
+                session.setAccessCode(accessCode);
+                let shortDockerContainerId = session.importContainerId(c.id);
+                session.setupProxyServerIntoContainer(shortDockerContainerId);
+              }
             });
 
             resolve();

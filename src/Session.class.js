@@ -170,7 +170,55 @@ class Session {
      * To be implemented in subclasses
      */
     getContainerConfig() {
-        return {};
+        let mounts = [];
+        for(let key in this.volumes) {
+            mounts.push({
+                Target: this.volumes[key]['target'],
+                Source: this.volumes[key]['source'],
+                Type: "bind",
+                Mode: "ro,Z",
+                RW: false,
+                ReadOnly: true
+            });
+        }
+
+        let config = {
+            Image: this.imageName,
+            name: this.getContainerName(this.user.id, this.project.id),
+            Env: [
+                "DISABLE_AUTH=true",
+                "PASSWORD="+this.rstudioPassword
+            ],
+            Labels: {
+                "visp.hsApp": this.hsApp.toString(),
+                "visp.userId": this.user.id.toString(),
+                "visp.projectId": this.project.id.toString(),
+                "visp.accessCode": this.accessCode.toString()
+            },
+            HostConfig: {
+                AutoRemove: true,
+                NetworkMode: "humlab-speech-deployment_visp-net",
+                Mounts: mounts,
+                Memory: 8000*1000*1000, //bytes
+                MemorySwap: 16000*1000*1000,
+                CpuShares: 512,
+            }
+        };
+        /*
+        config.Env = [
+            "DISABLE_AUTH=true",
+            "PASSWORD="+this.rstudioPassword
+        ];
+        */
+        
+        config.Labels = {
+            "visp.hsApp": this.hsApp.toString(),
+            "visp.userId": this.user.id.toString(),
+            "visp.projectId": this.project.id.toString(),
+            "visp.accessCode": this.accessCode.toString()
+        };
+
+        return config;
     }
     
 
