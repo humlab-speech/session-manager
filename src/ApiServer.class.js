@@ -251,10 +251,10 @@ class ApiServer {
                 let userSess = new UserSession(userSession);
 
                 //this is the path from within this container
-                const uploadsSrcDirLocal = "/mounts/edge-router/apache/uploads/"+userSession.id;
+                const uploadsSrcDirLocal = "/mounts/apache/apache/uploads/"+userSession.id;
                 
                 //this is the path from the os root
-                const uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.id;
+                const uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+userSession.id;
                 if(!fs.existsSync(uploadsSrcDirLocal)) {
                     this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
                     fs.mkdirSync(uploadsSrcDirLocal, {
@@ -404,10 +404,10 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "2", result: "Creating container" }));
 
         //this is the path from within this container
-        let uploadsSrcDirLocal = "/mounts/edge-router/apache/uploads/"+userSession.id+"/"+context;
+        let uploadsSrcDirLocal = "/mounts/apache/apache/uploads/"+userSession.id+"/"+context;
         
         //this is the path from the os root
-        let uploadsSrcDir = this.app.absRootPath+"/mounts/edge-router/apache/uploads/"+userSession.id+"/"+context;
+        let uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+userSession.id+"/"+context;
         if(!fs.existsSync(uploadsSrcDirLocal)) {
             this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
             fs.mkdirSync(uploadsSrcDirLocal, {
@@ -556,7 +556,7 @@ class ApiServer {
         }
 
         return new Promise((resolve, reject) => {
-            http.get("http://edge-router/api/api.php?f=session", options, (incMsg) => {
+            http.get("http://apache/api/api.php?f=session", options, (incMsg) => {
                 let body = "";
                 incMsg.on('data', (data) => {
                     body += data;
