@@ -482,15 +482,17 @@ class ApiServer {
                     await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellinks"], env.concat(envVars));
                 }
 
-                //emudb-setlevelcanvasesorder
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "10", result: "Setting level canvases order" }));
+                
+                
                 let env = [];
                 env.push("ANNOT_LEVELS="+Buffer.from(JSON.stringify(msg.data.form.annotLevels)).toString('base64'));
-                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
-                
                 //emudb-add-default-perspectives
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "11", result: "Adding default perspectives to EmuDB" }));
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "10", result: "Adding default perspectives to EmuDB" }));
                 await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
+
+                //emudb-setlevelcanvasesorder
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "11", result: "Setting level canvases order" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
 
                 /*
                 //emudb-ssff-track-definitions
@@ -501,23 +503,27 @@ class ApiServer {
                 //emudb-track-definitions (reindeer)
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "12", result: "Adding track definitions" }));
                 await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
+
+                //emudb-setsignalcanvasesorder
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "13", result: "Setting signal canvases order" }));
+                await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
             }
         }
         else {
             this.app.addLog("Skipping creation of standard directory structure");
         }
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "13", result: "Copying documents" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "14", result: "Copying documents" }));
         await session.copyUploadedFiles();
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "14", result: "Copying project files to destination" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "15", result: "Copying project files to destination" }));
         await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "full-recursive-copy", "/home/project-setup", "/home/rstudio/project"], envVars);
         
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "15", result: "Pushing to Git" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "16", result: "Pushing to Git" }));
         await session.commit();
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "end", result: "Done" }));
-        await session.delete();
+        //await session.delete();
     }
 
     getSessionContainer(user, project, hsApp = "operations", volumes  = []) {
