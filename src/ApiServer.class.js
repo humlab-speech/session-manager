@@ -305,7 +305,7 @@ class ApiServer {
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "addSessions", 
-            progress: "1/5", 
+            progress: "1/6", 
             result: "Initiating"
         }));
         let context = msg.data.context;
@@ -321,6 +321,11 @@ class ApiServer {
         for(let key in msg.data.form.sessions) {
             msg.data.form.sessions[key].name = validator.escape(msg.data.form.sessions[key].name);
             msg.data.form.sessions[key].name = msg.data.form.sessions[key].name.replace(/ /g, "_");
+        }
+
+        //Make sure that age is a number, not a string
+        for(let sessionKey in msg.data.form.sessions) {
+            msg.data.form.sessions[sessionKey].speakerAge = parseInt(msg.data.form.sessions[sessionKey].speakerAge);
         }
 
         this.app.addLog("Will add emudb-session to container-session "+sessionAccessCode);
@@ -345,17 +350,28 @@ class ApiServer {
             result: "Creating bundle lists"
         }));
         await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
+
+        /*
+        ws.send(JSON.stringify({
+            type: "cmd-result", 
+            cmd: "createProject", 
+            progress: "4", 
+            result: "Adding track definitions" 
+        }));
+        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        */
+
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "addSessions", 
-            progress: "4", 
+            progress: "5", 
             result: "Pushing to Git"
         }));
         await containerSession.commit();
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "addSessions", 
-            progress: "5", 
+            progress: "6", 
             result: "Shutting down session"
         }));
         await containerSession.delete();
@@ -444,6 +460,11 @@ class ApiServer {
             ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "4", result: "Creating standard directory structure" }));
             
             if(this.emuDbIntegrationEnabled) {
+                //Make sure that age is a number, not a string
+                for(let sessionKey in msg.data.form.sessions) {
+                    msg.data.form.sessions[sessionKey].speakerAge = parseInt(msg.data.form.sessions[sessionKey].speakerAge);
+                }
+
                 let sessionsEncoded = Buffer.from(JSON.stringify(msg.data.form.sessions)).toString('base64');
                 envVars.push("EMUDB_SESSIONS="+sessionsEncoded);
             }
@@ -481,7 +502,6 @@ class ApiServer {
                     env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
                     await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellinks"], env.concat(envVars));
                 }
-
                 
                 
                 let env = [];
