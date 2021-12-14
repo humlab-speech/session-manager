@@ -19,7 +19,8 @@ class RstudioSession extends Session {
 
         config.Env = [
             "DISABLE_AUTH=true",
-            "PASSWORD="+this.rstudioPassword
+            "PASSWORD="+this.rstudioPassword,
+            //"RSP_LICENSE=None"
         ];
 
         return config;

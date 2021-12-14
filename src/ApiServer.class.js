@@ -305,7 +305,7 @@ class ApiServer {
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "addSessions", 
-            progress: "1/6", 
+            progress: "1/5", 
             result: "Initiating"
         }));
         let context = msg.data.context;
@@ -351,7 +351,7 @@ class ApiServer {
         }));
         await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
 
-        /*
+        
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "createProject", 
@@ -359,7 +359,7 @@ class ApiServer {
             result: "Adding track definitions" 
         }));
         await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
-        */
+        
 
         ws.send(JSON.stringify({
             type: "cmd-result", 
@@ -371,15 +371,8 @@ class ApiServer {
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "addSessions", 
-            progress: "6", 
-            result: "Shutting down session"
-        }));
-        await containerSession.delete();
-        ws.send(JSON.stringify({
-            type: "cmd-result", 
-            cmd: "addSessions", 
             progress: "end", 
-            result: "Done"
+            result: "Shutting down session"
         }));
     }
 
