@@ -330,11 +330,14 @@ class ApiServer {
 
         this.app.addLog("Will add emudb-session to container-session "+sessionAccessCode);
 
+        let userSession = this.getUserSessionBySocket(ws);
+
         let envVars = [];
         envVars.push("PROJECT_PATH=/home/rstudio/project");
         let sessionsJsonB64 = Buffer.from(JSON.stringify(form.sessions)).toString("base64");
         envVars.push("EMUDB_SESSIONS="+sessionsJsonB64);
         envVars.push("UPLOAD_PATH=/home/uploads/"+context);
+        envVars.push("BUNDLE_LIST_NAME="+userSession.getBundleListName());
 
         ws.send(JSON.stringify({
             type: "cmd-result", 
@@ -443,10 +446,11 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "3", result: "Fetching from Git" }));
         let credentials = userSession.username+":"+this.app.gitlabAccessToken;
         let gitOutput = await session.cloneProjectFromGit(credentials);
-        
+
         let envVars = [
             "PROJECT_PATH=/home/project-setup",
-            "UPLOAD_PATH=/home/uploads"
+            "UPLOAD_PATH=/home/uploads",
+            "BUNDLE_LIST_NAME="+userSession.getBundleListName()
         ];
         //createStandardDirectoryStructure
         if(msg.data.form.standardDirectoryStructure) {

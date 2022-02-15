@@ -48,6 +48,10 @@ class UserSession {
         }
     }
 
+    getBundleListName() {
+        return this.firstName.toLowerCase()+"."+this.lastName.toLowerCase();
+    }
+
     isDataValidAndComplete() {
         return this.warnings.length == 0;
     }
