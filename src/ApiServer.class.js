@@ -257,9 +257,14 @@ class ApiServer {
                 const uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+userSession.id;
                 if(!fs.existsSync(uploadsSrcDirLocal)) {
                     this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
-                    fs.mkdirSync(uploadsSrcDirLocal, {
-                        recursive: true
-                    });
+                    try {
+                        fs.mkdirSync(uploadsSrcDirLocal, {
+                            recursive: true
+                        });
+                    }
+                    catch(error) {
+                        this.app.addLog("Failed creating directory "+uploadsSrcDir+". "+error.toString(), "error");
+                    }
                 }
 
                 volumes.push({
@@ -422,9 +427,14 @@ class ApiServer {
         let uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+userSession.id+"/"+context;
         if(!fs.existsSync(uploadsSrcDirLocal)) {
             this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
-            fs.mkdirSync(uploadsSrcDirLocal, {
-                recursive: true
-            });
+            try {
+                fs.mkdirSync(uploadsSrcDirLocal, {
+                    recursive: true
+                });
+            }
+            catch(error) {
+                this.app.addLog("Failed creating directory "+uploadsSrcDir+". "+error.toString(), "error");
+            }
         }
         
         //createSession

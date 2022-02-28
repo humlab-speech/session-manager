@@ -197,7 +197,7 @@ class Session {
             },
             HostConfig: {
                 AutoRemove: true,
-                NetworkMode: "humlab-speech-deployment_visp-net",
+                NetworkMode: process.env.COMPOSE_PROJECT_NAME+"_visp-net",
                 Mounts: mounts,
                 Memory: 8000*1000*1000, //bytes
                 MemorySwap: 16000*1000*1000,
