@@ -48,7 +48,7 @@ class Application {
     let printMsg = logMsg+" ["+levelMsgColor+"] "+msg;
     let writeMsg = logMsg+" ["+levelMsg+"] "+msg+"\n";
     
-    let logFile = "./session-manager.log";
+    let logFile = "logs/session-manager.log";
     switch(level) {
       case 'info':
         console.log(printMsg);
