@@ -418,6 +418,14 @@ class ApiServer {
 
         const gitlabProject = result.data;
 
+        //Set default project branch to 'unprotected' so that users with the 'developer' role can push to it
+        gitlabApiRequest = this.app.gitlabAddress+"/api/v4/projects/"+gitlabProject.id+"/protected_branches?private_token="+this.app.gitlabAccessToken;
+        await axios.post(gitlabApiRequest, {
+            name: "master",
+            push_access_level: 30,
+            merge_access_level: 30
+        });
+
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "2", result: "Creating container" }));
 
         //this is the path from within this container
