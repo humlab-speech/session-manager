@@ -46,6 +46,8 @@ class UserSession {
         if(typeof this.eppn == "undefined") {
             this.warnings.push("Created a new user session object with incomplete data, missing eppn");
         }
+
+        return this.warnings;
     }
 
     getBundleListName() {

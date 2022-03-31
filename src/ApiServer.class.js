@@ -81,7 +81,9 @@ class ApiServer {
                         //If we didn't receive a complete dataset, that's bad
                         if(userSess.isDataValidAndComplete() === false) {
                             this.app.addLog("WebSocket init failed due to incomplete user session data", "warn");
-                            userSess.printWarnings();
+                            userSess.warnings.forEach(warning => {
+                                this.app.addLog(warning, "WARN");
+                            });
                             ws.send(new WebSocketMessage('0', 'status-update', 'Authentication failed - incomplete data').toJSON());
                             ws.close(1000);
                         }
@@ -181,6 +183,10 @@ class ApiServer {
         }
         */
 
+        if(msg.cmd == "updateBundleLists") {
+            this.updateBundleLists(ws, msg);
+        }
+
         if(msg.cmd == "accessListCheck") {
             fs.readFile("/access-list.json", (error, data) => {
                 if (error) throw error;
@@ -226,7 +232,6 @@ class ApiServer {
                     "UPLOAD_PATH=/home/uploads"
                 ];
                 session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-scan"], envVars).then((emuDbScanResult) => {
-                    console.log(emuDbScanResult);
                     ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
                 });
             }
@@ -304,6 +309,28 @@ class ApiServer {
             }
         }
 
+    }
+
+    async updateBundleLists(ws, msg) {
+        try {
+            this.app.addLog("Updating bundle lists in emuDb");
+            let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
+            let envVars = [
+                "PROJECT_PATH=/home/rstudio/project",
+                "UPLOAD_PATH=/home/uploads",
+                "BUNDLE_LISTS="+new Buffer.from(JSON.stringify(msg.data)).toString("base64")
+            ];
+            
+            await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-update-bundle-lists"], envVars).then((result) => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "updateBundleLists", progress: "1/2", session: msg.sessionAccessCode, result: result }));
+            });
+            await session.commit().then((result) => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "updateBundleLists", progress: "2", session: msg.sessionAccessCode, result: result }));
+            });
+        }
+        catch(error) {
+            this.app.addLog(error, "error")
+        }
     }
 
     async addSessions(ws, msg) {

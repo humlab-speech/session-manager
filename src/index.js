@@ -29,6 +29,8 @@ class Application {
 
     let levelMsgColor = levelMsg;
 
+    if(levelMsg == "WARNING") { levelMsg = "WARN"; }
+
     switch(levelMsg) {
       case "INFO":
         levelMsgColor = colors.green(levelMsg);
