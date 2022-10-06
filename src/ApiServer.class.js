@@ -51,7 +51,7 @@ class ApiServer {
         let db = null;
         try {
             await this.mongoClient.connect()
-            db = this.mongoClient.db("humlab_speech");
+            db = this.mongoClient.db("visp");
         } catch(error) {
             console.error(error);
         }
@@ -666,7 +666,7 @@ class ApiServer {
     }
 
     async authorizeWebSocketUser(client) {
-        if(process.env.ACCESS_LIST_ENABLED == false) {
+        if(process.env.ACCESS_LIST_ENABLED == 'false') {
             //If access list checking is not enabled, always pass the check
             return true;
         }
