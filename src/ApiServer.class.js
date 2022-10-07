@@ -579,13 +579,13 @@ class ApiServer {
         await session.copyUploadedFiles();
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "15", result: "Copying project files to destination" }));
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "full-recursive-copy", "/home/project-setup", "/home/rstudio/project"], envVars);
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "full-recursive-copy", "/home/project-setup", "/home/rstudio/project", "root"], envVars);
         
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "16", result: "Pushing to Git" }));
         await session.commit();
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "end", result: "Done" }));
-        //await session.delete();
+        await session.delete();
     }
 
     getSessionContainer(user, project, hsApp = "operations", volumes  = []) {
@@ -668,7 +668,8 @@ class ApiServer {
     async authorizeWebSocketUser(client) {
         if(process.env.ACCESS_LIST_ENABLED == 'false') {
             //If access list checking is not enabled, always pass the check
-            return true;
+            client.userSession.accessListValidationPass = true;
+            return client.userSession.accessListValidationPass;
         }
         const db = await this.connectToMongo();
         const usersCollection = db.collection("users");
