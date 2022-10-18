@@ -579,8 +579,11 @@ class ApiServer {
         await session.copyUploadedFiles();
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "15", result: "Copying project files to destination" }));
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "full-recursive-copy", "/home/project-setup", "/home/rstudio/project", "root"], envVars);
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "full-recursive-copy", "/home/project-setup", "/home/rstudio/project"], envVars);
         
+        //ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "16", result: "Running chown on project directory" }));
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "chown-directory", "/home/rstudio/project", "root:root"], envVars);
+
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createProject", progress: "16", result: "Pushing to Git" }));
         await session.commit();
 
