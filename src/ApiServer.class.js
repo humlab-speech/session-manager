@@ -277,7 +277,8 @@ class ApiServer {
                     target: '/home/uploads'
                 });
 
-                this.getSessionContainer(userSess, JSON.parse(msg.data).project, "operations", volumes).subscribe(status => {
+                let data = JSON.parse(msg.data);
+                this.getSessionContainer(userSess, data.project, "operations", volumes, data.options).subscribe(status => {
                     if(status.type == "status-update") {
                         ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchSession", progress: "update", result: status.message }));
                     }
@@ -591,7 +592,7 @@ class ApiServer {
         await session.delete();
     }
 
-    getSessionContainer(user, project, hsApp = "operations", volumes  = []) {
+    getSessionContainer(user, project, hsApp = "operations", volumes  = [], options = []) {
         return new Rx.Observable(async (observer) => {
             observer.next({ type: "status-update", message: "Creating session" });
             let session = this.app.sessMan.createSession(user, project, hsApp, volumes);
@@ -599,7 +600,12 @@ class ApiServer {
             let containerId = await session.createContainer();
             let credentials = user.username+":"+user.personalAccessToken;
             observer.next({ type: "status-update", message: "Cloning project" });
-            let gitOutput = await session.cloneProjectFromGit(credentials);
+            
+            let cloneOptions = [];
+            if(options.includes("sparse")) {
+                cloneOptions.push("sparse");
+            }
+            let gitOutput = await session.cloneProjectFromGit(credentials, cloneOptions);
             observer.next({ type: "status-update", message: "Session ready" });
             this.app.addLog("Creating container complete");
             observer.next({ type: "data", accessCode: session.accessCode });
