@@ -61,13 +61,7 @@ class Session {
             streamData += data.toString();
           });
           stream.on('end', () => {
-            let startOfJson = streamData.indexOf("{");
-            if(startOfJson == -1) {
-                this.app.addLog("Cmd stream returned non-json data: "+streamData);
-            }
-            else {
-                streamData = streamData.substr(startOfJson); //Strip leading garbage
-            }
+            streamData = this.reduceToJson(streamData);
             resolve(streamData);
           });
           stream.on('error', (data) => {
@@ -75,6 +69,20 @@ class Session {
             reject();
           });
         });
+    }
+
+    reduceToJson(data) {
+        let startOfJson = data.indexOf("{");
+        let endOfJson = data.lastIndexOf("}");
+
+        if(startOfJson == -1 || endOfJson == -1) {
+            this.app.addLog("Could not reduce to JSON: "+data);
+        }
+        else {
+            data = data.substring(startOfJson); //Strip leading garbage
+            data = data.substring(0, endOfJson+1); //Strip trailing garbage
+        }
+        return data;
     }
 
     async runCommand(cmd, env = []) {

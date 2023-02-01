@@ -187,7 +187,7 @@ class SessionManager {
     routeToApp(req, res = null, socket = null, ws = false, head = null) {
         let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
         if(sessionAccessCode === false) {
-          this.app.addLog("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request!", "warn");
+          this.app.addLog("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request! (1)", "warn");
           return false;
         }
         
@@ -204,7 +204,7 @@ class SessionManager {
     routeToAppWs(req, socket, head) {
       let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
       if(sessionAccessCode === false) {
-        this.app.addLog("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request!", "warn");
+        this.app.addLog("Couldn't perform routing to app because we couldn't get a sessionAccessCode from the request! (2)", "warn");
         return false;
       }
       

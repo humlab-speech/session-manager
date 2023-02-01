@@ -28,6 +28,17 @@ class ApiServer {
         this.setupEndpoints();
         this.startServer();
         this.startWsServer();
+        this.fetchAccessList().then(accessList => {
+            this.accessList = accessList;
+        });
+    }
+
+    async fetchAccessList() {
+        const db = await this.connectToMongo();
+        const usersCollection = db.collection("users");
+        let accessList = await usersCollection.find({}).toArray();
+        this.disconnectFromMongo();
+        return accessList;
     }
 
     startServer() {
@@ -310,6 +321,12 @@ class ApiServer {
             }
         }
 
+        if(msg.cmd == "createSprProject") {
+            this.app.addLog("Received cmd to createSprProject");
+            //Proxy this request to the wsrng-server
+            
+        }
+
     }
 
     async updateBundleLists(ws, msg) {
@@ -379,6 +396,7 @@ class ApiServer {
             result: "Creating sessions"
         }));
         await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+
         ws.send(JSON.stringify({
             type: "cmd-result", 
             cmd: "addSessions", 
@@ -395,7 +413,6 @@ class ApiServer {
             result: "Adding track definitions" 
         }));
         await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
-        
 
         ws.send(JSON.stringify({
             type: "cmd-result", 
@@ -680,6 +697,8 @@ class ApiServer {
             client.userSession.accessListValidationPass = true;
             return client.userSession.accessListValidationPass;
         }
+
+        /*
         const db = await this.connectToMongo();
         const usersCollection = db.collection("users");
         const usersList = await usersCollection.find({
@@ -687,8 +706,16 @@ class ApiServer {
         }).toArray();
         
         this.disconnectFromMongo();
+        */
 
-        if(usersList.length == 0) {
+        let foundUserInAccessList = false;
+        this.accessList.forEach(user => {
+            if(user.eppn == client.userSession.eppn) {
+                foundUserInAccessList = true;
+            }
+        });
+
+        if(!foundUserInAccessList) {
             //Couldn't find this user in the db
             this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not in the access list", "warn");
             client.userSession.accessListValidationPass = false;
@@ -810,6 +837,10 @@ class ApiServer {
             }
         });
 
+        this.expressApp.get('/api/accesslist/:user', (req, res) => {
+            console.log(req.params.user);
+        });
+
         //This asks to create a new session for this user/project
         this.expressApp.post('/api/session/user', (req, res) => {
             let user = JSON.parse(req.body.gitlabUser);
@@ -890,6 +921,13 @@ class ApiServer {
 
         this.expressApp.get('/api/session/commit/user/:user_id/project/:project_id/projectpath/:project_path', (req, res) => {
             this.app.addLog("Received request to commit session for user", req.params.user_id, "and project", req.params.project_id);
+        });
+
+        this.expressApp.post('/api/spr', (req, res) => {
+            //This is an endpoint for handling incoming new spr-sessions from the speech recorder server
+            //So this will contain a bundle of wav files which should be added as a new session to a project
+            //The project id and the new session name will be designated in the incoming data
+            res.end();
         });
     }
 
