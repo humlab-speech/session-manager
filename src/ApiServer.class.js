@@ -13,6 +13,7 @@ const axios = require('axios');
 const fs = require('fs');
 const mongodb = require('mongodb');
 const UserSession = require('./models/UserSession.class');
+const nanoid = require("nanoid");
 
 class ApiServer {
     constructor(app) {
@@ -24,6 +25,7 @@ class ApiServer {
         this.emuDbIntegrationEnabled = new String(process.env.EMUDB_INTEGRATION_ENABLED).toLowerCase() == "true";
         this.expressApp = express();
         this.expressApp.use(bodyParser.urlencoded({ extended: true }));
+        //this.expressApp.use(bodyParser.json());
 
         this.setupEndpoints();
         this.startServer();
@@ -44,6 +46,11 @@ class ApiServer {
     startServer() {
         this.httpServer = http.createServer(this.expressApp);
         this.httpServer.on('request', (req, res) => {
+            if(req.url == "/api/importaudiofiles") {
+                //special case for this
+                return;
+            }
+
             if(!req.headers.hs_api_access_token) {
                 this.app.sessMan.routeToApp(req, res);
             }
@@ -56,13 +63,18 @@ class ApiServer {
         this.httpServer.listen(this.port);
     }
 
-    async connectToMongo() {
+    async connectToMongo(database = "visp") {
+        //check if this.mongoClient is already an active mongodb connection
+        if(this.mongoClient != null) {
+            return this.mongoClient.db(database);
+        }
+
         const mongodbUrl = 'mongodb://root:'+process.env.MONGO_ROOT_PASSWORD+'@mongo:27017';
         this.mongoClient = new mongodb.MongoClient(mongodbUrl);
         let db = null;
         try {
             await this.mongoClient.connect()
-            db = this.mongoClient.db("visp");
+            db = this.mongoClient.db(database);
         } catch(error) {
             console.error(error);
         }
@@ -72,6 +84,7 @@ class ApiServer {
     disconnectFromMongo() {
         if(this.mongoClient != null) {
             this.mongoClient.close();
+            this.mongoClient = null;
         }
     }
 
@@ -105,9 +118,15 @@ class ApiServer {
                         //If all is well this far, then the user has authenticated via keycloak and now has a valid session
                         //but we still need to check if this user is also included in the access list or not
                         if(await this.authorizeWebSocketUser(client) == false) {
-                            ws.send(new WebSocketMessage('0', 'authentication-status', false).toJSON());
+                            ws.send(new WebSocketMessage('0', 'authentication-status', {
+                                result: false,
+                                reason: authResult.reason
+                            }).toJSON());
                             return;
                         }
+
+                        //If we have a valid user session, we can now create a gitlab user for this user (if it doesn't exist already)
+                        //this.createGitlabUser(client.userSession); //this is already being done in the webapi - so nevermind
 
                         this.wsClients.push(client);
                         
@@ -116,10 +135,15 @@ class ApiServer {
                             this.handleConnectionClosed(client);
                         });
 
-                        ws.send(new WebSocketMessage('0', 'authentication-status', true).toJSON());
+                        ws.send(new WebSocketMessage('0', 'authentication-status', {
+                            result: true
+                        }).toJSON());
                     }
                     else {
-                        ws.send(new WebSocketMessage('0', 'authentication-status', false).toJSON());
+                        ws.send(new WebSocketMessage('0', 'authentication-status', {
+                            result: false,
+                            reason: authResult.reason
+                        }).toJSON());
                         ws.close(1000);
                     }
                 });
@@ -128,6 +152,39 @@ class ApiServer {
 
         this.httpWsServer.listen(this.wsPort);
     }
+
+    /*
+    async createGitlabUser(userSession) {
+        console.log("Checking gitlab user for "+userSession.eppn);
+        console.log(userSession);
+
+        let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/users?search="+userSession.eppn+"&private_token="+this.app.gitlabAccessToken;
+        let result = await axios.get(gitlabApiRequest);
+        let userList = result.data;
+        if(userList.length == 0) {
+            //addLog message about creating user
+            console.log("Gitlab user not found, creating it.");
+
+            //User doesn't exist, create it
+            let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/users?private_token="+this.app.gitlabAccessToken;
+
+            let postData = {
+                username: userSession.username,
+                email: userSession.email,
+                external: false,
+                extern_uid: userSession.eppn,
+                name: userSession.fullName,
+                organization: "",
+                skip_confirmation: true
+            }
+            console.log(postData)
+            //let result = await axios.post(gitlabApiRequest, postData);
+        }
+        else {
+            console.log("Gitlab user found");
+        }
+    }
+    */
 
     getUserSessionBySocket(ws) {
         for(let key in this.wsClients) {
@@ -168,6 +225,8 @@ class ApiServer {
     }
 
     handleIncomingWebSocketMessage(ws, message) {
+        this.app.addLog("Received: "+message, "debug");
+
         let client = this.getUserSessionBySocket(ws);
         if(!client.accessListValidationPass) {
             //Disallow the user to call any functions if they are not in the access list
@@ -175,24 +234,80 @@ class ApiServer {
             ws.send(new WebSocketMessage('0', 'unathorized', 'You are not authorized to use this functionality').toJSON());
             return;
         }
-        let msg = JSON.parse(message);
-
-        /*
-        if(msg.type == "cmd") {
-            switch(msg.message) {
-                case "fetchOperationsSession":
-                    this.getSessionContainer(msg.params.user, msg.params.project).subscribe(data => {
-                        if(data.type == "status-update") {
-                            ws.send(new WebSocketMessage(msg.context, 'status-update', data.message).toJSON());
-                        }
-                        if(data.type == "data") {
-                            ws.send(new WebSocketMessage(msg.context, 'data', data.accessCode).toJSON());
-                        }
-                    });
-                    break;
-            }
+        let msg = null;
+        try {
+            msg = JSON.parse(message);
         }
-        */
+        catch(err) {
+            this.app.addLog("Failed parsing incoming websocket message as JSON. Message was: "+message, "error");
+        }
+
+        if(msg == null) {
+            this.app.addLog("Received unparsable websocket message, ignoring.", "warning");
+            return;
+        }
+
+        if(msg.cmd == "fetchSprScripts") {
+            this.fetchSprScripts(ws, msg.data.userId);
+        }
+
+        if(msg.cmd == "saveSprScripts") {
+            this.saveSprScripts(ws, msg.data.scripts, msg.data.ownerId);
+        }
+
+        if(msg.cmd == "deleteSprScript") {
+            this.deleteSprScript(ws, msg.data.scriptId);
+        }
+
+        if(msg.cmd == "fetchSprData") {
+            this.fetchSprData(ws, msg);
+        }
+
+        if(msg.cmd == "fetchSprSession") {
+            this.fetchSprSession(msg.data.sprSessionId).then(result => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result }));
+            });
+        }
+
+        if(msg.cmd == "fetchSprScriptBySessionId") {
+            this.fetchSprScriptBySessionId(msg.data.sprSessionId).then(result => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result, requestId: msg.requestId }));
+            });
+        }
+
+        if(msg.cmd == "createSprSessions") {
+            this.createSprSessions(ws, msg);
+        }
+
+        if(msg.cmd == "route-to-ca") {
+            this.app.addLog("route-to-ca "+msg.caCmd+" "+msg.appSession, "debug");
+            let session = this.app.sessMan.getSessionByCode(msg.appSession);
+            if(!session) {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.caCmd, session: msg.appSession, result: "Error - no such session" }));
+                return;
+            }
+            
+            let envVars = [];
+            msg.env.forEach(pair => {
+                envVars.push(pair.key+"="+pair.value);
+            });
+
+            session.runCommand(["/usr/bin/node", "/container-agent/main.js", msg.caCmd], envVars).then((result) => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.caCmd, session: msg.appSession, result: result }));
+            });
+        }
+
+        if(msg.cmd == "save") {
+            this.app.addLog("save", "debug");
+            let session = this.app.sessMan.getSessionByCode(msg.appSession);
+            if(!session) {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.caCmd, session: msg.appSession, result: "Error - no such session" }));
+                return;
+            }
+            session.commit().then(result => {
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, session: msg.appSession, result: result }));
+            });
+        }
 
         if(msg.cmd == "updateBundleLists") {
             this.updateBundleLists(ws, msg);
@@ -245,6 +360,15 @@ class ApiServer {
                 session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-scan"], envVars).then((emuDbScanResult) => {
                     ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
                 });
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
+        }
+
+        if(msg.cmd == "uploadFile") {
+            try {
+                this.receiveFileUpload(ws, msg);
             }
             catch(error) {
                 this.app.addLog(error, "error")
@@ -322,11 +446,196 @@ class ApiServer {
         }
 
         if(msg.cmd == "createSprProject") {
-            this.app.addLog("Received cmd to createSprProject");
-            //Proxy this request to the wsrng-server
-            
+            this.app.addLog("Received cmd to createSprProject "+msg.project.name);
+            this.createSprProject(msg.project.name, ws);
         }
 
+        if(msg.cmd == "createEmuDb") {
+            this.app.addLog("createEmuDb", "debug");
+            this.createEmuDb(ws, msg);
+        }
+
+        /*
+        if(msg.cmd == "importEmuDbSessions") {
+            this.app.addLog("createEmuDb", "debug");
+            this.importEmuDbSessions(ws, msg.appSession);
+        }
+        */
+    }
+
+    createSprProject(projectName, ws = null) {
+        //insert the project into the database
+        let project = {
+            projectId: nanoid.nanoid(),
+            name: projectName,
+            description: 'No description',
+            audioFormat: {
+                channels: 1
+            },
+            speakerWindowShowStopRecordAction: true,
+            recordingDeviceWakeLock: true
+        };
+        
+        this.connectToMongo("wsrng").then((db) => {
+            //First, check if the project already exists
+            db.collection("projects").find({ name: parseInt(project.name) }).toArray().then((result) => {
+                if(result.length > 0) {
+                    this.app.addLog("Project "+project.name+" already exists in database. Ignoring request.", "info");
+                    if(ws != null) {
+                        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createSprProject", result: "ERROR", message: "Project already exists in database" }));
+                    }
+                }
+                else {
+                    this.app.addLog("Project "+project.name+" does not exist in database", "debug");
+                    this.connectToMongo("wsrng").then((db) => {
+                        db.collection("projects").insertOne(project).then((result) => {
+                            this.app.addLog("Inserted project "+project.name+" into spr database", "debug");
+                            if(ws != null) {
+                                ws.send(JSON.stringify({ type: "cmd-result", cmd: "createSprProject", result: "OK" }));
+                            }
+                        });
+                    });
+                }
+            });
+        });
+
+        return project;
+    }
+
+    async fetchSprScripts(ws, userId) {
+        const db = await this.connectToMongo("wsrng");
+
+        let query = {};
+        if(userId != null && parseInt(userId)) {
+            query = { ownerId: userId };
+        }
+        //fetch all with this user OR with sharing set to 'all'
+        query = { $or: [ { ownerId: userId }, { sharing: 'all' } ] }
+
+        let scripts = await db.collection("scripts").find(query).toArray();
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchSprScripts", result: scripts }));
+    }
+
+    async fetchSprData(ws, msg) {
+        //fetch speech recorder project data from mongodb
+        this.app.addLog("fetchSprData "+msg.projectId, "debug");
+        const db = await this.connectToMongo("wsrng");
+        let sprProject = await db.collection("projects").findOne({ name: parseInt(msg.projectId) });
+
+        if(typeof sprProject == "undefined") {
+            //Couldn't find the project in the database
+            this.app.addLog("SPR project ("+msg.projectId+") not found in database", "warning");
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: "ERROR: Project not found in database" }));
+            return;
+        }
+
+        sprProject.sessions = await db.collection("sessions").find({ project: parseInt(msg.projectId) }).toArray();
+        this.disconnectFromMongo();
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: "OK", data: sprProject }));
+    }
+
+    async createSprSessions(ws, msg) {
+        this.app.addLog("createSprSessions", "debug");
+
+        let db = await this.connectToMongo("wsrng");
+        let collection = db.collection("sessions");
+
+        for(let key in msg.sessions) {
+            let session = msg.sessions[key];
+            let result = await collection.findOne({ project: session.projectId, sessionId: session.sessionId });
+            if(!result) {
+                this.app.addLog("Did not find spr session "+session.sessionId+" in mongodb, creating it.", "debug");
+                await collection.insertOne({
+                    project: session.projectId,
+                    sessionId: session.sessionId,
+                    sessionName: session.sessionName,
+                    script: session.sessionScript,
+                    debugMode: false,
+                    type: 'NORM',
+                    status: 'CREATED',
+                    sealed: false
+                });
+            }
+            else {
+                this.app.addLog("Found spr session "+session.sessionId+" in mongodb, skipping.", "debug");
+            }
+        }
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: "OK" }));
+    }
+
+    async saveSprScripts(ws, scripts, ownerId) {
+
+        //convert scripts to spr format
+        let sprScripts = [];
+        for(let key in scripts) {
+            let script = scripts[key];
+
+            let sprScript = {
+                name: script.name,
+                type: "script",
+                scriptId: script.scriptId,
+                ownerId: ownerId,
+                sharing: script.sharing, //'none' or 'all', perhaps more in the future, such as 'project'
+                sections: [{
+                    name: "Recording Session",
+                    order: "SEQUENTIAL",
+                    training: false,
+                    speakerDisplay: true,
+                    groups: [{
+                        promptItems: []
+                    }]
+                }]
+            };
+
+            for(let promptKey in script.prompts) {
+                let prompt = script.prompts[promptKey];
+                let promptItem = {
+                    itemcode: prompt.itemcode,
+                    recinstructions: {
+                        recinstructions: "Say the following"
+                    },
+                    mediaitems: [
+                        {
+                            annotationTemplate: false,
+                            autoplay: false,
+                            mimetype: 'text/plain',
+                            text: prompt.value
+                        }
+                    ]
+                };
+                if(prompt.value != "") { //ignore empty prompts
+                    sprScript.sections[0].groups[0].promptItems.push(promptItem);
+                }
+            }
+
+            sprScripts.push(sprScript);
+        }
+
+        //save scripts to mongodb
+        this.app.addLog("Saving SPR scripts", "info");
+        this.connectToMongo("wsrng").then(async (db) => {
+            for(let key in sprScripts) {
+                let script = sprScripts[key];
+                //replace if exists
+                let found = await db.collection("scripts").findOne({scriptId: script.scriptId });
+                if(found) {
+                    await db.collection("scripts").replaceOne({ scriptId: script.scriptId }, script);
+                }
+                else {
+                    await db.collection("scripts").insertOne(script);
+                }
+            }
+            
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveSprScripts", result: "OK" }));
+        });
+    }
+
+    async deleteSprScript(ws, scriptId) {
+        this.connectToMongo("wsrng").then(async (db) => {
+            await db.collection("scripts").deleteOne({ scriptId: scriptId });
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteScript", result: "OK" }));
+        });
     }
 
     async updateBundleLists(ws, msg) {
@@ -436,6 +745,189 @@ class ApiServer {
             ws.send(JSON.stringify({ type: "cmd-result", cmd: "shutdownSession", progress: "end", result: "Shutdown failed" }));
         });
         
+    }
+
+    async createEmuDbSessions(ws, msg) {
+        let sessions = [{
+            sessionId: "", //upload path context
+            name: "",
+            speakerGender: "",
+            speakerAge: "",
+            files: [] //don't even need this, the R script will import all the files it finds in the target dir, which is UPLOAD_PATH/emudb-sessions/sessionId
+        }];
+        let envVars = [
+            "PROJECT_PATH=/home/rstudio/project",
+            "UPLOAD_PATH=/unimported_audio",
+            "EMUDB_SESSIONS="+Buffer.from(JSON.stringify(sessions)).toString('base64')
+        ];
+        //emudb-create-sessions
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDbSessions", progress: "done" }));
+    }
+
+    async createAnnotationLevels(ws, msg) {
+        //emudb-create-annotlevels
+        let envVars = [];
+        
+        for(let key in msg.data.form.emuDb.annotLevels) {
+            let env = [];
+            let annotLevel = msg.data.form.emuDb.annotLevels[key];
+            env.push("ANNOT_LEVEL_DEF_NAME="+annotLevel.name);
+            env.push("ANNOT_LEVEL_DEF_TYPE="+annotLevel.type);
+            await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevels"], env.concat(envVars));
+        }
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createAnnotationLevels", progress: "done" }));
+    }
+
+    async createAnnotationLevelLinks(ws, msg) {
+         //emudb-create-annotlevellinks
+         for(let key in msg.data.form.emuDb.annotLevelLinks) {
+             let env = [];
+             let annotLevelLink = msg.data.form.emuDb.annotLevelLinks[key];
+             env.push("ANNOT_LEVEL_LINK_SUPER="+annotLevelLink.superLevel);
+             env.push("ANNOT_LEVEL_LINK_SUB="+annotLevelLink.subLevel);
+             env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
+             await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellinks"], env.concat(envVars));
+         }
+
+         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createAnnotationLevelLinks", progress: "done" }));
+    }
+
+    async createEmuDbDefaultPerspectives(ws, msg) {
+        let env = [];
+        env.push("ANNOT_LEVELS="+Buffer.from(JSON.stringify(msg.data.form.emuDb.annotLevels)).toString('base64'));
+        //emudb-add-default-perspectives
+        
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
+    }
+
+    async setEmuDbLevelCanvasesOrder(ws, msg) {
+        //emudb-setlevelcanvasesorder
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
+    }
+    
+    async setEmuDbTrackDefinitions(ws, msg) {
+        //emudb-track-definitions (reindeer)
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "12", result: "Adding track definitions" }));
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
+    }
+
+    async setEmuDbSignalCanvasesOrder(ws, msg) {
+        //emudb-setsignalcanvasesorder
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "13", result: "Setting signal canvases order" }));
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
+    }
+
+    async createEmuDb(ws, msg) {
+        const session = this.app.sessMan.getSessionByCode(msg.appSession);
+        
+        let envVars = [
+            //"PROJECT_PATH=/home/project-setup",
+            "PROJECT_PATH=/home/rstudio/project",
+            //"UPLOAD_PATH=/home/uploads",
+            "UPLOAD_PATH=/unimported_audio",
+            //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
+            "EMUDB_SESSIONS=[]"
+        ];
+
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
+
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
+    }
+
+    async importEmuDbSessions2(req, res) {
+        console.log("importEmuDbSessions")
+        console.log(req.body);
+        let projectId = req.body.projectId;
+        let sprSessionId = req.body.sessionId;
+
+        
+
+        if(!parseInt(projectId)) {
+            res.status(400).send("Invalid project ID");
+            return;
+        }
+
+        //fetch spr session from mongodb
+        let sprSession = await this.fetchSprSession(sprSessionId);
+        let project = await this.fetchGitlabProject(projectId);
+        let user = await this.fetchGitlabUser(project.owner.id);
+
+        //spawn a new session
+        const session = this.app.sessMan.createSession(user, project, "operations");
+        session.cloneProjectFromGit(credentials, options = []);
+
+        let emuDbSessions = [{
+            sessionId: sprSessionId,
+            sessionName: sprSession.name
+        }];
+        
+
+        let envVars = [
+            "PROJECT_PATH=/home/rstudio/project", //used to load the emuDB
+            "UPLOAD_PATH=/home/project/Data/unimported_audio/"+sprSessionId, //this + sessionId
+            "EMUDB_SESSIONS=[]" //here we need sessionId, sessionName
+        ];
+
+        //emudb-create-sessions
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "6", result: "Creating EmuDB sessions" }));
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+
+        session.commit();
+        session.delete();
+    }
+
+    async fetchSprSession(sessionId) {
+        //fetch from mongo
+        let db = await this.connectToMongo("wsrng");
+        const sessionsCollection = db.collection("sessions");
+        const sprSession = await sessionsCollection.findOne({ sessionId: sessionId });
+        return sprSession;
+    }
+
+    async fetchSprScript(scriptId) {
+         //fetch from mongo
+         let db = await this.connectToMongo("wsrng");
+         const sessionsCollection = db.collection("scripts");
+         const sprScript = await sessionsCollection.findOne({ scriptId: scriptId });
+         return sprScript;
+    }
+
+    async fetchSprScriptBySessionId(sessionId) {
+        let sprSession = await this.fetchSprSession(sessionId);
+        let sprScript = null;
+        if(sprSession) {
+            sprScript = await this.fetchSprScript(sprSession.script);
+        }
+        return sprScript;
+    }
+
+    async receiveFileUpload(ws, msg) {
+        let userSession = this.getUserSessionBySocket(ws);
+        const unimportedAudioPath = "/unimported_audio/"+userSession.id;
+        let path = unimportedAudioPath+"/"+msg.data.projectId+"/"+msg.data.sessionName;
+        console.log(path);
+        let fileBinaryData = Buffer.from(msg.data.file, 'base64');
+        let mkdirRes = await fs.promises.mkdir(path, { recursive: true });
+        
+        let writeRes = await fs.promises.writeFile(path+"/"+msg.data.fileName, fileBinaryData);
+        this.app.addLog("Wrote file "+path);
+
+
+        
+        //let container = this.getSessionByCode(msg.appSession);
+        /*
+        container.runCommand("mkdir -p "+unimportedAudioPath+"/"+msg.data.sessionName);
+        container.container.fs.put('./file.tar', {
+            path: 'root'
+        });
+        */
+
     }
 
     async createProject(ws, msg) {
@@ -661,7 +1153,8 @@ class ApiServer {
                         if(responseBody.body == "[]") {
                             this.app.addLog("User not identified");
                             resolve({
-                                authenticated: false
+                                authenticated: false,
+                                reason: "User not identified"
                             });
                             return;
                         }
@@ -669,7 +1162,8 @@ class ApiServer {
                     catch(error) {
                         this.app.addLog("Failed parsing authentication response data", "error");
                         resolve({
-                            authenticated: false
+                            authenticated: false,
+                            reason: "Failed parsing authentication response data"
                         });
                         return;
                     }
@@ -677,7 +1171,8 @@ class ApiServer {
                     let userSession = JSON.parse(JSON.parse(body).body);
                     if(typeof userSession.username == "undefined") {
                         resolve({
-                            authenticated: false
+                            authenticated: false,
+                            reason: "Session not valid"
                         });
                         return;
                     }
@@ -748,8 +1243,98 @@ class ApiServer {
         return new ApiResponse(200, JSON.stringify(container));
     }
 
+    async fetchGitlabUser(userId) {
+        let config = {
+            headers: {
+                'PRIVATE-TOKEN': this.app.gitlabAccessToken
+            }
+        }
+
+        return await axios.get("http://gitlab/api/v4/users/"+userId, config);
+    }
+
+    async fetchGitlabProject(projectId) {
+        let config = {
+            headers: {
+                'PRIVATE-TOKEN': this.app.gitlabAccessToken
+            }
+        }
+
+        return await axios.get("http://gitlab/api/v4/projects/"+projectId, config);
+    }
+
+    async importAudioFiles(projectId, sessionId) {
+        this.app.addLog("Importing audio files for session "+sessionId+", project " + projectId);
+        //Check that this session exists in this project
+        this.app.addLog("Hooking up to the mongo-bongo", "debug");
+        let db = await this.connectToMongo("wsrng");
+        const sessionsCollection = db.collection("sessions");
+        const sprSession = await sessionsCollection.findOne({ sessionId: sessionId });
+        if(!sprSession || sprSession.project != projectId) {
+            this.app.addLog("Session "+sessionId+" not found in project "+projectId, "error");
+            return new ApiResponse(404, "Session not found in project");
+        }
+        this.disconnectFromMongo();
+        db = await this.connectToMongo("visp");
+        //spawn new container session
+        const gitlabProject = await this.fetchGitlabProject(projectId);
+        let userData = gitlabProject.data.owner;
+        userData.firstName = userData.name.split(" ")[0];
+        userData.lastName = userData.name.substring(userData.name.indexOf(" ")+1);
+        //get mongo personal access token
+        const usersCollection = db.collection("personal_access_tokens");
+        const userPAT = await usersCollection.findOne({
+            userId: parseInt(userData.id)
+        });
+        this.disconnectFromMongo();
+        if(!userPAT) {
+            this.app.addLog("User with id "+userData.id+" was not in the db", "warn");
+            return new ApiResponse(403, "User not found in database");
+        }
+
+        userData.personalAccessToken = userPAT.pat;
+        const userSession = new UserSession(userData);
+        
+        let volumes = [];
+        const session = this.app.sessMan.createSession(userSession, gitlabProject.data, 'operations', volumes);
+        await session.createContainer();
+
+        let credentials = userSession.username+":"+userData.personalAccessToken;
+        let gitOutput = await session.cloneProjectFromGit(credentials);
+
+        let sessions = [{
+            sessionId: sessionId,
+            name: sprSession.sessionName,
+            speakerGender: "", //unused
+            speakerAge: "", //unused
+            files: [] //unused
+        }];
+        let sessionsJsonB64 = Buffer.from(JSON.stringify(sessions)).toString("base64");
+        let envVars = [
+            "PROJECT_PATH=/home/rstudio/project", // + /home/project/Data/VISP_emuDB
+            "UPLOAD_PATH=/home/rstudio/project/Data/unimported_audio",
+            "BUNDLE_LIST_NAME="+userSession.getBundleListName(),
+            "EMUDB_SESSIONS="+sessionsJsonB64,
+            "WRITE_META_JSON=false"
+        ];
+
+        //emudb-create-sessions
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        await session.commit();
+
+        return new ApiResponse(200, "Audio files imported");
+    }
+
     setupEndpoints() {
         
+        this.expressApp.post('/api/importaudiofiles', (req, res) => {
+            this.app.addLog('importAudioFiles', "debug");
+            this.importAudioFiles(req.body.projectId, req.body.sessionId).then((ar) => {
+                res.status(ar.code).end(ar.toJSON());
+            });
+        });
+
         this.expressApp.get('/api/isgitlabready', (req, res) => {
             //this.app.addLog('isGitlabReady');
             this.app.sessMan.isGitlabReady().then((gitlabIsReady) => {
@@ -851,6 +1436,14 @@ class ApiServer {
             if(typeof req.body.volumes != "undefined") {
                 volumes = JSON.parse(req.body.volumes);
             }
+            else {
+                let unimportedAudioPath = process.env.ABS_ROOT_PATH+"/mounts/session-manager/unimported_audio/"+user.id;
+                fs.mkdirSync(unimportedAudioPath, { recursive: true });
+                volumes.push({
+                    source: unimportedAudioPath,
+                    target: "/unimported_audio"
+                });
+            }
             
             this.app.addLog("Received request access "+hsApp+" session for user "+user.id+" and project "+project.id+" with session "+req.body.appSession);
             this.app.addLog("Volumes:");
@@ -861,28 +1454,32 @@ class ApiServer {
             //Check for existing sessions
             let session = this.app.sessMan.getSession(user.id, project.id, hsApp);
             if(session === false) {
-            this.app.addLog("No existing session was found, creating container");
-            
-            (async () => {
+                this.app.addLog("No existing session was found, creating container");
+                
+                (async () => {
+                    let volumes = [{
+                        source: process.env.ABS_ROOT_PATH+"/mounts/apache/apache/uploads/"+user.id,
+                        target: "/unimported_audio"
+                    }];
 
-                let session = this.app.sessMan.createSession(user, project, hsApp);
-                let containerId = await session.createContainer();
-                let credentials = user.username+":"+gitlabPat;
-                let gitOutput = await session.cloneProjectFromGit(credentials);
+                    let session = this.app.sessMan.createSession(user, project, hsApp, volumes);
+                    let containerId = await session.createContainer();
+                    let credentials = user.username+":"+gitlabPat;
+                    let gitOutput = await session.cloneProjectFromGit(credentials);
 
-                return session;
-            })().then((session) => {
-                this.app.addLog("Creating container complete, sending project access code ("+session.accessCode+") to api/proxy");
+                    return session;
+                })().then((session) => {
+                    this.app.addLog("Creating container complete, sending project access code ("+session.accessCode+") to api/proxy");
+                    res.end(JSON.stringify({
+                        sessionAccessCode: session.accessCode
+                    }));
+                });
+            }
+            else {
+                this.app.addLog("Found existing session for user & project");
                 res.end(JSON.stringify({
                     sessionAccessCode: session.accessCode
                 }));
-            });
-            }
-            else {
-            this.app.addLog("Found existing session for user & project");
-            res.end(JSON.stringify({
-                sessionAccessCode: session.accessCode
-            }));
             }
 
         });
@@ -929,6 +1526,7 @@ class ApiServer {
             //The project id and the new session name will be designated in the incoming data
             res.end();
         });
+        
     }
 
     getCookies(req) {

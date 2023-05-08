@@ -357,25 +357,28 @@ class Session {
         this.app.addLog("GIT_USER_EMAIL="+this.user.email);
         this.app.addLog("GIT_BRANCH="+branch);
         this.app.addLog("PROJECT_PATH="+this.localProjectPath);
-        return await this.runCommand(["node", "/container-agent/main.js", "save"], [
-            "GIT_USER_NAME="+this.user.name,
-            "GIT_USER_EMAIL="+this.user.email,
-            "GIT_BRANCH="+branch,
-            "PROJECT_PATH="+this.localProjectPath
-        ]).then(cmdResultString => {
-            //Strip everything preceding the first { since it will just be garbage
-            cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
-            let cmdResult = null;
-            try {
-                cmdResult = JSON.parse(cmdResultString);
-            }
-            catch(error) {
-                this.app.addLog(error, "error");
-                cmdResult = {
-                    body: "error"
-                };
-            }
-            return cmdResult.body;
+
+        return new Promise((resolve, reject) => {
+            this.runCommand(["node", "/container-agent/main.js", "save"], [
+                "GIT_USER_NAME="+this.user.name,
+                "GIT_USER_EMAIL="+this.user.email,
+                "GIT_BRANCH="+branch,
+                "PROJECT_PATH="+this.localProjectPath
+            ]).then(cmdResultString => {
+                //Strip everything preceding the first { since it will just be garbage
+                cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
+                let cmdResult = null;
+                try {
+                    cmdResult = JSON.parse(cmdResultString);
+                }
+                catch(error) {
+                    this.app.addLog(error, "error");
+                    cmdResult = {
+                        body: "error"
+                    };
+                }
+                resolve(cmdResult.body);
+            });
         });
     }
 
