@@ -831,55 +831,12 @@ class ApiServer {
             "PROJECT_PATH=/home/rstudio/project",
             //"UPLOAD_PATH=/home/uploads",
             "UPLOAD_PATH=/unimported_audio",
-            //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
             "EMUDB_SESSIONS=[]"
         ];
 
         await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
-    }
-
-    async importEmuDbSessions2(req, res) {
-        console.log("importEmuDbSessions")
-        console.log(req.body);
-        let projectId = req.body.projectId;
-        let sprSessionId = req.body.sessionId;
-
-        
-
-        if(!parseInt(projectId)) {
-            res.status(400).send("Invalid project ID");
-            return;
-        }
-
-        //fetch spr session from mongodb
-        let sprSession = await this.fetchSprSession(sprSessionId);
-        let project = await this.fetchGitlabProject(projectId);
-        let user = await this.fetchGitlabUser(project.owner.id);
-
-        //spawn a new session
-        const session = this.app.sessMan.createSession(user, project, "operations");
-        session.cloneProjectFromGit(credentials, options = []);
-
-        let emuDbSessions = [{
-            sessionId: sprSessionId,
-            sessionName: sprSession.name
-        }];
-        
-
-        let envVars = [
-            "PROJECT_PATH=/home/rstudio/project", //used to load the emuDB
-            "UPLOAD_PATH=/home/project/Data/unimported_audio/"+sprSessionId, //this + sessionId
-            "EMUDB_SESSIONS=[]" //here we need sessionId, sessionName
-        ];
-
-        //emudb-create-sessions
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "6", result: "Creating EmuDB sessions" }));
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
-
-        session.commit();
-        session.delete();
     }
 
     async fetchSprSession(sessionId) {
@@ -1319,6 +1276,7 @@ class ApiServer {
         ];
 
         //emudb-create-sessions
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
         await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
         await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
         await session.commit();

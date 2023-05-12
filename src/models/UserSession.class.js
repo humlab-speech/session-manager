@@ -51,7 +51,12 @@ class UserSession {
     }
 
     getBundleListName() {
-        return this.firstName.toLowerCase()+"."+this.lastName.toLowerCase();
+        return this.username;
+        /*
+        this.firstName = this.firstName.replace(/ /g, "_");
+        this.lastName = this.lastName.replace(/ /g, "_");
+        return this.firstName.toLowerCase()+"_"+this.lastName.toLowerCase();
+        */
     }
 
     isDataValidAndComplete() {
