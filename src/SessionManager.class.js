@@ -13,17 +13,6 @@ class SessionManager {
       this.app = app;
       this.sessions = [];
       this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
-
-      
-      this.app.addLog("Waiting for Gitlab to come up...");
-      this.isGitlabReadyInterval = setInterval(async () => {
-        if(await this.isGitlabReady()) {
-          clearInterval(this.isGitlabReadyInterval);
-          //this.importSuspendedSessions();
-        }
-      }, 2000);
-      
-      
     }
 
     importSuspendedSessions() {
@@ -88,23 +77,6 @@ class SessionManager {
         session.exportToImage();
       });
     }
-
-    async isGitlabReady() {
-      return await fetch(this.app.gitlabAddress+"/api/v4/version?private_token="+this.app.gitlabAccessToken)
-      .then((res) => {
-        if (res.ok) { // res.status >= 200 && res.status < 300
-          //this.app.addLog("Gitlab is up");
-          return true;
-        } else {
-          //this.app.addLog("Gitlab is down (1)");
-          return false;
-        }
-      })
-      .catch(err => {
-        //this.app.addLog("Gitlab is down (2)");
-        return false;
-      });
-    }
     
     getContainerAccessCode() {
       let code = nanoid.nanoid(32);
@@ -123,17 +95,35 @@ class SessionManager {
       return false;
     }
 
-    getUserSessions(userId) {
-      this.app.addLog("Getting user sessions for user "+userId);
+    getSessionsByProjectId(projectId) {
+      let sessions = [];
+      this.sessions.forEach(session => {
+        if(session.project.id == projectId) {
+          sessions.push({
+            projectId: session.project.id,
+            username: session.user.username,
+            type: session.hsApp,
+            sessionAccessCode: session.accessCode
+          });
+        }
+      });
+      return sessions;
+    }
+
+    getUserSessions(username) {
+      this.app.addLog("Getting user sessions for user "+username);
       let userSessions = [];
       for(let key in this.sessions) {
-        if(this.sessions[key].user.id == userId) {
+        if(this.sessions[key].user.username == username) {
           userSessions.push({
             sessionCode: this.sessions[key].accessCode,
             projectId: this.sessions[key].project.id,
             type: this.sessions[key].hsApp
           });
         }
+      }
+      if(userSessions.length == 0) {
+        this.app.addLog("No sessions found for user "+username);
       }
       return userSessions;
     }
@@ -193,7 +183,7 @@ class SessionManager {
         
         let sess = this.getSessionByCode(sessionAccessCode);
         if(sess === false) {
-          this.app.addLog("Couldn't find a session with code "+sessionAccessCode, "warn");
+          this.app.addLog("Couldn't find a container session with code "+sessionAccessCode+" (1)", "warn");
           this.app.addLog(this.sessions);
           return false;
         }
@@ -210,7 +200,7 @@ class SessionManager {
       
       let sess = this.getSessionByCode(sessionAccessCode);
       if(sess === false) {
-        this.app.addLog("Couldn't find a session with code "+sessionAccessCode, "warn");
+        this.app.addLog("Couldn't find a container session with code "+sessionAccessCode+" (2)", "warn");
         this.app.addLog(this.sessions);
         return false;
       }
@@ -309,16 +299,26 @@ class SessionManager {
         }
     }
 
+    sessionDeletionCleanup(sessionId) {
+      //delete from the sessions array
+      for(let key in this.sessions) {
+        if(this.sessions[key].accessCode == sessionId) {
+          this.sessions.splice(key, 1);
+          return false;
+        }
+      }
+    }
+
     deleteSession(sessionId) {
       return new Promise((resolve, reject) => {
         let sess = this.getSessionByCode(sessionId);
         if(sess === false) {
-          reject(new ApiResponse(200, "Could not find session "+sessionId));
+          reject("Could not find session "+sessionId);
         }
 
         sess.delete().then(() => {
           this.removeSession(sess);
-          resolve(new ApiResponse(200, "Session "+sessionId+" deleted"));
+          resolve("Session deleted");
         });
       });
     }

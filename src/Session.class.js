@@ -35,8 +35,8 @@ class Session {
 
         let imageTag = new Date().toISOString().substr(0, 10);
         imageTag += "-"+this.hsApp;
-        imageTag += "-u"+this.user.id;
-        imageTag += "p"+this.project.id;
+        imageTag += "-u-"+this.user.username;
+        imageTag += "p-"+this.project.id;
 
         this.container.commit({
             tag: imageTag,
@@ -121,44 +121,9 @@ class Session {
         .catch((error) => this.app.addLog(error, "error"));
     }
 
-    /**
-     * Function: loadContainerId
-     * This is used to lookup/load the container ID during import of a running session/container, in which case only the userId, projectId and hsApp is known.
-     */
-    /*
-    async loadContainerId() {
-        await new Promise((resolve, reject) => {
-            this.docker.container.list().then(containers => {
-                let filteredList = containers.filter((container) => {
-                    return container.data.Image == "hird-rstudio-emu";
-                });
-    
-                let containerId = false;
-                filteredList.forEach((c) => {
-                    let hsApp = c.data.Labels['visp.hsApp'];
-                    let userId = c.data.Labels['visp.userId'];
-                    let projectId = c.data.Labels['visp.projectId'];
-                    if(this.hsApp == hsApp && userId == this.user.id && projectId == this.project.id) {
-                            containerId = c.id;
-                    }
-                });
-                if(containerId !== false) {
-                    this.importContainerId(containerId);
-                }
-                else {
-                    this.app.addLog("Failed to find session container!", "error");
-                }
-                resolve();
-            });
-        });
-
-        return this.shortDockerContainerId;
-    }
-    */
-
     getContainerName(userId, projectId) {
         let salt = nanoid.nanoid(4);
-        return "hsapp-session-p"+projectId+"u"+userId+"-"+salt;
+        return "hsapp-session-"+projectId+"-"+userId+"-"+salt;
     }
 
     importContainerId(dockerContainerId) {
@@ -184,31 +149,31 @@ class Session {
                 Target: this.volumes[key]['target'],
                 Source: this.volumes[key]['source'],
                 Type: "bind",
-                Mode: "ro,Z",
-                RW: false,
-                ReadOnly: true
+                Mode: "rw,Z",
+                RW: true,
+                ReadOnly: false
             });
         }
 
         let config = {
             Image: this.imageName,
-            name: this.getContainerName(this.user.id, this.project.id),
+            name: this.getContainerName(this.user.username, this.project.id),
             Env: [
                 "DISABLE_AUTH=true",
                 "PASSWORD="+this.rstudioPassword
             ],
             Labels: {
                 "visp.hsApp": this.hsApp.toString(),
-                "visp.userId": this.user.id.toString(),
+                "visp.username": this.user.username.toString(),
                 "visp.projectId": this.project.id.toString(),
                 "visp.accessCode": this.accessCode.toString()
             },
             HostConfig: {
-                AutoRemove: true,
+                AutoRemove: false,
                 NetworkMode: process.env.COMPOSE_PROJECT_NAME+"_visp-net",
                 Mounts: mounts,
-                Memory: 8000*1000*1000, //bytes
-                MemorySwap: 16000*1000*1000,
+                Memory: 8*1024*1024*1024, //bytes
+                MemorySwap: 16*1024*1024*1024,
                 CpuShares: 512,
             }
         };
@@ -221,7 +186,7 @@ class Session {
         
         config.Labels = {
             "visp.hsApp": this.hsApp.toString(),
-            "visp.userId": this.user.id.toString(),
+            "visp.username": this.user.username.toString(),
             "visp.projectId": this.project.id.toString(),
             "visp.accessCode": this.accessCode.toString()
         };
@@ -232,7 +197,7 @@ class Session {
 
     async createContainer() {
         this.app.addLog("Creating new project container");
-        this.app.addLog(this.hsApp+" "+this.user.id+" "+this.project.id);
+        this.app.addLog(this.hsApp+" "+this.user.username+" "+this.project.id);
 
         let dockerContainerId = null;
 
@@ -240,7 +205,8 @@ class Session {
 
         this.app.addLog("containerConfig: "+JSON.stringify(containerConfig), "debug");
 
-        let shortDockerContainerId = await this.docker.container.create(containerConfig)
+        return new Promise(async (resolve, reject) => {
+            this.docker.container.create(containerConfig)
             .then(container => {
                 this.app.addLog("Container created - starting");
                 return container.start();
@@ -256,7 +222,10 @@ class Session {
                 this.app.addLog("Proxy server online");
                 return this.shortDockerContainerId;
             })
-            .catch(error => this.app.addLog("Docker container failed to start: "+error, "error"));
+            .catch(error => {
+                this.app.addLog("Docker container failed to start: "+error, "error");
+                reject(error);
+            });
 
             this.app.addLog("Waiting for session to become ready");
             let isSessionReady = false;
@@ -265,7 +234,10 @@ class Session {
                 isSessionReady = await this.isSessionReady();
             }
             let t1 = performance.now()
-            this.app.addLog("Session is ready after "+(t1 - t0)+" ms");
+            this.app.addLog("Session is ready after "+Math.round(t1 - t0)+" ms");
+
+            resolve(this.shortDockerContainerId);
+        });
     }
 
     /**
@@ -327,40 +299,16 @@ class Session {
 
     }
 
-    async cloneProjectFromGit(credentials, options = []) {
-        this.app.addLog("Cloning project into container");
-        let gitRepoUrl = "http://"+credentials+"@gitlab:80/"+this.project.path_with_namespace+".git";
-
-        let optionsStr = options.join(" ");
-
-        await this.runCommand(["node", "/container-agent/main.js", "clone", optionsStr], [
-            "GIT_USER_NAME="+this.user.name,
-            "GIT_USER_EMAIL="+this.user.email,
-            "GIT_REPOSITORY_URL="+gitRepoUrl,
-            "PROJECT_PATH="+this.localProjectPath
-        ]).then(output => {
-            this.app.addLog("clone cmdResult: "+output, "DEBUG");
-        });
-
-        this.app.addLog("CLONE COMPLETE", "debug");
-
-        await this.runCommand(["chown", "-R", this.containerUser+":", this.localProjectPath]).then(output => {
-            this.app.addLog("chown cmdResult: "+output, "DEBUG");
-        });
-
-        this.app.addLog("Project cloned into container");
-    }
-
     async commit(branch = "master") {
         this.app.addLog("Committing project");
-        this.app.addLog("GIT_USER_NAME="+this.user.name);
+        this.app.addLog("GIT_USER_NAME="+this.user.firstName+" "+this.user.lastName);
         this.app.addLog("GIT_USER_EMAIL="+this.user.email);
         this.app.addLog("GIT_BRANCH="+branch);
         this.app.addLog("PROJECT_PATH="+this.localProjectPath);
 
         return new Promise((resolve, reject) => {
             this.runCommand(["node", "/container-agent/main.js", "save"], [
-                "GIT_USER_NAME="+this.user.name,
+                "GIT_USER_NAME="+this.user.firstName+" "+this.user.lastName,
                 "GIT_USER_EMAIL="+this.user.email,
                 "GIT_BRANCH="+branch,
                 "PROJECT_PATH="+this.localProjectPath
@@ -382,7 +330,7 @@ class Session {
         });
     }
 
-    async copyUploadedFiles() {
+    async copyUploadedDocs() {
         this.app.addLog("Copying uploaded files");
         this.app.addLog("PROJECT_PATH="+this.localProjectPath);
         return await this.runCommand(["node", "/container-agent/main.js", "copy-docs"], [
@@ -390,8 +338,7 @@ class Session {
         ]).then(cmdResultString => {
             //Strip everything preceding the first '{' since it will just be garbage
             cmdResultString = cmdResultString.substring(cmdResultString.indexOf("{"));
-            let cmdResult = JSON.parse(cmdResultString);
-            return cmdResult.body;
+            return cmdResultString;
         });
     }
 
@@ -424,7 +371,7 @@ class Session {
 
 
     async delete() {
-        this.app.addLog("Deleting session "+this.accessCode);
+        this.app.addLog("Shuttting down container session "+this.accessCode);
         
         //This will stop new connections but not close existing ones
         try {
@@ -445,6 +392,9 @@ class Session {
         catch(error) {
             this.app.addLog("Session error at container stop: "+error, "error");
         }
+
+        //notify the session manager that this session is now deleted
+        this.app.sessMan.sessionDeletionCleanup(this.sessionCode);
         
         return {
             status: "ok"

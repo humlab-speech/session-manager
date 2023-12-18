@@ -11,13 +11,12 @@ class UserSession {
     }
 
     importData(userSession) {
-        this.id = userSession.id;
+        this.id = userSession.username;
         this.firstName = userSession.firstName;
         this.lastName = userSession.lastName;
         this.fullName = userSession.fullName;
         this.email = userSession.email;
         this.username = userSession.username;
-        this.personalAccessToken = userSession.personalAccessToken;
         this.eppn = userSession.eppn;
         this.accessListValidationPass = false;
         this.warnings = [];
@@ -39,9 +38,6 @@ class UserSession {
         }
         if(typeof this.username == "undefined") {
             this.warnings.push("Created a new user session object with incomplete data, missing username");
-        }
-        if(typeof this.personalAccessToken == "undefined") {
-            this.warnings.push("Created a new user session object with incomplete data, missing personalAccessToken");
         }
         if(typeof this.eppn == "undefined") {
             this.warnings.push("Created a new user session object with incomplete data, missing eppn");
