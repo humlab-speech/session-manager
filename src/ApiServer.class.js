@@ -229,39 +229,6 @@ class ApiServer {
         this.httpWsServer.listen(this.wsPort);
     }
 
-    /*
-    async createGitlabUser(userSession) {
-        console.log("Checking gitlab user for "+userSession.eppn);
-        console.log(userSession);
-
-        let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/users?search="+userSession.eppn+"&private_token="+this.app.gitlabAccessToken;
-        let result = await axios.get(gitlabApiRequest);
-        let userList = result.data;
-        if(userList.length == 0) {
-            //addLog message about creating user
-            console.log("Gitlab user not found, creating it.");
-
-            //User doesn't exist, create it
-            let gitlabApiRequest = this.app.gitlabAddress+"/api/v4/users?private_token="+this.app.gitlabAccessToken;
-
-            let postData = {
-                username: userSession.username,
-                email: userSession.email,
-                external: false,
-                extern_uid: userSession.eppn,
-                name: userSession.fullName,
-                organization: "",
-                skip_confirmation: true
-            }
-            console.log(postData)
-            //let result = await axios.post(gitlabApiRequest, postData);
-        }
-        else {
-            console.log("Gitlab user found");
-        }
-    }
-    */
-
     getUserSessionBySocket(ws) {
         for(let key in this.wsClients) {
             if(this.wsClients[key].socket === ws) {
@@ -2378,26 +2345,7 @@ session-manager_1    | }
         console.log(container);
 
         return new ApiResponse(200, JSON.stringify(container));
-    }
 
-    async fetchGitlabUser(userId) {
-        let config = {
-            headers: {
-                'PRIVATE-TOKEN': this.app.gitlabAccessToken
-            }
-        }
-
-        return await axios.get("http://gitlab/api/v4/users/"+userId, config);
-    }
-
-    async fetchGitlabProject(projectId) {
-        let config = {
-            headers: {
-                'PRIVATE-TOKEN': this.app.gitlabAccessToken
-            }
-        }
-
-        return await axios.get("http://gitlab/api/v4/projects/"+projectId, config);
     }
 
     async importAudioFiles(projectId, sessionId) {
