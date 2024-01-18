@@ -9,7 +9,6 @@ const Modem = require('docker-modem');
 const WebSocketMessage = require('./WebSocketMessage.class');
 const Rx = require('rxjs');
 const validator = require('validator');
-const axios = require('axios');
 const mongodb = require('mongodb');
 const UserSession = require('./models/UserSession.class');
 const nanoid = require("nanoid");
