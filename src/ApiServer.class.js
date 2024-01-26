@@ -1652,7 +1652,7 @@ session-manager_1    | }
             annotationLinks: [],
             members: [{
                 username: String(user.username),
-                role: "owner"
+                role: "admin"
             }],
             docs: projectFormData.docFiles
         });
@@ -1847,7 +1847,7 @@ session-manager_1    | }
         //Spawning container
         let context = projectFormData.formContextId;
         //this is the path from within this container
-        let uploadsSrcDirLocal = "/tmp/uploads/"+user.id+"/"+context;
+        let uploadsSrcDirLocal = "/tmp/uploads/"+user.username+"/"+context;
         //this is the path from the os root, which is what we will pass as a volume argument to the operations container
         let uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+user.username+"/"+context;
         if(!fs.existsSync(uploadsSrcDirLocal)) {
