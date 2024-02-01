@@ -1740,8 +1740,6 @@ session-manager_1    | }
         let mongoProject = await this.mongoose.model('Project').findOne({ id: projectFormData.id });
 
         for (let formSession of projectFormData.sessions) {
-        //for(let key in projectFormData.sessions) {
-            //let formSession = projectFormData.sessions[key];
 
             if(formSession.deleted) {
                 this.app.addLog("Deleting session "+formSession.name+" from mongo project", "debug");
@@ -1788,12 +1786,14 @@ session-manager_1    | }
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
             mongoSession.files = formSession.files.map(fileMeta => ({
-                name: fileMeta.fileName
+                name: fileMeta.name,
+                size: fileMeta.size,
+                type: fileMeta.type,
             }));
 
             this.sprSessionUpdate(formSession);
         }
-
+        mongoProject.markModified('sessions');
         mongoProject.save();
     }
 
