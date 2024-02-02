@@ -63,7 +63,6 @@ class ApiServer {
             id: String,
             name: String,
             slug: String,
-            owner: String,
             sessions: Array,
             annotationLevels: Array,
             annotationLinks: Array,
@@ -1645,11 +1644,10 @@ session-manager_1    | }
         let mongoProject = await this.mongoose.model('Project').create({
             id: projectFormData.id,
             name: projectFormData.projectName,
-            owner: user.eppn,
             slug: this.slugify(projectFormData.projectName),
             sessions: [],
-            annotationLevels: [],
-            annotationLinks: [],
+            annotationLevels: projectFormData.annotLevels,
+            annotationLinks: projectFormData.annotLevelLinks,
             members: [{
                 username: String(user.username),
                 role: "admin"
@@ -1728,11 +1726,26 @@ session-manager_1    | }
         }
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Updating database" }));
+        await this.saveAnnotationLevelsMongo(projectFormData);
         await this.saveSessionsMongo(projectFormData);
         
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
         await this.saveProjectEmuDb(user, projectFormData, false);
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
+    }
+
+    async saveAnnotationLevelsMongo(projectFormData) {
+        this.app.addLog("Saving annotation levels to MongoDB");
+        let mongoProject = await this.mongoose.model('Project').findOne({ id: projectFormData.id });
+        if(!mongoProject) {
+            this.app.addLog("Could not find project in MongoDB", "error");
+            return;
+        }
+        mongoProject.annotationLevels = projectFormData.annotLevels;
+        mongoProject.annotationLinks = projectFormData.annotLevelLinks;
+        mongoProject.markModified('annotationLevels');
+        mongoProject.markModified('annotationLinks');
+        await mongoProject.save();
     }
 
     async saveSessionsMongo(projectFormData) {
@@ -1785,6 +1798,7 @@ session-manager_1    | }
             mongoSession.sprScriptName = formSession.sprScriptName;
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
+            
             mongoSession.files = formSession.files.map(fileMeta => ({
                 name: fileMeta.name,
                 size: fileMeta.size,
@@ -1794,7 +1808,7 @@ session-manager_1    | }
             this.sprSessionUpdate(formSession);
         }
         mongoProject.markModified('sessions');
-        mongoProject.save();
+        await mongoProject.save();
     }
 
     async sprSessionCreate(projectId, session) {
@@ -1866,11 +1880,6 @@ session-manager_1    | }
             }
         }
 
-        //TODO: import the files in uploadsSrcDir, e.g. uploadsSrcDir+"/emudb-sessions/FMaeQyJomuZkyYGiN70Jq/testljud.wav"
-        //where FMaeQyJomuZkyYGiN70Jq is the session id
-
-        //execute emuDb import sessions - we need to spin up a container for this
-        
         //createSession
         const gitRepoVolume = {
             source: this.app.absRootPath+"/mounts/repositories/"+projectFormData.id,
