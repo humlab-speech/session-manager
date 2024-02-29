@@ -36,9 +36,6 @@ class ApiServer {
         this.startServer();
         this.startWsServer();
         this.mongoose = this.talkToMeGoose();
-        this.fetchAccessList().then(accessList => {
-            this.accessList = accessList;
-        });
 
         this.defineModels();
 
@@ -96,12 +93,12 @@ class ApiServer {
         mongoose.model('BundleList', this.models.BundleList);
     }
 
-    async fetchAccessList() {
+    async fetchMongoUser(username) {
         const db = await this.connectToMongo();
         const usersCollection = db.collection("users");
-        let accessList = await usersCollection.find({}).toArray();
+        let user = await usersCollection.findOne({ username: username });
         this.disconnectFromMongo();
-        return accessList;
+        return user;
     }
 
     startServer() {
@@ -2305,31 +2302,14 @@ session-manager_1    | }
             return client.userSession.accessListValidationPass;
         }
 
-        /*
-        const db = await this.connectToMongo();
-        const usersCollection = db.collection("users");
-        const usersList = await usersCollection.find({
-            eppn: client.userSession.eppn
-        }).toArray();
-        
-        this.disconnectFromMongo();
-        */
-
-        let foundUserInAccessList = false;
-        this.accessList.forEach(user => {
-            if(user.eppn == client.userSession.eppn) {
-                foundUserInAccessList = true;
-            }
-        });
-
-        if(!foundUserInAccessList) {
-            //Couldn't find this user in the db
-            this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not in the access list", "warn");
-            client.userSession.accessListValidationPass = false;
+        let user = await this.fetchMongoUser(client.userSession.eppn);
+        if(user && user.loginAllowed == true) {
+            client.userSession.accessListValidationPass = true;
+            this.app.addLog("User with eppn "+client.userSession.eppn+" authorized by being in the access list");
         }
         else {
-            this.app.addLog("User with eppn "+client.userSession.eppn+" authorized by being in the access list",);
-            client.userSession.accessListValidationPass = true;
+            client.userSession.accessListValidationPass = false;
+            this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not allowed", "warn");
         }
 
         return client.userSession.accessListValidationPass;
