@@ -96,7 +96,7 @@ class ApiServer {
     async fetchMongoUser(username) {
         const db = await this.connectToMongo();
         const usersCollection = db.collection("users");
-        let user = await usersCollection.findOne({ username: username });
+        let user = await usersCollection.findOne({ eppn: username });
         this.disconnectFromMongo();
         return user;
     }
@@ -185,10 +185,10 @@ class ApiServer {
                             socket: ws,
                             userSession: userSess
                         };
-                        //If all is well this far, then the user has authenticated via keycloak and now has a valid session
+                        //If all is well this far, then the user has authenticated via SWAMID and now has a valid session
                         //but we still need to check if this user is also included in the access list or not
                         if(await this.authorizeWebSocketUser(client) == false) {
-                            ws.send(new WebSocketMessage('0', 'authentication-status', {
+                            ws.send(new WebSocketMessage('0', 'authorization-status', {
                                 result: false,
                                 reason: authResult.reason
                             }).toJSON());
@@ -205,13 +205,13 @@ class ApiServer {
                             this.handleConnectionClosed(client);
                         });
 
-                        ws.send(new WebSocketMessage('0', 'authentication-status', {
+                        ws.send(new WebSocketMessage('0', 'authorization-status', {
                             result: true
                         }).toJSON());
                     }
                     else {
                         this.app.addLog("Authentication failed", "warn");
-                        ws.send(new WebSocketMessage('0', 'authentication-status', {
+                        ws.send(new WebSocketMessage('0', 'authorization-status', {
                             result: false,
                             reason: authResult.reason
                         }).toJSON());
@@ -297,6 +297,10 @@ class ApiServer {
         if(msg == null) {
             this.app.addLog("Received unparsable websocket message, ignoring.", "warning");
             return;
+        }
+
+        if(msg.cmd == "authorizeUser") {
+            this.app.addLog("Received authorizeUser", "debug");
         }
 
         if(msg.cmd == "fetchMembers") {
@@ -532,65 +536,6 @@ class ApiServer {
             catch(error) {
                 this.app.addLog(error, "error")
             }
-        }
-
-        if(msg.cmd == "fetchSession") {
-
-            //this is deprecated
-            this.app.addLog("fetchSession called, this probably shouldn't happen.", "warning");
-            /*
-            try {
-                let userSession = this.getUserSessionBySocket(ws);
-                let volumes = [];
-                let userSess = new UserSession(userSession);
-
-                //this is the path from within this container
-                const uploadsSrcDirLocal = "/mounts/apache/apache/uploads/"+userSession.id;
-                
-                //this is the path from the os root
-                const uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+userSession.id;
-                if(!fs.existsSync(uploadsSrcDirLocal)) {
-                    this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
-                    try {
-                        fs.mkdirSync(uploadsSrcDirLocal, {
-                            recursive: true
-                        });
-                    }
-                    catch(error) {
-                        this.app.addLog("Failed creating directory "+uploadsSrcDir+". "+error.toString(), "error");
-                    }
-                }
-
-                volumes.push({
-                    source: uploadsSrcDir,
-                    target: '/home/uploads'
-                });
-
-
-                if(this.gitLabActivated) {
-                    let usernameSlug = msg.user.gitlabUsername.replace(/[^a-zA-Z0-9]/g, '-');
-                    let projectSlug = msg.project.name.replace(/[^a-zA-Z0-9]/g, '-');
-                    this.app.addLog("Mounting "+this.app.absRootPath+"/mounts/repositories/"+usernameSlug+"/"+projectSlug+" to /home/rstudio/project - WARNING CHECK SLUGS", "debug");
-                    volumes.push({
-                        source: this.app.absRootPath+"/mounts/repositories/"+usernameSlug+"/"+projectSlug,
-                        target: '/home/rstudio/project'
-                    });
-                }
-
-                let data = JSON.parse(msg.data);
-                this.getSessionContainer(userSess, data.project, "operations", volumes, data.options).subscribe(status => {
-                    if(status.type == "status-update") {
-                        ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchSession", progress: "update", result: status.message }));
-                    }
-                    if(status.type == "data") {
-                        ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchSession", progress: "end", result: status.accessCode }));
-                    }
-                });
-            }
-            catch(error) {
-                this.app.addLog(error, "error")
-            }
-            */
         }
 
         if(msg.cmd == "addSessions") {
@@ -940,7 +885,7 @@ class ApiServer {
         for(let key in users) {
             delete users[key].phpSessionId;
             delete users[key]._id;
-            delete users[key].authorized;
+            delete users[key].loggedIn;
         }
 
         ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: users }));
