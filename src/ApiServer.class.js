@@ -1505,7 +1505,8 @@ class ApiServer {
         let totalStepsNum = 5;
         let stepNum = 0;
         let projectFormData = msg.project;
-        projectFormData.id = nanoid.nanoid();
+        let customAlphabet = nanoid.customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
+        projectFormData.id = customAlphabet();
         /*
             example user:
             {
