@@ -1231,7 +1231,7 @@ class ApiServer {
              env.push("ANNOT_LEVEL_LINK_SUPER="+annotLevelLink.superLevel);
              env.push("ANNOT_LEVEL_LINK_SUB="+annotLevelLink.subLevel);
              env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
-             await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellinks"], env.concat(envVars));
+             await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
          }
 
          ws.send(JSON.stringify({ type: "cmd-result", cmd: "createAnnotationLevelLinks", progress: "done" }));
@@ -1912,14 +1912,42 @@ session-manager_1    | }
         };
         //mongoBundleList.save();
 
+        //read VISP_DBconfig.json
+        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-read-dbconfig"], envVars);
+        let dbConfig = JSON.parse(resultJson).body;
+
+        dbConfig.ssffTrackDefinitions;
+        dbConfig.levelDefinitions;
+        /*
+        levelDefinition: {
+            name: "Word",
+            type: "ITEM",
+            attributeDefinitions: [Array]
+        }
+        */
+        dbConfig.linkDefinitions;
+        /*
+        linkDefinition: {
+            superlevelName: "Word",
+            sublevelName: "Phonetic",
+            type: "ONE_TO_MANY"
+        }
+        */
 
         //emudb-create-annotlevels
         for(let key in projectFormData.annotLevels) {
-            let env = [];
+            //check if this annot level already exists in the dbConfig
             let annotLevel = projectFormData.annotLevels[key];
+            let levelExists = dbConfig.levelDefinitions.find(l => l.name == annotLevel.name);
+            if(levelExists) {
+                this.app.addLog("Level "+annotLevel.name+" already exists in the dbConfig, skipping creation", "debug");
+                continue;
+            }
+
+            let env = [];
             env.push("ANNOT_LEVEL_DEF_NAME="+annotLevel.name);
             env.push("ANNOT_LEVEL_DEF_TYPE="+annotLevel.type);
-            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevels"], env.concat(envVars));
+            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevel"], env.concat(envVars));
             result = JSON.parse(resultJson);
             if(result.code != 200) {
                 this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
@@ -1927,18 +1955,63 @@ session-manager_1    | }
             }
         }
 
+        //now delete all annot levels that exists in the dbConfig, but not in the projectFormData.annotLevels
+        for(let key in dbConfig.levelDefinitions) {
+            let level = dbConfig.levelDefinitions[key];
+
+            let levelExists = projectFormData.annotLevels.find(l => l.name == level.name);
+            if(!levelExists) {
+                this.app.addLog("Level "+level.name+" exists in the dbConfig, but not in the projectFormData.annotLevels, deleting", "debug");
+                let env = [];
+                env.push("ANNOT_LEVEL_DEF_NAME="+level.name);
+                resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-remove-annotlevel"], env.concat(envVars));
+                result = JSON.parse(resultJson);
+                if(result.code != 200) {
+                    this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                    return;
+                }
+            }
+        }
+
         //emudb-create-annotlevellinks
         for(let key in projectFormData.annotLevelLinks) {
             let env = [];
             let annotLevelLink = projectFormData.annotLevelLinks[key];
+
+            //check if this annot level link already exists in the dbConfig
+            let linkExists = dbConfig.linkDefinitions.find(l => l.superlevelName == annotLevelLink.superLevel && l.sublevelName == annotLevelLink.subLevel);
+            if(linkExists) {
+                this.app.addLog("Link "+annotLevelLink.superLevel+" -> "+annotLevelLink.subLevel+" already exists in the dbConfig, skipping creation", "debug");
+                continue;
+            }
+
             env.push("ANNOT_LEVEL_LINK_SUPER="+annotLevelLink.superLevel);
             env.push("ANNOT_LEVEL_LINK_SUB="+annotLevelLink.subLevel);
             env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
-            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellinks"], env.concat(envVars));
+            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
             result = JSON.parse(resultJson);
             if(result.code != 200) {
-                this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                this.app.addLog("Failed creating annotation level link (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
                 return;
+            }
+        }
+
+        //now delete all annot level links that exists in the dbConfig, but not in the projectFormData.annotLevelLinks
+        for(let key in dbConfig.linkDefinitions) {
+            let link = dbConfig.linkDefinitions[key];
+
+            let linkExists = projectFormData.annotLevelLinks.find(l => l.superLevel == link.superlevelName && l.subLevel == link.sublevelName);
+            if(!linkExists) {
+                this.app.addLog("Link "+link.superlevelName+" -> "+link.sublevelName+" exists in the dbConfig, but not in the projectFormData.annotLevelLinks, deleting", "debug");
+                let env = [];
+                env.push("ANNOT_LEVEL_LINK_SUPER="+link.superlevelName);
+                env.push("ANNOT_LEVEL_LINK_SUB="+link.sublevelName);
+                resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-remove-annotlevellink"], env.concat(envVars));
+                result = JSON.parse(resultJson);
+                if(result.code != 200) {
+                    this.app.addLog("Failed removing annotation level link (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                    return;
+                }
             }
         }
         
