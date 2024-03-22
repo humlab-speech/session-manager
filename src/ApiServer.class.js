@@ -1808,7 +1808,7 @@ session-manager_1    | }
         //this is the path from the os root, which is what we will pass as a volume argument to the operations container
         let uploadsSrcDir = this.app.absRootPath+"/mounts/apache/apache/uploads/"+user.username+"/"+context;
         if(!fs.existsSync(uploadsSrcDirLocal)) {
-            this.app.addLog("Directory "+uploadsSrcDir+" does not exist, creating it");
+            this.app.addLog("Directory "+uploadsSrcDir+" ("+uploadsSrcDirLocal+") does not exist, creating it");
             try {
                 fs.mkdirSync(uploadsSrcDirLocal, {
                     recursive: true
