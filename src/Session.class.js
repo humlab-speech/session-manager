@@ -169,7 +169,7 @@ class Session {
                 "visp.accessCode": this.accessCode.toString()
             },
             HostConfig: {
-                AutoRemove: false,
+                AutoRemove: true,
                 NetworkMode: process.env.COMPOSE_PROJECT_NAME+"_visp-net",
                 Mounts: mounts,
                 Memory: 8*1024*1024*1024, //bytes
