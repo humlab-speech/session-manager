@@ -2411,7 +2411,18 @@ session-manager_1    | }
         }
         //let's start by scanning the sessionPath
         let importedFilePaths = [];
-        let sessionPathContents = fs.readdirSync(sessionPath);
+
+        let sessionPathContents = [];
+        if(fs.existsSync(sessionPath)) {
+            try {
+              sessionPathContents = fs.readdirSync(sessionPath);
+            } catch (err) {
+              console.error('Error reading the directory:', err);
+            }
+          } else {
+            console.log('Directory does not exist:', sessionPath);
+        }
+        
         sessionPathContents.forEach(promptDir => {
             let promptDirPath = sessionPath+"/"+promptDir;
             let promptDirContents = fs.readdirSync(promptDirPath);
