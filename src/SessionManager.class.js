@@ -96,6 +96,8 @@ class SessionManager {
     }
 
     getSessionsByProjectId(projectId) {
+      this.refreshSessions();
+
       let sessions = [];
       this.sessions.forEach(session => {
         if(session.project.id == projectId) {
@@ -152,6 +154,44 @@ class SessionManager {
       }
       
       return sess;
+    }
+
+    refreshSessions() {
+      //check with the docker daemon for running containers
+      //if we find any that are not in the sessions array, add them
+      //if we find any in the sessions array that are not in the docker daemon, remove them
+      this.docker.container.list().then(containers => {
+        let containerIds = [];
+        containers.forEach(container => {
+          containerIds.push(container.id);
+        });
+
+        this.sessions.forEach(session => {
+          if(containerIds.indexOf(session.shortDockerContainerId) == -1) {
+            this.app.addLog("Session "+session.accessCode+" not found in docker daemon, removing", "debug");
+            session.delete();
+          }
+        });
+
+        /*
+        containers.forEach(container => {
+          let found = false;
+          this.sessions.forEach(session => {
+            if(container.id == session.shortDockerContainerId) {
+              found = true;
+            }
+          });
+
+          if(!found) {
+            this.app.addLog("Found container "+container.id+" in docker daemon that is not in sessions array, adding", "debug");
+            let sess = new Session(this.app, null, null, null, null, null);
+            sess.importContainerId(container.id);
+            sess.setupProxyServerIntoContainer(container.id);
+            this.sessions.push(sess);
+          }
+        });
+        */
+      });
     }
 
     getSessionAccessCodeFromRequest(req) {
