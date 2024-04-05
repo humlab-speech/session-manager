@@ -902,11 +902,16 @@ class ApiServer {
             for(let key2 in project.members) {
                 const user = new this.mongoose.model('User');
                 let userInfo = await user.findOne({ username: project.members[key2].username });
-                project.members[key2].fullName = userInfo.fullName;
-                project.members[key2].firstName = userInfo.firstName;
-                project.members[key2].lastName = userInfo.lastName;
-                project.members[key2].email = userInfo.email;
-                project.members[key2].eppn = userInfo.eppn;
+                if(userInfo) {
+                    project.members[key2].fullName = typeof userInfo.fullName != "undefined" ? userInfo.fullName : " ";
+                    project.members[key2].firstName = typeof userInfo.firstName != "undefined" ? userInfo.firstName : " ";
+                    project.members[key2].lastName = typeof userInfo.lastName != "undefined" ? userInfo.lastName : " ";
+                    project.members[key2].email = typeof userInfo.email != "undefined" ? userInfo.email : " ";
+                    project.members[key2].eppn = userInfo.eppn;
+                }
+                else {
+                    this.app.addLog("Failed fetching user info for "+project.members[key2].username, "error");
+                }
             }
 
             //also return information about any running containers for this project
@@ -2504,13 +2509,6 @@ session-manager_1    | }
             this.app.addLog('importAudioFiles', "debug");
             this.importAudioFiles(req.body.projectId, req.body.sessionId).then((ar) => {
                 res.status(ar.code).end(ar.toJSON());
-            });
-        });
-
-        this.expressApp.get('/api/isgitlabready', (req, res) => {
-            //this.app.addLog('isGitlabReady');
-            this.app.sessMan.isGitlabReady().then((gitlabIsReady) => {
-                res.status(200).end(new ApiResponse(200, { gitlabIsReady: gitlabIsReady }).toJSON());
             });
         });
 
