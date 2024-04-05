@@ -209,7 +209,7 @@ class ApiServer {
                         }).toJSON());
                     }
                     else {
-                        this.app.addLog("Authentication failed", "warn");
+                        //this.app.addLog("Authentication failed", "warn");
                         ws.send(new WebSocketMessage('0', 'authorization-status', {
                             result: false,
                             reason: authResult.reason
@@ -2265,8 +2265,6 @@ session-manager_1    | }
         let cookies = this.parseCookies(request);
         let phpSessionId = cookies.PHPSESSID;
 
-        this.app.addLog('Validating phpSessionId '+phpSessionId);
-
         let options = {
             headers: {
                 'Cookie': "PHPSESSID="+phpSessionId
@@ -2283,7 +2281,7 @@ session-manager_1    | }
                     try {
                         let responseBody = JSON.parse(body);
                         if(responseBody.body == "[]") {
-                            this.app.addLog("User not identified");
+                            //this.app.addLog("User not identified");
                             resolve({
                                 authenticated: false,
                                 reason: "User not identified"
@@ -2308,7 +2306,7 @@ session-manager_1    | }
                         });
                         return;
                     }
-                    this.app.addLog("Welcome user "+userSession.username);
+                    //this.app.addLog("Welcome user "+userSession.username);
                     resolve({
                         authenticated: true,
                         userSession: userSession
@@ -2339,10 +2337,6 @@ session-manager_1    | }
     }
 
     parseCookies (request) {
-        this.app.addLog("Parsing cookies", "debug");
-        console.log(request.headers.cookie);
-        
-
         var list = {},
             rc = request.headers.cookie;
 
