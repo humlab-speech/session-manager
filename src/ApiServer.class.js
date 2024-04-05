@@ -166,7 +166,6 @@ class ApiServer {
         this.wss = new WebSocket.Server({ noServer: true });
 
         this.httpWsServer.on('upgrade', (request, socket, head) => {
-            this.app.addLog("Client requested WS upgrade - authenticating");
             this.wss.handleUpgrade(request, socket, head, (ws) => {
                 this.authenticateWebSocketUser(request).then(async (authResult) => {
                     if(authResult.authenticated) {
@@ -2340,6 +2339,10 @@ session-manager_1    | }
     }
 
     parseCookies (request) {
+        this.app.addLog("Parsing cookies", "debug");
+        console.log(request.headers.cookie);
+        
+
         var list = {},
             rc = request.headers.cookie;
 
