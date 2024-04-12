@@ -755,7 +755,24 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: true }));
     }
 
-    async searchUsers(ws, msg) {
+    async searchUsersOLD(ws, user, msg) {
+        const User = this.mongoose.model('User');
+        let users = [];
+        User.find({ username: { $regex: msg.searchValue, $options: 'i' } }).then((result) => {
+            result.forEach((user) => {
+                users.push({
+                    username: user.username,
+                    eppn: user.eppn,
+                    fullName: user.fullName ? user.fullName : user.firstName+" "+user.lastName,
+                    email: user.email,
+                });
+            });
+
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "searchUsers", result: users, requestId: msg.requestId }));
+        });
+    }
+
+    async searchUsers(ws, user, msg) {
         const User = this.mongoose.model('User');
         let users = [];
     
