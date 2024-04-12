@@ -755,22 +755,35 @@ class ApiServer {
         ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: true }));
     }
 
-    async searchUsers(ws, user, msg) {
+    async searchUsers(ws, msg) {
         const User = this.mongoose.model('User');
         let users = [];
-        User.find({ username: { $regex: msg.searchValue, $options: 'i' } }).then((result) => {
+    
+        // Update the query to search in multiple fields
+        User.find({
+            $or: [
+                { username: { $regex: msg.searchValue, $options: 'i' } },
+                { fullName: { $regex: msg.searchValue, $options: 'i' } },
+                { firstName: { $regex: msg.searchValue, $options: 'i' } },
+                { lastName: { $regex: msg.searchValue, $options: 'i' } }
+            ]
+        }).then((result) => {
             result.forEach((user) => {
                 users.push({
                     username: user.username,
                     eppn: user.eppn,
-                    fullName: user.fullName ? user.fullName : user.firstName+" "+user.lastName,
+                    fullName: user.fullName ? user.fullName : user.firstName + " " + user.lastName,
                     email: user.email,
                 });
             });
-
+    
             ws.send(JSON.stringify({ type: "cmd-result", cmd: "searchUsers", result: users, requestId: msg.requestId }));
+        }).catch((error) => {
+            console.error('Error searching users:', error);
+            ws.send(JSON.stringify({ type: "error", message: "Failed to search users", requestId: msg.requestId }));
         });
     }
+    
 
     async fetchBundleList(ws, user, msg) {
         const User = this.mongoose.model('User');
