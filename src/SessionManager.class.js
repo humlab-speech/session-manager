@@ -163,7 +163,8 @@ class SessionManager {
       this.docker.container.list().then(containers => {
         let containerIds = [];
         containers.forEach(container => {
-          containerIds.push(container.id);
+          let shortId = container.id.substring(0, 12);
+          containerIds.push(shortId);
         });
 
         this.sessions.forEach(session => {
@@ -172,25 +173,6 @@ class SessionManager {
             session.delete();
           }
         });
-
-        /*
-        containers.forEach(container => {
-          let found = false;
-          this.sessions.forEach(session => {
-            if(container.id == session.shortDockerContainerId) {
-              found = true;
-            }
-          });
-
-          if(!found) {
-            this.app.addLog("Found container "+container.id+" in docker daemon that is not in sessions array, adding", "debug");
-            let sess = new Session(this.app, null, null, null, null, null);
-            sess.importContainerId(container.id);
-            sess.setupProxyServerIntoContainer(container.id);
-            this.sessions.push(sess);
-          }
-        });
-        */
       });
     }
 
