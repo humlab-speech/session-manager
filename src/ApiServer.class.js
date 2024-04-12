@@ -1332,7 +1332,7 @@ class ApiServer {
     }
 
     slugify(inputString) {
-        inputString = inputString.toLowerCase().trim();
+        inputString = inputString.trim();
         const replacements = {
             '@': '_at_',
             '.': '_dot_',
