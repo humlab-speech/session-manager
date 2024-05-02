@@ -9,7 +9,6 @@ class Application {
   constructor() {
     this.gitlabAddress = process.env.GITLAB_ADDRESS;
     this.hsApiAccessToken = process.env.HS_API_ACCESS_TOKEN;
-    this.gitlabAccessToken = process.env.GIT_API_ACCESS_TOKEN;
     this.absRootPath = process.env.ABS_ROOT_PATH;
     this.logLevel = process.env.LOG_LEVEL.toUpperCase();
     colors.enable();
