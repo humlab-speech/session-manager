@@ -624,6 +624,16 @@ class ApiServer {
             source: this.app.absRootPath+"/mounts/repositories/"+project.id,
             target: '/home/'+containerUser+'/project'
         });
+
+        //if we are in development mode, mount the container-agent folder from the local filesystem
+        //so that changes can easily be tested without having to rebuild the container
+        let devlopmentMode = process.env.DEVELOPMENT_MODE == "true";
+        if(devlopmentMode) {
+            volumes.push({
+                source: this.app.absRootPath+"/container-agent/dist",
+                target: '/container-agent'
+            });
+        }
         
         this.getSessionContainer(user.username, msg.projectId, msg.appName, volumes).subscribe(status => {
             if(status.type == "status-update") {
