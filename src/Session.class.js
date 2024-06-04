@@ -110,7 +110,7 @@ class Session {
             AttachStdout: true,
             AttachStderr: true,
             Env: env,
-            Cmd: cmd
+            Cmd: cmd,
         })
         .then((exec) => {
             return exec.start({ Detach: false })
@@ -175,7 +175,8 @@ class Session {
                 Memory: 8*1024*1024*1024, //bytes
                 MemorySwap: 16*1024*1024*1024,
                 CpuShares: 512,
-            }
+            },
+            //User: `1000:1000`
         };
         /*
         config.Env = [

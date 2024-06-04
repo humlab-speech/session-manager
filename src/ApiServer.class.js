@@ -30,7 +30,7 @@ class ApiServer {
         this.emuDbIntegrationEnabled = new String(process.env.EMUDB_INTEGRATION_ENABLED).toLowerCase() == "true";
         this.expressApp = express();
         this.expressApp.use(bodyParser.urlencoded({ extended: true }));
-        //this.expressApp.use(bodyParser.json());
+        this.expressApp.use(bodyParser.json());
 
         this.setupEndpoints();
         this.startServer();
@@ -332,7 +332,7 @@ class ApiServer {
 
         if(msg.cmd == "fetchSprSession") {
             this.fetchSprSession(msg.data.sprSessionId).then(result => {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result }));
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result, requestId: msg.requestId }));
             });
         }
 
@@ -1715,10 +1715,29 @@ session-manager_1    | }
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Updating database" }));
         await this.saveAnnotationLevelsMongo(projectFormData);
         await this.saveSessionsMongo(projectFormData);
+        //await this.saveSprSession(projectFormData);
         
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
         await this.saveProjectEmuDb(user, projectFormData, false);
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
+    }
+
+    async saveSprSession(projectFormData) {
+        //save any spr session attributes (currently only sprSessionSealed) in the wsrng database
+        this.app.addLog("Saving SPR session data to MongoDB");
+        let db = await this.connectToMongo("wsrng");
+        let collection = db.collection("sessions");
+        for(let formSession of projectFormData.sessions) {
+            let sprSession = await collection.findOne({ sessionId: formSession.sessionId });
+            if(sprSession) {
+                console.log("Updating SPR session "+formSession.sessionId+" in MongoDB")
+                await collection.updateOne({ sessionId: formSession.sessionId }, {
+                    $set: {
+                        sealed: formSession.sprSessionSealed
+                    }
+                });
+            }
+        }
     }
 
     async saveAnnotationLevelsMongo(projectFormData) {
@@ -1792,7 +1811,10 @@ session-manager_1    | }
                 type: fileMeta.type,
             }));
 
-            this.sprSessionUpdate(formSession);
+            if(formSession.dataSource == 'record') {
+                this.sprSessionUpdate(formSession);
+            }
+            
         }
         mongoProject.markModified('sessions');
         await mongoProject.save();
@@ -1815,13 +1837,17 @@ session-manager_1    | }
     }
 
     async sprSessionUpdate(session) {
+        if(session.dataSource != 'record') {
+            return;
+        }
         this.app.addLog("Updating SPR session "+session.id);
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
         collection.updateOne({ sessionId: session.id }, {
             $set: {
                 script: session.sessionScript,
-            }
+                sealed: session.sprSessionSealed == 'true' ? true : false
+            },
         });
     }
 
@@ -2397,7 +2423,84 @@ session-manager_1    | }
 
     }
 
+    async fetchMongoProjectById(projectId) {
+        let mongoProject = await this.mongoose.model('Project').findOne({ id: projectId });
+        return mongoProject;
+    }
+
     async importAudioFiles(projectId, sessionId) {
+
+        /**
+         * This method will import audio files from the speech recorder into the project directory.
+         * It will do this in two main steps:
+         * 1. Copy the last recorded version of each wav file from the speech recorder directory to a new directory
+         * 2. Run an R script in the operations container that will import the files to the correct location in the project directory
+         */
+
+        let volumes = [{
+            source: this.app.absRootPath+"/mounts/repositories/"+projectId,
+            target: "/home/rstudio/project"
+        }];
+
+        let user = {
+            id: "operations-user",
+            firstName: "Operations",
+            username: "operations-user",
+            lastName: "User",
+            email: "operations@visp",
+            eppn: "operations@visp",
+        }
+
+        let project = await this.fetchMongoProjectById(projectId);
+
+        const session = this.app.sessMan.createSession(user, project, 'operations', volumes);
+        await session.createContainer();
+
+        let projectSession = null;
+        project.sessions.forEach(sess => {
+            if(sess.id == sessionId) {
+                projectSession = sess;
+            }
+        });
+
+        let sessions = [{
+            id: sessionId,
+            slug: this.slugify(projectSession.name),
+            sessionId: sessionId,
+            name: projectSession.name,
+            speakerGender: "", //unused, but needs to be included
+            speakerAge: "", //unused, but needs to be included
+            files: [] //unused, but needs to be included
+        }];
+        let sessionsJsonB64 = Buffer.from(JSON.stringify(sessions)).toString("base64");
+        let envVars = [
+            "PROJECT_PATH=/home/rstudio/project", // + /home/project/Data/VISP_emuDB
+            "UPLOAD_PATH=/home/rstudio/project/Data/speech_recorder_uploads",
+            //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
+            "EMUDB_SESSIONS="+sessionsJsonB64,
+            "WRITE_META_JSON=false"
+        ];
+
+        //emudb-create-sessions
+        //await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        
+        //shutdown the container
+        await this.app.sessMan.deleteSession(session.accessCode);
+
+
+        //now delete the files copied for import...?
+        /*
+        importedFilePaths.forEach(filePath => {
+            fs.unlinkSync(filePath);
+        });
+        */
+
+        return new ApiResponse(200, "Audio files imported");
+
+        /*
+
         this.app.addLog("Importing audio files for session "+sessionId+", project " + projectId);
         //Check that this session exists in this project
         this.app.addLog("Hooking up to the mongo-bongo", "debug");
@@ -2422,7 +2525,6 @@ session-manager_1    | }
                 projectSession = sess;
             }
         });
-
 
         //check that this session does not already have files
         if(projectSession.files.length > 0) {
@@ -2463,16 +2565,12 @@ session-manager_1    | }
             console.log('Directory does not exist:', sessionPath);
         }
         
-        sessionPathContents.forEach(promptDir => {
-            let promptDirPath = sessionPath+"/"+promptDir;
-            let promptDirContents = fs.readdirSync(promptDirPath);
-
+        //"promptDir" here is actually a wav file since we don't use prompt dirs
+        sessionPathContents.forEach(promptFile => {
             let promptFileVersions = [];
-            promptDirContents.forEach(promptFile => {
-                let fileBaseName = promptFile.split(".")[0];
-                let fileVersion = parseInt(fileBaseName);
-                promptFileVersions.push(fileVersion);
-            });
+            let fileBaseName = promptFile.split(".")[0];
+            let fileVersion = parseInt(fileBaseName);
+            promptFileVersions.push(fileVersion);
 
             promptFileVersions.sort((a, b) => {
                 return b - a;
@@ -2481,19 +2579,23 @@ session-manager_1    | }
             let latestFileName = latestFileVersion+".wav";
 
             //first mkdir
-            if(!fs.existsSync("/repositories/"+project.id+"/Data/unimported_audio/emudb-sessions/"+sessionId)) {
-                fs.mkdirSync("/repositories/"+project.id+"/Data/unimported_audio/emudb-sessions/"+sessionId, {
+            if(!fs.existsSync("/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId)) {
+                fs.mkdirSync("/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId, {
                     recursive: true
                 });
             }
 
-            this.app.addLog("Copying "+promptDirPath+"/"+latestFileName+" to "+"/repositories/"+project.id+"/Data/unimported_audio/emudb-sessions/"+sessionId+"/"+promptDir+".wav", "debug");
-            fs.copyFileSync(promptDirPath+"/"+latestFileName, "/repositories/"+project.id+"/Data/unimported_audio/emudb-sessions/"+sessionId+"/"+promptDir+".wav");
+            let promptDirPath = sessionPath+"/"+promptFile;
 
-            importedFilePaths.push("/repositories/"+project.id+"/Data/unimported_audio/emudb-sessions/"+sessionId+"/"+promptDir+".wav");
+            let destPath = "/repositories/"+project.id+"/Data/VISP_emuDB/"+projectSession.name+"/"+promptFile;
+
+            this.app.addLog("Copying "+promptDirPath+" to "+destPath, "debug");
+            fs.copyFileSync(promptDirPath, destPath);
+
+            importedFilePaths.push("/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId+"/"+promptFile);
 
             mongoProject.sessions[mongoProjectSessionKey].files.push({
-                name: promptDir+".wav",
+                name: promptFile,
                 size: null,
                 type: 'audio/wav'
             });
@@ -2531,7 +2633,7 @@ session-manager_1    | }
         let sessionsJsonB64 = Buffer.from(JSON.stringify(sessions)).toString("base64");
         let envVars = [
             "PROJECT_PATH=/home/rstudio/project", // + /home/project/Data/VISP_emuDB
-            "UPLOAD_PATH=/home/rstudio/project/Data/unimported_audio",
+            "UPLOAD_PATH=/home/rstudio/project/Data/speech_recorder_uploads",
             //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
             "EMUDB_SESSIONS="+sessionsJsonB64,
             "WRITE_META_JSON=false"
@@ -2549,6 +2651,7 @@ session-manager_1    | }
         });
 
         return new ApiResponse(200, "Audio files imported");
+        */
     }
 
     setupEndpoints() {
