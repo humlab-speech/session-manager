@@ -26,18 +26,26 @@ class WebSocketMessage {
     requestId = null; 
     cmd = "";
     data = {};
+    message = "";
+    progress = "";
 
-    constructor(requestId, cmd, data = {}) {
+    constructor(requestId, cmd, data = {}, message = null, progress = null, result = true) {
         this.requestId = requestId;
         this.cmd = cmd;
         this.data = data;
+        this.message = message;
+        this.progress = progress;
+        this.result = result;
     }
 
     toJSON() {
         return JSON.stringify({
             requestId: this.requestId,
             cmd: this.cmd,
-            data: this.data
+            data: this.data,
+            message: this.message,
+            progress: this.progress,
+            result: this.result
         });
     }
 }

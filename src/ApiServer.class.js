@@ -186,6 +186,7 @@ class ApiServer {
                         };
                         //If all is well this far, then the user has authenticated via SWAMID and now has a valid session
                         //but we still need to check if this user is also included in the access list or not
+                        /*
                         if(await this.authorizeWebSocketUser(client) == false) {
                             ws.send(new WebSocketMessage('0', 'authorization-status', {
                                 result: false,
@@ -193,14 +194,13 @@ class ApiServer {
                             }).toJSON());
                             return;
                         }
-
-                        //If we have a valid user session, we can now create a gitlab user for this user (if it doesn't exist already)
-                        //this.createGitlabUser(client.userSession); //this is already being done in the webapi - so nevermind
+                        */
 
                         this.wsClients.push(client);
                         
                         ws.on('message', message => this.handleIncomingWebSocketMessage(ws, message));
                         ws.on('close', () => {
+                            this.app.addLog("Client closed connection.");
                             this.handleConnectionClosed(client);
                         });
 
@@ -244,7 +244,7 @@ class ApiServer {
         }
         
         if(this.deleteWsClient(client)) {
-            this.app.addLog("Deleted websocket client");
+            //this.app.addLog("Deleted websocket client");
         }
         else {
             this.app.addLog("Failed deleting websocket client", "error");
@@ -267,23 +267,15 @@ class ApiServer {
         return user;
     }
 
+    denyAccess(ws, msg) {
+        ws.send(new WebSocketMessage(msg.requestId, msg.cmd ? msg.cmd : 'unauthorized', {
+            result: 400,
+            msg: 'You are not authorized to use this functionality'
+        }).toJSON());
+    }
+
     async handleIncomingWebSocketMessage(ws, message) {
         this.app.addLog("Received: "+message, "debug");
-
-        let client = this.getUserSessionBySocket(ws);
-        
-        if(!client.accessListValidationPass) {
-            //Disallow the user to call any functions if they are not in the access list
-            this.app.addLog("User ("+client.userSession.username+") tried to call function without being in access list.");
-            ws.send(new WebSocketMessage('0', 'unathorized', 'You are not authorized to use this functionality').toJSON());
-            return;
-        }
-        
-        let user = await this.fetchUser(client);
-        if(!user) {
-            this.app.addLog("Failed fetching user", "error");
-            return;
-        }
 
         let msg = null;
         try {
@@ -291,6 +283,27 @@ class ApiServer {
         }
         catch(err) {
             this.app.addLog("Failed parsing incoming websocket message as JSON. Message was: "+message, "error");
+        }
+
+        let client = this.getUserSessionBySocket(ws);
+        
+        /*
+        if(!client.accessListValidationPass) {
+            //attempt to validate the user against the access list
+            client.accessListValidationPass = await this.authorizeWebSocketUser(client);
+            if(!client.accessListValidationPass) {
+                //Disallow the user to call any functions if they are not in the access list
+                this.app.addLog("User ("+client.username+") tried to call function without being in access list.");
+                this.denyAccess(ws, msg);
+                return;
+            }
+        }
+        */
+        
+        let user = await this.fetchUser(client);
+        if(!user) {
+            this.app.addLog("Failed fetching user", "error");
+            return;
         }
 
         if(msg == null) {
@@ -303,10 +316,18 @@ class ApiServer {
         }
 
         if(msg.cmd == "fetchMembers") {
-            this.fetchMembers(ws, msg);
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
+            this.fetchMembers(ws, user, msg);
         }
 
         if(msg.cmd == "fetchProjects") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.fetchProjects(ws, user, msg);
         }
 
@@ -315,38 +336,72 @@ class ApiServer {
         }
 
         if(msg.cmd == "fetchSprScripts") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.fetchSprScripts(ws, msg);
         }
 
         if(msg.cmd == "saveSprScripts") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.saveSprScripts(ws, msg);
         }
 
         if(msg.cmd == "deleteSprScript") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.deleteSprScript(ws, msg);
         }
 
         if(msg.cmd == "fetchSprData") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.fetchSprData(ws, msg);
         }
 
         if(msg.cmd == "fetchSprSession") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.fetchSprSession(msg.data.sprSessionId).then(result => {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result, requestId: msg.requestId }));
+                ws.send(new WebSocketMessage(msg.requestId, msg.cmd, result).toJSON());
+                //ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result, requestId: msg.requestId }));
             });
         }
 
         if(msg.cmd == "fetchSprScriptBySessionId") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.fetchSprScriptBySessionId(msg.data.sprSessionId).then(result => {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result, requestId: msg.requestId }));
+                ws.send(new WebSocketMessage(msg.requestId, msg.cmd, result).toJSON());
+                //ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.cmd, result: result, requestId: msg.requestId }));
             });
         }
 
         if(msg.cmd == "createSprSessions") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.createSprSessions(ws, msg);
         }
 
         if(msg.cmd == "emuWebappSession") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.app.addLog("emuWebappSession", "debug");
             //check that this user has authorization to access this project
             let userSession = this.getUserSessionBySocket(ws);
@@ -356,10 +411,15 @@ class ApiServer {
         }
 
         if(msg.cmd == "route-to-ca") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.app.addLog("route-to-ca "+msg.caCmd+" "+msg.appSession, "debug");
             let session = this.app.sessMan.getSessionByCode(msg.appSession);
             if(!session) {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.caCmd, session: msg.appSession, result: "Error - no such session" }));
+                ws.send(new WebSocketMessage(msg.requestId, msg.caCmd, { session: msg.appSession }, "Error - no such session", "end", false).toJSON());
+                //ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.caCmd, session: msg.appSession, result: "Error - no such session" }));
                 return;
             }
             
@@ -374,6 +434,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "save") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.app.addLog("save", "debug");
             let session = this.app.sessMan.getSessionByCode(msg.appSession);
             if(!session) {
@@ -386,10 +450,18 @@ class ApiServer {
         }
 
         if(msg.cmd == "updateBundleLists") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.updateBundleLists(ws, msg);
         }
 
         if(msg.cmd == "accessListCheck") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             fs.readFile("/access-list.json", (error, data) => {
                 if (error) throw error;
                 console.log(data);
@@ -400,6 +472,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "shutdownOperationsSession") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.app.addLog("Shutdown of session "+msg.sessionAccessCode);
                 this.shutdownSessionContainer(msg.sessionAccessCode).then((result) => {
@@ -413,6 +489,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "scanEmudb") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.app.addLog("Scanning emuDb in session "+msg.sessionAccessCode);
                 let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
@@ -430,6 +510,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "uploadFile") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.receiveFileUpload(ws, msg);
             }
@@ -439,6 +523,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "saveProject") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.saveProject(ws, user, msg);
             }
@@ -448,6 +536,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "searchUsers") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.searchUsers(ws, user, msg);
             }
@@ -457,6 +549,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "addProjectMember") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.addProjectMember(ws, user, msg);
             }
@@ -466,6 +562,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "updateProjectMemberRole") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.updateProjectMemberRole(ws, user, msg);
             }
@@ -475,6 +575,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "removeProjectMember") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.removeProjectMember(ws, user, msg);
             }
@@ -484,6 +588,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "fetchBundleList") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.fetchBundleList(ws, user, msg);
             }
@@ -493,6 +601,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "saveBundleLists") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.saveBundleLists(ws, user, msg);
             }
@@ -502,6 +614,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "deleteProject") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.deleteProject(ws, user, msg);
             }
@@ -511,6 +627,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "deleteBundle") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.deleteBundle(ws, user, msg);
             }
@@ -520,6 +640,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "closeSession") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.closeContainerSession(ws, user, msg);
             }
@@ -529,6 +653,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "launchContainerSession") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.launchContainerSession(ws, user, msg);
             }
@@ -538,6 +666,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "addSessions") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.addSessions(ws, msg);
             }
@@ -547,6 +679,10 @@ class ApiServer {
         }
 
         if(msg.cmd == "shutdownSession") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             try {
                 this.shutdownSession(ws, msg);
             }
@@ -556,15 +692,55 @@ class ApiServer {
         }
 
         if(msg.cmd == "createSprProject") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.app.addLog("Received cmd to createSprProject "+msg.project.name);
             this.createSprProject(msg.project.name, ws);
         }
 
         if(msg.cmd == "createEmuDb") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
             this.app.addLog("createEmuDb", "debug");
             this.createEmuDb(ws, msg);
         }
 
+        if(msg.cmd == "generateInviteCode") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
+            this.app.addLog("generateInviteCode", "debug");
+            this.generateInviteCode(ws, msg);
+        }
+        if(msg.cmd == "updateInviteCodes") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
+            this.app.addLog("updateInviteCodes", "debug");
+            this.updateInviteCodes(ws, msg);
+        }
+        if(msg.cmd == "getInviteCodesByUser") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
+            this.app.addLog("getInviteCodesByUser", "debug");
+            this.getInviteCodesByUser(ws, msg);
+        }
+        if(msg.cmd == "deleteInviteCode") {
+            if(!await this.authorizeWebSocketUser(client)) {
+                this.denyAccess(ws, msg);
+                return;    
+            }
+            this.app.addLog("deleteInviteCode", "debug");
+            this.deleteInviteCode(ws, msg);
+        }
         /*
         if(msg.cmd == "importEmuDbSessions") {
             this.app.addLog("createEmuDb", "debug");
@@ -686,7 +862,8 @@ class ApiServer {
         let project = await Project.findOne({ id: msg.projectId });
 
         if (!project) {
-            ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "Project not found" }));
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {}, "Project not found", "end", false).toJSON());
+            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "Project not found" }));
             return;
         }
 
@@ -695,7 +872,8 @@ class ApiServer {
         let userInfo = await User.findOne({ username: msg.username }).select('username email eppn firstName lastName fullName');
 
         if(!userInfo) {
-            ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User not found" }));
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {}, "User not found", "end", false).toJSON());
+            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User not found" }));
             return;
         }
 
@@ -707,14 +885,16 @@ class ApiServer {
         let userIsAdmin = project.members.find(m => m.username == user.username && m.role == "admin");
         if(!userIsAdmin) {
             this.app.addLog("User "+user.username+" tried to add a member to project "+msg.projectId+", but is not an admin of this project", "warning");
-            ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is not an admin of this project" }));
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {}, "User is not an admin of this project", "end", false).toJSON());
+            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is not an admin of this project" }));
             return;
         }
 
         //check if user is already a member
         let existingMember = project.members.find(m => m.username == msg.username);
         if(existingMember) {
-            ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is already a member of this project" }));
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, { result: false }, "User is already a member of this project", "end", false).toJSON());
+            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is already a member of this project" }));
             return;
         }
 
@@ -725,9 +905,8 @@ class ApiServer {
         });
         project.save();
 
-        
-
-        ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: true, user: userInfo }));
+        ws.send(new WebSocketMessage(msg.requestId, msg.cmd, { user: userInfo }, "User added to project", "end", true).toJSON());
+        //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: true, user: userInfo }));
     }
 
     async removeProjectMember(ws, user, msg) {
@@ -804,10 +983,17 @@ class ApiServer {
                 });
             });
     
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "searchUsers", result: users, requestId: msg.requestId }));
+
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                data: users
+            }).toJSON());
+
+            //ws.send(JSON.stringify({ type: "cmd-result", cmd: "searchUsers", result: users, requestId: msg.requestId }));            
+
         }).catch((error) => {
             console.error('Error searching users:', error);
-            ws.send(JSON.stringify({ type: "error", message: "Failed to search users", requestId: msg.requestId }));
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {}, "Failed to search users").toJSON());
+            //ws.send(JSON.stringify({ type: "error", message: "Failed to search users", requestId: msg.requestId }));
         });
     }
     
@@ -833,7 +1019,11 @@ class ApiServer {
             bundleListResult.save();
         }
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchBundleList", result: bundleListResult, requestId: msg.requestId }));
+        ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+            data: bundleListResult
+        }).toJSON());
+        
+        //ws.send(JSON.stringify({ type: "cmd-result", cmd: "fetchBundleList", result: bundleListResult, requestId: msg.requestId }));
     }
 
     async saveBundleLists(ws, user, msg) {
@@ -957,7 +1147,12 @@ class ApiServer {
             projects[key].liveAppSessions = this.app.sessMan.getSessionsByProjectId(project.id);
         }
     
-        ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: projects }));
+        //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: projects }));
+        
+        ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+            result: 200,
+            projects: projects
+        }).toJSON());
     }
     
     async fetchProject(projectId) {
@@ -1308,6 +1503,54 @@ class ApiServer {
         //emudb-setsignalcanvasesorder
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "13", result: "Setting signal canvases order" }));
         await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
+    }
+
+    async generateInviteCode(ws, msg) {
+        let user = this.getUserSessionBySocket(ws);
+
+        let inviteCode = nanoid.nanoid();
+        //insert the invite code into the mongodb collection "invite_codes"
+        let db = await this.connectToMongo("visp");
+        let collection = db.collection("invite_codes");
+        await collection.insertOne({ 
+            code: inviteCode, 
+            projectIds: msg.projectIds, 
+            used: false, 
+            createdBy: user.eppn,
+            created: new Date() 
+        });
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "generateInviteCode", result: inviteCode, requestId: msg.requestId }));
+    }
+
+    async updateInviteCodes(ws, msg) {
+        for(let key in msg.data.inviteCodes) {
+            /*
+            if you're thinking it's stupid to re-connect to the db for each iteration here, i am completely with you, but it doesn't work if I don't - hear me out
+            I can't explain it, but if I put the connection on top of the loop it will fail on the second iteration, no idea why
+            */
+            let db = await this.connectToMongo("visp");
+            let collection = db.collection("invite_codes");
+
+            let inviteCode = msg.data.inviteCodes[key];
+            await collection.updateOne({ code: inviteCode.code }, { $set: { projectIds: inviteCode.projectIds } });
+        }
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "updateInviteCodes", result: "OK", requestId: msg.requestId }));
+    }
+
+    async getInviteCodesByUser(ws, msg) {
+        let user = this.getUserSessionBySocket(ws);
+
+        let db = await this.connectToMongo("visp");
+        let collection = db.collection("invite_codes");
+        let inviteCodes = await collection.find({ createdBy: user.eppn, used: false }).toArray();
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "getInviteCodesByUser", result: inviteCodes, requestId: msg.requestId }));
+    }
+
+    async deleteInviteCode(ws, msg) {
+        let db = await this.connectToMongo("visp");
+        let collection = db.collection("invite_codes");
+        await collection.deleteOne({ code: msg.data.code });
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteInviteCode", result: "OK", requestId: msg.requestId }));
     }
 
     async createEmuDb(ws, msg) {
@@ -2385,21 +2628,21 @@ session-manager_1    | }
     async authorizeWebSocketUser(client) {
         if(process.env.ACCESS_LIST_ENABLED == 'false') {
             //If access list checking is not enabled, always pass the check
-            client.userSession.accessListValidationPass = true;
-            return client.userSession.accessListValidationPass;
+            client.accessListValidationPass = true;
+            return client.accessListValidationPass;
         }
-
-        let user = await this.fetchMongoUser(client.userSession.eppn);
+        
+        let user = await this.fetchMongoUser(client.eppn);
         if(user && user.loginAllowed == true) {
-            client.userSession.accessListValidationPass = true;
-            this.app.addLog("User with eppn "+client.userSession.eppn+" authorized by being in the access list");
+            client.accessListValidationPass = true;
+            this.app.addLog("User with eppn "+client.eppn+" authorized by being in the access list");
         }
         else {
-            client.userSession.accessListValidationPass = false;
-            this.app.addLog("User with eppn "+client.userSession.eppn+" tried to sign-in but was not allowed", "warn");
+            client.accessListValidationPass = false;
+            this.app.addLog("User with eppn "+client.eppn+" tried to sign-in but was not allowed", "info");
         }
 
-        return client.userSession.accessListValidationPass;
+        return client.accessListValidationPass;
     }
 
     parseCookies (request) {

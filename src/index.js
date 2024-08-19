@@ -18,6 +18,7 @@ class Application {
     this.addLog("SessionProxyServer started at port "+this.sessProxyServer.port);
     this.apiServer = new ApiServer(this);
     this.addLog("ApiServer started at port "+this.apiServer.port);
+    this.addLog("Init complete.");
   }
 
   addLog(msg, level = 'info') {

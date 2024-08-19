@@ -125,7 +125,7 @@ class SessionManager {
         }
       }
       if(userSessions.length == 0) {
-        this.app.addLog("No sessions found for user "+username);
+        this.app.addLog("No container sessions found for user "+username);
       }
       return userSessions;
     }
