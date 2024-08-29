@@ -20,6 +20,7 @@ class UserSession {
         this.eppn = userSession.eppn;
         this.accessListValidationPass = false;
         this.warnings = [];
+        this.privileges = userSession.privileges;
 
         if(typeof this.id == "undefined") {
             this.warnings.push("Created a new user session object with incomplete data, missing id");
