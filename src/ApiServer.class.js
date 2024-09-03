@@ -754,7 +754,7 @@ class ApiServer {
         
         this.getSessionContainer(user.username, msg.projectId, msg.appName, volumes).subscribe(status => {
             if(status.type == "status-update") {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "update", result: status.message }));
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "update", result: status.message, requestId: msg.requestId }));
             }
             if(status.type == "data") {
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", result: status.accessCode, requestId: msg.requestId }));
