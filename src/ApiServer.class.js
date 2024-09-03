@@ -693,17 +693,17 @@ class ApiServer {
     async closeContainerSession(ws, user, msg) {
         let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
         if(!session) {
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "closeSession", progress: "end", result: "Error - no such session", requestId: msg.requestId }));
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "closeSession", progress: "end", message: "Error - no such session", result: false, requestId: msg.requestId }));
             return;
         }
 
         if(session.user.username != user.username) {
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "closeSession", progress: "end", result: "Error - you are not the owner of this session", requestId: msg.requestId }));
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "closeSession", progress: "end", message: "Error - you are not the owner of this session", result: false, requestId: msg.requestId }));
             return;
         }
 
         this.app.sessMan.deleteSession(msg.sessionAccessCode).then((result) => {
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "closeSession", result: result, progress: "end", requestId: msg.requestId }));
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "closeSession", message: result, progress: "end", result: true, requestId: msg.requestId }));
         });
     }
 
@@ -712,7 +712,7 @@ class ApiServer {
         let sessions = this.app.sessMan.getUserSessions(user.username);
         for(let key in sessions) {
             if(sessions[key].type == msg.appName && sessions[key].projectId == msg.projectId) {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", result: sessions[key].sessionCode, requestId: msg.requestId }));
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: sessions[key].sessionCode, result: true, requestId: msg.requestId }));
                 return;
             }
         }
@@ -733,7 +733,7 @@ class ApiServer {
         };
 
         if(containerUser == null) {
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", result: "Error - unknown app name", requestId: msg.requestId }));
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: "Error - unknown app name", result: false, requestId: msg.requestId }));
             return;
         }
 
@@ -754,10 +754,10 @@ class ApiServer {
         
         this.getSessionContainer(user.username, msg.projectId, msg.appName, volumes).subscribe(status => {
             if(status.type == "status-update") {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "update", result: status.message, requestId: msg.requestId }));
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "update", message: status.message, result: true, requestId: msg.requestId }));
             }
             if(status.type == "data") {
-                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", result: status.accessCode, requestId: msg.requestId }));
+                ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: status.accessCode,  result: true, requestId: msg.requestId }));
             }
         });
     }
