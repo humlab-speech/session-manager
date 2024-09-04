@@ -319,10 +319,10 @@ class ApiServer {
         let client = this.getClientBySocket(ws); 
 
         if(msg.cmd == "getSession") {
-            msg.data.phpSessId;
             this.getUserByPhpSessionId(msg.data.phpSessId).then((user) => {
                 ws.send(new WebSocketMessage(msg.requestId, msg.cmd, user).toJSON());
             });
+            return;
         }
 
         //FROM THIS POINT ON, ALL COMMANDS REQUIRE AUTHENTICATION
@@ -361,12 +361,14 @@ class ApiServer {
             } catch (error) {
                 this.app.addLog("Error signing out: "+error, "error");
             }
+            return;
         }
 
         let user = this.getUserSessionBySocket(ws);
         
         if(msg.cmd == "validateInviteCode") {
             this.validateInviteCode(ws, msg, user);
+            return;
         }
 
         if(msg == null) {
