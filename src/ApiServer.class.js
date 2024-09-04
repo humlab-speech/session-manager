@@ -316,7 +316,7 @@ class ApiServer {
             this.app.addLog("Failed parsing incoming websocket message as JSON. Message was: "+message, "error");
         }
 
-        let client = this.getClientBySocket(ws);
+        let client = this.getClientBySocket(ws); 
 
         if(msg.cmd == "getSession") {
             msg.data.phpSessId;
@@ -366,7 +366,7 @@ class ApiServer {
         let user = this.getUserSessionBySocket(ws);
         
         if(msg.cmd == "validateInviteCode") {
-            this.validateInviteCode(ws, msg);
+            this.validateInviteCode(ws, msg, user);
         }
 
         if(msg == null) {
@@ -1445,7 +1445,7 @@ class ApiServer {
         await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
     }
 
-    async validateInviteCode(ws, msg) {
+    async validateInviteCode(ws, msg, user) {
         let db = await this.connectToMongo("visp");
         let inviteCodesCollection = db.collection("invite_codes");
         let inviteCodeObject = await inviteCodesCollection.findOne({ code: msg.data.code, used: false });
@@ -1459,20 +1459,20 @@ class ApiServer {
                 return;
             }
             //check that the user is not already in the database
-            let user = await userCollection.findOne({ username: msg.data.session.username });
+            let user = await userCollection.findOne({ username: user.username });
             if(user) {
-                this.app.addLog("User "+msg.data.session.username+" tried to use an invite code, but user is already in the database", "warning");
+                this.app.addLog("User "+user.username+" tried to use an invite code, but user is already in the database", "warning");
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "validateInviteCode", result: false, requestId: msg.requestId }));
                 return;
             }
 
             userCollection.insertOne({
-                firstName: msg.data.session.firstName,
-                lastName: msg.data.session.lastName,
-                fullName: msg.data.session.firstName+" "+msg.data.session.lastName,
-                email: msg.data.session.email,
-                eppn: msg.data.session.eppn,
-                username: msg.data.session.username,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                fullName: user.firstName+" "+user.lastName,
+                email: user.email,
+                eppn: user.eppn,
+                username: user.username,
                 phpSessionId: '',
                 loginAllowed: true,
                 privileges: {
@@ -1482,17 +1482,17 @@ class ApiServer {
 
             inviteCodeObject.projectIds.forEach((projectId) => {
                 let projectCollection = db.collection("projects");
-                projectCollection.updateOne({ id: projectId }, { $push: { members: { username: msg.data.session.username, role: "member" } } });
+                projectCollection.updateOne({ id: projectId }, { $push: { members: { username: user.username, role: "member" } } });
             });
 
             //mark the code as used
             inviteCodesCollection.updateOne({ code: msg.data.code }, { $set: { used: true, usedDate: new Date() } });
 
-            this.app.addLog("User "+msg.data.session.username+" entered a valid invite code and was added to database", "info");
+            this.app.addLog("User "+user.username+" entered a valid invite code and was added to database", "info");
             ws.send(JSON.stringify({ type: "cmd-result", cmd: "validateInviteCode", result: true, requestId: msg.requestId }));
         }
         else {
-            this.app.addLog("Invalid invite code "+msg.data.code+", user eppn: "+msg.data.session.eppn, "info");
+            this.app.addLog("Invalid invite code "+msg.data.code+", user eppn: "+user.eppn, "info");
             ws.send(JSON.stringify({ type: "cmd-result", cmd: "validateInviteCode", result: false, requestId: msg.requestId }));
         }
     }
