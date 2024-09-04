@@ -1473,7 +1473,7 @@ class ApiServer {
                 email: userInfo.email,
                 eppn: userInfo.eppn,
                 username: userInfo.username,
-                phpSessionId: '',
+                phpSessionId: userInfo.phpSessionId,
                 loginAllowed: true,
                 privileges: {
                     createInviteCodes: false
