@@ -1453,7 +1453,7 @@ class ApiServer {
         if(inviteCodeObject) {
             let userCollection = db.collection("users");
 
-            if(msg.data.session == null) {
+            if(user == null) {
                 this.app.addLog("Session data was null when trying to validate invite code.", "error");
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "validateInviteCode", result: false, requestId: msg.requestId }));
                 return;
