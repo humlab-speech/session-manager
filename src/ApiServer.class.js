@@ -338,6 +338,11 @@ class ApiServer {
         }
 
         if(msg.cmd == "authenticateUser") {
+            //msg.data might contain some userInfo, let's store it in the userSession
+            if(msg.data && msg.data.eppn) {
+                client.userSession = msg.data;
+            }
+
             //since we are already authenticated, we can just send a success message
             ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
                 result: 200,
@@ -355,11 +360,23 @@ class ApiServer {
                     user.phpSessionId = null;
                     await user.save(); // Save the updated document back to the database
                     this.app.addLog("User "+client.userSession.eppn+" signed out successfully");
+                    ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                        result: 200,
+                        msg: 'Signed out'
+                    }).toJSON());
                 } else {
                     this.app.addLog("User "+client.userSession.eppn+" not found", "error");
+                    ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                        result: 400,
+                        msg: 'User not found'
+                    }).toJSON());
                 }
             } catch (error) {
                 this.app.addLog("Error signing out: "+error, "error");
+                ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                    result: 400,
+                    msg: 'Error signing out'
+                }).toJSON());
             }
             return;
         }
@@ -1461,26 +1478,13 @@ class ApiServer {
                 return;
             }
             //check that the user is not already in the database
-            let user = await userCollection.findOne({ username: userInfo.username });
+            let user = await userCollection.findOne({ username: userInfo.username, loginAllowed: true });
             if(user) {
-                this.app.addLog("User "+user.username+" tried to use an invite code, but user is already in the database", "warning");
+                this.app.addLog("User "+user.username+" tried to use an invite code, but user is already in the database and authorized.", "warning");
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "validateInviteCode", result: false, requestId: msg.requestId }));
                 return;
             }
-
-            userCollection.insertOne({
-                firstName: userInfo.firstName,
-                lastName: userInfo.lastName,
-                fullName: userInfo.firstName+" "+userInfo.lastName,
-                email: userInfo.email,
-                eppn: userInfo.eppn,
-                username: userInfo.username,
-                phpSessionId: userInfo.phpSessionId,
-                loginAllowed: true,
-                privileges: {
-                    createInviteCodes: false
-                }
-            });
+            userCollection.updateOne({ username: userInfo.username }, { $set: { loginAllowed: true } });
 
             inviteCodeObject.projectIds.forEach((projectId) => {
                 let projectCollection = db.collection("projects");
