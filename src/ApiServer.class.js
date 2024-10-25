@@ -18,6 +18,7 @@ const simpleGit = require('simple-git');
 const path = require('path');
 const { exec } = require('child_process');
 const { nativeSync } = require('rimraf');
+const mime = require('mime-types');
 
 class ApiServer {
     constructor(app) {
@@ -1596,7 +1597,6 @@ class ApiServer {
         let userSession = this.getUserSessionBySocket(ws);
         const unimportedAudioPath = "/unimported_audio/"+userSession.id;
         let path = unimportedAudioPath+"/"+msg.data.projectId+"/"+msg.data.sessionName;
-        console.log(path);
         let fileBinaryData = Buffer.from(msg.data.file, 'base64');
         let mkdirRes = await fs.promises.mkdir(path, { recursive: true });
         
@@ -1827,7 +1827,6 @@ session-manager_1    |           "name": "lkmlm",
 session-manager_1    |           "speakerGender": null,
 session-manager_1    |           "speakerAge": 35,
 session-manager_1    |           "dataSource": "upload",
-session-manager_1    |           "sprScriptName": "",
 session-manager_1    |           "sessionScript": "Missing script",
 session-manager_1    |           "files": [],
 session-manager_1    |           "collapsed": false
@@ -1857,17 +1856,17 @@ session-manager_1    | }
         */
         this.app.addLog("Creating project");
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Validating input" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Validating input" }));
         if(!this.validateProjectForm(projectFormData)) {
             return;
         }
         
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Initializing project directory" })); 
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Initializing project directory" })); 
         if(!await this.initProjectDirectory(user, projectFormData)) {
             this.app.addLog("Failed initializing project directory", "warn");
         }
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Storing project in MongoDB" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Storing project in MongoDB" }));
         
         let mongoProject = await this.mongoose.model('Project').create({
             id: projectFormData.id,
@@ -1904,9 +1903,9 @@ session-manager_1    | }
 
         this._saveBundleLists(user.username, projectFormData.id, bundles)
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
         await this.saveProjectEmuDb(user, projectFormData, true);
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
     }
 
     async _saveBundleLists(username, projectId, bundles) {
@@ -1953,14 +1952,14 @@ session-manager_1    | }
             return;
         }
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Updating database" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Updating database" }));
         await this.saveAnnotationLevelsMongo(projectFormData);
         await this.saveSessionsMongo(projectFormData);
         //await this.saveSprSession(projectFormData);
         
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
         await this.saveProjectEmuDb(user, projectFormData, false);
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
     }
 
     async saveSprSession(projectFormData) {
@@ -2025,7 +2024,6 @@ session-manager_1    | }
                     speakerGender: formSession.speakerGender,
                     speakerAge: formSession.speakerAge,
                     dataSource: formSession.dataSource,
-                    sprScriptName: formSession.sprScriptName,
                     sessionScript: formSession.sessionScript,
                     sessionId: formSession.sessionId,
                     files: formSession.files
@@ -2042,7 +2040,6 @@ session-manager_1    | }
             mongoSession.speakerGender = formSession.speakerGender;
             mongoSession.speakerAge = formSession.speakerAge;
             mongoSession.dataSource = formSession.dataSource;
-            mongoSession.sprScriptName = formSession.sprScriptName;
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
             
@@ -2450,13 +2447,6 @@ session-manager_1    | }
                 }
             }
             */
-
-            //If dataSource is set to 'record', check that a valid recording script is selected
-            if(session.dataSource == "record") {
-                if(session.sprScriptName == "") {
-                    this.app.addLog("No recording script selected", "warn"); //this is ok though
-                }
-            }
         }
 
         return true;
@@ -2690,8 +2680,8 @@ session-manager_1    | }
 
         let project = await this.fetchMongoProjectById(projectId);
 
-        const session = this.app.sessMan.createSession(user, project, 'operations', volumes);
-        await session.createContainer();
+        const containerSession = this.app.sessMan.createSession(user, project, 'operations', volumes);
+        await containerSession.createContainer();
 
         let projectSession = null;
         project.sessions.forEach(sess => {
@@ -2720,11 +2710,35 @@ session-manager_1    | }
 
         //emudb-create-sessions
         //await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
         
         //shutdown the container
-        await this.app.sessMan.deleteSession(session.accessCode);
+        await this.app.sessMan.deleteSession(containerSession.accessCode);
+
+
+        const fileLocation = "/repositories/"+projectId+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId;
+        let files = fs.readdirSync(fileLocation).filter(file => file !== '.' && file !== '..');
+        
+        //now update the project in mongo to reflect the new files in project.sessions[].files[]
+        project.sessions.forEach(sess => {
+            if(sess.id == sessionId) {
+                files.forEach(file => {
+                    let fileSize = fs.statSync(fileLocation+"/"+file).size;
+                    let fileMimeType = mime.lookup(fileLocation+"/"+file);
+
+                    sess.files.push({
+                        name: file,
+                        size: fileSize,
+                        type: fileMimeType
+                    });
+                });
+                
+            }
+        });
+
+        project.markModified('sessions');
+        await project.save();
 
 
         //now delete the files copied for import...?
