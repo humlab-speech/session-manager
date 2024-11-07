@@ -728,6 +728,20 @@ class ApiServer {
     }
 
     async launchContainerSession(ws, user, msg) {
+        //check that this user has the authority to launch a session in this project (they need to have the project role 'admin')
+        let project = await this.fetchProject(msg.projectId);
+        if(!project) {
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: "Error - no such project", result: false, requestId: msg.requestId }));
+            return;
+        }
+
+        let userIsAuthorized = project.members.find(m => m.username == user.username && ( m.role == "admin" || m.role == "analyzer" ));
+        if(!userIsAuthorized) {
+            this.app.addLog("User "+user.username+" tried to launch a session in project "+msg.projectId+", but is not of an authorized role", "warning");
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: "Error - user is not authorized", result: false, requestId: msg.requestId }));
+            return;
+        }
+
         //check if this user already has a running session, if so, route into that instead of spawning a new one
         let sessions = this.app.sessMan.getUserSessions(user.username);
         for(let key in sessions) {
@@ -736,8 +750,7 @@ class ApiServer {
                 return;
             }
         }
-
-        let project = await this.fetchProject(msg.projectId);
+        
 
         let volumes = [];
 
@@ -1515,6 +1528,7 @@ class ApiServer {
             code: inviteCode, 
             projectIds: msg.projectIds, 
             used: false, 
+            role: "transcriber",
             createdBy: user.eppn,
             created: new Date() 
         });
@@ -1531,7 +1545,7 @@ class ApiServer {
             let collection = db.collection("invite_codes");
 
             let inviteCode = msg.data.inviteCodes[key];
-            await collection.updateOne({ code: inviteCode.code }, { $set: { projectIds: inviteCode.projectIds } });
+            await collection.updateOne({ code: inviteCode.code }, { $set: { projectIds: inviteCode.projectIds, role: inviteCode.role } });
         }
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "updateInviteCodes", result: "OK", requestId: msg.requestId }));
     }
