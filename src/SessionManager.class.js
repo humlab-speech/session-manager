@@ -51,6 +51,7 @@ class SessionManager {
     }
 
     commitRunningSessions(shutdownWhenDone = true) {
+      this.app.addLog('Committing all running sessions');
       let promises = [];
       this.sessions.forEach(session => {
         promises.push(session.commit());
