@@ -73,7 +73,11 @@ class Application {
   shutdown() {
     this.addLog('Shutdown requested. Committing live sessions...');
     //this.sessMan.exportRunningSessions();
-    this.sessMan.commitRunningSessions();
+    
+    //disabling this since:
+    //1. it doesn't work right without gitlab as it currently is
+    //2. it doesn't do much anyway since it doesn't actually save the data to disk, it only does a git commit
+    //this.sessMan.commitRunningSessions();
   }
   
 }
