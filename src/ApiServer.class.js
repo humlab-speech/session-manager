@@ -1945,7 +1945,7 @@ session-manager_1    | }
 
     async saveProject(ws, user, msg) {
 
-        if(user.privileges.createProjects != true) {
+        if(!user || !user.privileges || user.privileges.createProjects != true) {
             this.app.addLog("User "+user.username+" tried to create a project, but is not authorized", "warning");
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", message: "User not authorized to create projects", result: false, progress: "end" }));
             return;
