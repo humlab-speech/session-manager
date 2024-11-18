@@ -97,10 +97,10 @@ class ApiServer {
         mongoose.model('BundleList', this.models.BundleList);
     }
 
-    async fetchMongoUser(username) {
+    async fetchMongoUser(eppn) {
         const db = await this.connectToMongo();
         const usersCollection = db.collection("users");
-        let user = await usersCollection.findOne({ eppn: username });
+        let user = await usersCollection.findOne({ eppn: eppn });
         return user;
     }
 
@@ -2611,7 +2611,7 @@ session-manager_1    | }
                 incMsg.on('data', (data) => {
                     body += data;
                 });
-                incMsg.on('end', () => {
+                incMsg.on('end', async () => {
                     try {
                         let responseBody = JSON.parse(body);
                         if(responseBody.body == "[]") {
@@ -2633,6 +2633,11 @@ session-manager_1    | }
                     }
 
                     let userSession = JSON.parse(JSON.parse(body).body);
+
+                    //complete user data from the mongodb database
+                    let mongoUser = await this.fetchMongoUser(userSession.eppn);
+                    userSession = Object.assign(userSession, mongoUser);
+
                     if(typeof userSession.username == "undefined") {
                         resolve({
                             authenticated: false,
