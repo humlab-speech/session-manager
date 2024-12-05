@@ -53,7 +53,7 @@ class Session {
         this.accessCode = code;
     }
 
-    promisifyStream(stream) {
+    promisifyStream(stream, expectJsonResponse = true) {
         let streamData = "";
         return new Promise((resolve, reject) => {
           stream.on('data', data => {
@@ -61,7 +61,9 @@ class Session {
             streamData += data.toString();
           });
           stream.on('end', () => {
-            streamData = this.reduceToJson(streamData);
+            if(expectJsonResponse) {
+                streamData = this.reduceToJson(streamData);
+            }
             resolve(streamData);
           });
           stream.on('error', (data) => {
@@ -85,7 +87,7 @@ class Session {
         return data;
     }
 
-    async runCommand(cmd, env = []) {
+    async runCommand(cmd, env = [], expectJsonResponse = true) {
         if(!Array.isArray(cmd)) {
             cmd = [cmd];
         }
@@ -116,7 +118,7 @@ class Session {
             return exec.start({ Detach: false })
         })
         .then(stream => {
-            return this.promisifyStream(stream);
+            return this.promisifyStream(stream, expectJsonResponse);
         })
         .catch((error) => this.app.addLog(error, "error"));
     }
@@ -376,15 +378,24 @@ class Session {
         
         //This will stop new connections but not close existing ones
         try {
-            this.proxyServer.off("open");
-            this.proxyServer.off("error");
-            this.proxyServer.off("proxyReq");
-            this.proxyServer.off("proxyReqWs");
-            this.proxyServer.off("upgrade");
-            this.proxyServer.close();
+            if(this.proxyServer) {
+                this.proxyServer.off("open");
+                this.proxyServer.off("error");
+                this.proxyServer.off("proxyReq");
+                this.proxyServer.off("proxyReqWs");
+                this.proxyServer.off("upgrade");
+                this.proxyServer.close();
+            }
         }
         catch(error) {
             this.app.addLog("Session error at proxy-server delete: "+error, "error");
+        }
+
+        if(!this.container) {
+            this.app.addLog("Session has no container reference.", "error");
+            return {
+                status: "error"
+            };
         }
 
         try {

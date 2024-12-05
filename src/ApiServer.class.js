@@ -19,6 +19,7 @@ const path = require('path');
 const { exec } = require('child_process');
 const { nativeSync } = require('rimraf');
 const mime = require('mime-types');
+const WhisperService = require('./WhisperService.class');
 
 class ApiServer {
     constructor(app) {
@@ -32,14 +33,17 @@ class ApiServer {
         this.expressApp = express();
         this.expressApp.use(bodyParser.urlencoded({ extended: true }));
         this.expressApp.use(bodyParser.json());
+        this.transcriptionQueue = [];
+        this.whisperService = new WhisperService(this.app);
 
         this.setupEndpoints();
         this.startServer();
         this.startWsServer();
-        this.mongoose = this.talkToMeGoose();
-
-        this.defineModels();
-
+        this.talkToMeGoose().then((mongoose) => {
+            this.mongoose = mongoose;
+            this.defineModels();
+            this.whisperService.init();
+        });
         
     }
 
@@ -72,29 +76,31 @@ class ApiServer {
         });
         mongoose.model('Project', this.models.Project);
 
-
-        /* BundleList.bundles looks like this:
-        [
-            {
-                "session": "Sess1",
-                "name": "testljud",
-                "comment": "",
-                "finishedEditing": false
-            },
-            {
-                "session": "Sess1",
-                "name": "water_river",
-                "comment": "",
-                "finishedEditing": false
-            }
-        ]
-        */
         this.models.BundleList = new mongoose.Schema({
             owner: String,
             projectId: String,
             bundles: Array,
         });
         mongoose.model('BundleList', this.models.BundleList);
+        
+        this.models.TranscriptionQueueItem = new mongoose.Schema({
+            id: String,
+            project: String,
+            session: String,
+            bundle: String,
+            initiatedByUser: String,
+            language: String,
+            status: String,
+            error: String,
+            log: String,
+            createdAt: Date,
+            updatedAt: Date,
+            finishedAt: Date,
+            transcriptionData: Object,
+            prePocessingComplete: Boolean,
+            userNotified: Boolean,
+        });
+        mongoose.model('TranscriptionQueueItem', this.models.TranscriptionQueueItem);
     }
 
     async fetchMongoUser(eppn) {
@@ -125,9 +131,9 @@ class ApiServer {
         this.httpServer.listen(this.port);
     }
 
-    talkToMeGoose() { //also known as 'connectMongoose'
+    async talkToMeGoose() { //also known as 'connectMongoose'
         const mongoUrl = 'mongodb://root:'+process.env.MONGO_ROOT_PASSWORD+'@mongo:27017/visp?authSource=admin';
-        mongoose.connect(mongoUrl, { useNewUrlParser: true, useUnifiedTopology: true });
+        await mongoose.connect(mongoUrl, { useNewUrlParser: true, useUnifiedTopology: true });
         return mongoose;
     }
     connectMongoose = this.talkToMeGoose.bind(this);
@@ -139,7 +145,7 @@ class ApiServer {
     async connectToMongo(database = "visp") {
         //check if this.mongoClient is already an active mongodb connection
         if(this.mongoClient != null && this.mongoClient.topology && this.mongoClient.topology.isConnected()) {
-            this.app.addLog("Reusing existing mongo connection", "debug");
+            //this.app.addLog("Reusing existing mongo connection", "debug");
             return this.mongoClient.db(database);
         }
 
@@ -334,7 +340,7 @@ class ApiServer {
             return;
         }
         else {
-            this.app.addLog("User "+authResult.userSession.eppn+" authenticated", "debug");
+            //this.app.addLog("User "+authResult.userSession.eppn+" authenticated", "debug");
             client.userSession = authResult.userSession;
         }
 
@@ -394,7 +400,7 @@ class ApiServer {
             return;
         }
 
-        //FROM THIS POINT ON, ALL COMMANDS REQUIRE AUTHORIZATION
+        //FROM THIS POINT ON, ALL COMMANDS REQUIRE AUTHORIZATION (not to be confused with authentication)
         //here we perform authorization, so all command callbacks below this point are only executed if the user is authorized
         //if you wish to have a command that does not require authorization, place it above this point
         if(await this.authorizeWebSocketUser(user) == false) {
@@ -402,7 +408,7 @@ class ApiServer {
             return;
         }
         else {
-            this.app.addLog("User "+user.eppn+" authorized", "debug");
+            //this.app.addLog("User "+user.eppn+" authorized", "debug");
         }
 
         if(msg.cmd == "authorizeUser") {
@@ -411,6 +417,26 @@ class ApiServer {
                 result: 200,
                 msg: 'Authorized'
             }).toJSON());
+            return;
+        }
+
+        if(msg.cmd == "transcribe") {
+            this.whisperService.addFileToTranscriptionQueue(ws, user, msg);
+            return;
+        }
+
+        if(msg.cmd == "removeTranscriptionFromQueue") {
+            this.whisperService.removeTranscriptionFromQueue(ws, user, msg);
+            return;
+        }
+
+        if(msg.cmd == "fetchTranscriptionQueueItems") {
+            this.whisperService.fetchTranscriptionQueueItems(ws, user, msg);
+            return;
+        }
+
+        if(msg.cmd == "fetchTranscription") {
+            this.whisperService.fetchTranscription(ws, user, msg);
             return;
         }
 
@@ -1118,7 +1144,7 @@ class ApiServer {
             }
 
             //also return information about any running containers for this project
-            projects[key].liveAppSessions = this.app.sessMan.getSessionsByProjectId(project.id);
+            projects[key].liveAppSessions = this.app.sessMan.getContainerSessionsByProjectId(project.id);
         }
     
         //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: projects }));
@@ -2586,7 +2612,7 @@ session-manager_1    | }
         }
 
         //check that this user exists in the mongodb (users collection) and has the loginAllowed flag set to true
-        this.app.addLog("Checking if user "+userSession.username+" is authorized", "debug");
+        //this.app.addLog("Checking if user "+userSession.username+" is authorized", "debug");
         let user = await this.fetchMongoUser(userSession.eppn);
         if(user && user.loginAllowed == true) {
             return true;
@@ -3130,6 +3156,10 @@ session-manager_1    | }
             return false;
         }
         return true;
+    }
+
+    shutdown() {
+        this.whisperService.shutdown();
     }
 }
 

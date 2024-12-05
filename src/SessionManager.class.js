@@ -96,7 +96,7 @@ class SessionManager {
       return false;
     }
 
-    getSessionsByProjectId(projectId) {
+    getContainerSessionsByProjectId(projectId) {
       this.refreshSessions();
 
       let sessions = [];
@@ -109,6 +109,21 @@ class SessionManager {
             sessionAccessCode: session.accessCode
           });
         }
+      });
+      return sessions;
+    }
+
+    getAllSessions() {
+      this.refreshSessions();
+
+      let sessions = [];
+      this.sessions.forEach(session => {
+        sessions.push({
+          projectId: session.project.id,
+          username: session.user.username,
+          type: session.hsApp,
+          sessionAccessCode: session.accessCode
+        });
       });
       return sessions;
     }
@@ -346,6 +361,10 @@ class SessionManager {
       });
     }
 
+    async shutdown() {
+      //nothing to do here
+      return true;
+    }
 };
 
 module.exports = SessionManager

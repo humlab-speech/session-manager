@@ -51,27 +51,34 @@ class Application {
     let writeMsg = logMsg+" ["+levelMsg+"] "+msg+"\n";
     
     let logFile = "logs/session-manager.log";
-    switch(level) {
-      case 'info':
+    let debugLogFile = "logs/session-manager.debug.log";
+    switch(levelMsg) {
+      case 'INFO':
         console.log(printMsg);
         fs.appendFileSync(logFile, writeMsg);
+        fs.appendFileSync(debugLogFile, writeMsg);
         break;
-      case 'warn':
+      case 'WARN':
         console.warn(printMsg);
         fs.appendFileSync(logFile, writeMsg);
+        fs.appendFileSync(debugLogFile, writeMsg);
         break;
-      case 'error':
+      case 'ERROR':
         console.error(printMsg);
         fs.appendFileSync(logFile, writeMsg);
+        fs.appendFileSync(debugLogFile, writeMsg);
         break;
-      default:
-        console.error(printMsg);
-        fs.appendFileSync(logFile, writeMsg);
+      case 'DEBUG':
+        console.debug(printMsg);
+        fs.appendFileSync(debugLogFile, writeMsg);
     }
   }
 
   shutdown() {
-    this.addLog('Shutdown requested. Committing live sessions...');
+    
+    this.addLog('Shutdown requested. Waiting for submodules...');
+    this.sessMan.shutdown();
+    this.apiServer.shutdown();
     //this.sessMan.exportRunningSessions();
     
     //disabling this since:
@@ -87,11 +94,13 @@ let application = null;
 process.on('SIGINT', () => {
   console.log("SIGINT received");
   application.shutdown();
+  process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log("SIGTERM received");
   application.shutdown();
+  process.exit(0);
 });
 
 application = new Application();
