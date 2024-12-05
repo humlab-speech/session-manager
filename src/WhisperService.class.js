@@ -221,7 +221,8 @@ class WhisperService {
             createdAt: new Date(),
             updatedAt: new Date(),
             finishedAt: null,
-            prePocessingComplete: false,
+            preProcessing: "queued",
+            preProcessingRuns: 0,
             transcriptionData: {},
             userNotified: false
         });
@@ -369,9 +370,11 @@ class WhisperService {
         //before items can be transcribed, they need to through pre-processing in the form of being converted to 16bit wav mono files
         items.forEach(item => {
             //check if the item is queued
-            if(item.status == 'queued' && !item.prePocessingComplete) {
+            if(item.status == "queued" && item.preProcessing == "queued") {
                 //run the pre-processing
-                this.preProcessTranscriptionPromises.push(this.preProcessTranscription(item));
+                if(item.preProcessing == 'queued') {
+                    this.preProcessTranscriptionPromises.push(this.preProcessTranscription(item));
+                }
             }
         });
 
@@ -380,7 +383,7 @@ class WhisperService {
             return a.updatedAt - b.updatedAt;
         })[0];
 
-        if(nextInQueue && nextInQueue.prePocessingComplete && nextInQueue.status == 'queued' && this.transcriptionRunning == false) {
+        if(nextInQueue && nextInQueue.preProcessing == 'complete' && nextInQueue.status == 'queued' && this.transcriptionRunning == false) {
             this.app.addLog("Starting transcription of "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "info");
 
             this.transcriptionRunning = true;
@@ -461,9 +464,12 @@ class WhisperService {
 
     async preProcessTranscription(queueItem) {
         this.app.addLog("Pre-processing file for transcription: "+queueItem.project+"/"+queueItem.session+"/"+queueItem.bundle, "info");
+        queueItem.preProcessing = "running";
+        queueItem.updatedAt = new Date();
+        await queueItem.save();
 
         //convert the file to 16bit wav mono (with ffmpeg) and put the out in /transcription-queued/<project>/<session>/<bundle>.wav
-        //then set the queueItem.prePocessingComplete to true
+        //then set the queueItem.preProcessing to complete
 
         let bundleFilenameWithoutExt = this.getFileNameWithoutExtension(queueItem.bundle);
         let sourcePath = "/repositories/"+this.getRelativeAudioFilePath(queueItem.project, queueItem.session, queueItem.bundle);
@@ -475,7 +481,7 @@ class WhisperService {
         try {
             fs.accessSync(destPath+"/"+bundleFilenameWithoutExt+".wav", fs.constants.R_OK);
             this.app.addLog("File already exists in destination path - skipping and marking as pre-processed.", "info");
-            queueItem.prePocessingComplete = true;
+            queueItem.preProcessing = "complete";
             queueItem.updatedAt = new Date();
             await queueItem.save();
             return;
@@ -483,15 +489,16 @@ class WhisperService {
 
 
         try {
-            execSync(`ffmpeg -i "${sourcePath}/${queueItem.bundle}" -acodec pcm_s16le -ac 1 -ar 16000 "${destPath}/${bundleFilenameWithoutExt}.wav"`);
+            const ffmpegResult = execSync(`ffmpeg -i "${sourcePath}${queueItem.bundle}" -acodec pcm_s16le -ac 1 -ar 16000 "${destPath}${bundleFilenameWithoutExt}.wav"`, { stdio: 'pipe' });
             queueItem.error = "";
-            queueItem.prePocessingComplete = true;
+            queueItem.preProcessing = "complete";
             queueItem.updatedAt = new Date();
             await queueItem.save();
         } catch (err) {
             this.app.addLog("Error converting file to 16bit wav mono: " + err.toString(), "error");
             queueItem.error = "Error converting file to 16bit wav mono: " + err.toString();
             queueItem.status = 'error';
+            queueItem.preProcessing = "error";
             queueItem.updatedAt = new Date();
             await queueItem.save();
         }
@@ -501,13 +508,20 @@ class WhisperService {
         let filePath = "/transcription-queued/"+this.getRelativeAudioFilePath(queueItem.project, queueItem.session, queueItem.bundle);
         const outputPath = "/repositories/"+this.getRelativeAudioFilePath(queueItem.project, queueItem.session, queueItem.bundle);
 
-        //check that filePath exists
+        //check that filePath exists, if it doesn't then assume the pre-processed file was deleted and mark the queueItem for pre-processing again
+        //but keep an eye on the preProcessingRuns so we don't get stuck in a loop
         try {
             fs.accessSync(filePath, fs.constants.R_OK);
         } catch (err) {
-            this.app.addLog("Error: "+err, "error");
+            this.app.addLog(err, "warn");
             queueItem.error = "Error: "+err;
-            queueItem.status = 'error';
+            queueItem.preProcessingRuns = queueItem.preProcessingRuns + 1;
+            if(queueItem.preProcessingRuns > 10) {
+                queueItem.preProcessing = "error - too many tries";
+            }
+            else {
+                queueItem.preProcessing = "queued";
+            }
             queueItem.updatedAt = new Date();
             await queueItem.save();
             return;

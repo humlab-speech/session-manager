@@ -97,7 +97,8 @@ class ApiServer {
             updatedAt: Date,
             finishedAt: Date,
             transcriptionData: Object,
-            prePocessingComplete: Boolean,
+            preProcessing: String,
+            preProcessingRuns: Number,
             userNotified: Boolean,
         });
         mongoose.model('TranscriptionQueueItem', this.models.TranscriptionQueueItem);
