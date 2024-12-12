@@ -28,15 +28,18 @@ class WhisperService {
           });
 
 
-        (async () => {
+          (async () => {
             const gradio = await import('@gradio/client');
             const { Client, FileData } = gradio;
-            try {
-                this.gradioConn = await Client.connect('http://whisper:7860');
-                this.gradioReady = true;
-                this.app.addLog("Gradio service connected and ready.", "info");
-            } catch (err) {
-                this.app.addLog("Error connecting to Gradio service: " + err.toString(), "error");
+            while (!this.gradioReady) {
+                try {
+                    this.gradioConn = await Client.connect('http://whisper:7860');
+                    this.gradioReady = true;
+                    this.app.addLog("Whisper service connected and ready.", "info");
+                } catch (err) {
+                    this.app.addLog("Error connecting to Whisper service, will try again.", "warn");
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds before retrying
+                }
             }
         })();
     
@@ -139,13 +142,13 @@ class WhisperService {
         }
         let hasAccess = false;
         project.members.forEach(member => {
-            if(member.username == user.username && member.role == 'admin') {
+            if(member.username == user.username && (member.role == 'admin' || member.role == 'analyzer')) {
                 hasAccess = true;
             }
         });
 
         if(!hasAccess) {
-            ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User does not have access to this project" }));
+            ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User does not have the right access to this project to manage transcriptions." }));
             return;
         }
 
@@ -170,7 +173,7 @@ class WhisperService {
 
         let hasAccess = false;
         project.members.forEach(member => {
-            if(member.username == user.username && member.role == 'admin') {
+            if(member.username == user.username && (member.role == 'admin' || member.role == 'analyzer')) {
                 hasAccess = true;
             }
         });
@@ -510,12 +513,12 @@ class WhisperService {
 
         //check that filePath exists, if it doesn't then assume the pre-processed file was deleted and mark the queueItem for pre-processing again
         //but keep an eye on the preProcessingRuns so we don't get stuck in a loop
+        queueItem.preProcessingRuns = queueItem.preProcessingRuns + 1;
         try {
             fs.accessSync(filePath, fs.constants.R_OK);
         } catch (err) {
             this.app.addLog(err, "warn");
             queueItem.error = "Error: "+err;
-            queueItem.preProcessingRuns = queueItem.preProcessingRuns + 1;
             if(queueItem.preProcessingRuns > 10) {
                 queueItem.preProcessing = "error - too many tries";
             }
