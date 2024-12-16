@@ -347,13 +347,13 @@ class WhisperService {
     async runTranscriptionQueue() {
         //this.app.addLog("Checking transcription queue", "debug");
 
-        const transcriptionDebug = process.env.TRANSCRIPTION_DEBUG ? process.env.TRANSCRIPTION_DEBUG : false;
+        this.transcriptionDebug = process.env.TRANSCRIPTION_DEBUG ? process.env.TRANSCRIPTION_DEBUG : false;
 
         //get all items in the database queue that has the status 'queued' or 'running'
         const TranscriptionQueueItem = this.app.apiServer.mongoose.model('TranscriptionQueueItem');
         let items = await TranscriptionQueueItem.find({ status: { $in: ['queued', 'running'] } });
 
-        if(transcriptionDebug) {
+        if(this.transcriptionDebug) {
             this.app.addLog("Transcription queue items (queued or running): "+items.length, "debug");
         }
         
@@ -393,7 +393,7 @@ class WhisperService {
         })[0];
 
 
-        if(transcriptionDebug) {
+        if(this.transcriptionDebug) {
             this.app.addLog("Next in queue: "+(nextInQueue ? nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle : "none"), "debug");
         }
 
@@ -409,17 +409,26 @@ class WhisperService {
                 this.transcriptionRunning = false;
             });
         }
-        else if(transcriptionDebug) {
-            this.app.addLog("Not starting transcription of "+(nextInQueue ? nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle : "none")+" because:", "debug");
-            if(this.transcriptionRunning) {
-                this.app.addLog("Transcription is already running", "debug");
+        else {
+            if(nextInQueue && nextInQueue.preProcessing == 'error') {
+                //if the pre-processing failed, remove it from the queue by marking the item as errored
+                nextInQueue.status = 'error';
+                nextInQueue.updatedAt = new Date();
+                await nextInQueue.save();
             }
-            if(nextInQueue) {
-                if(nextInQueue.preProcessing != 'complete') {
-                    this.app.addLog("Pre-processing is not complete for "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "debug");
+
+            if(this.transcriptionDebug) {
+                this.app.addLog("Not starting transcription of "+(nextInQueue ? nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle : "none")+" because:", "debug");
+                if(this.transcriptionRunning) {
+                    this.app.addLog("Transcription is already running", "debug");
                 }
-                if(nextInQueue.status != 'queued') {
-                    this.app.addLog("Status is not queued for "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "debug");
+                if(nextInQueue) {
+                    if(nextInQueue.preProcessing != 'complete') {
+                        this.app.addLog("Pre-processing is not complete for "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "debug");
+                    }
+                    if(nextInQueue.status != 'queued') {
+                        this.app.addLog("Status is not queued for "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "debug");
+                    }
                 }
             }
         }
