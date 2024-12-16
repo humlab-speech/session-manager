@@ -47,6 +47,7 @@ class WhisperService {
             while (!this.gradioReady) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
+            this.app.addLog("Initiating transcription queue interval.", "info");
             setInterval(() => {
                 this.runTranscriptionQueue();
             }, 5000);
@@ -346,10 +347,15 @@ class WhisperService {
     async runTranscriptionQueue() {
         //this.app.addLog("Checking transcription queue", "debug");
 
+        const transcriptionDebug = process.env.TRANSCRIPTION_DEBUG ? process.env.TRANSCRIPTION_DEBUG : false;
+
         //get all items in the database queue that has the status 'queued' or 'running'
         const TranscriptionQueueItem = this.app.apiServer.mongoose.model('TranscriptionQueueItem');
         let items = await TranscriptionQueueItem.find({ status: { $in: ['queued', 'running'] } });
 
+        if(transcriptionDebug) {
+            this.app.addLog("Transcription queue items (queued or running): "+items.length, "debug");
+        }
         
         //check if we have any item with status 'running' which have been running for more than 1 day
         //if so, assume something went wrong and mark them as errored
@@ -386,6 +392,11 @@ class WhisperService {
             return a.updatedAt - b.updatedAt;
         })[0];
 
+
+        if(transcriptionDebug) {
+            this.app.addLog("Next in queue: "+(nextInQueue ? nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle : "none"), "debug");
+        }
+
         if(nextInQueue && nextInQueue.preProcessing == 'complete' && nextInQueue.status == 'queued' && this.transcriptionRunning == false) {
             this.app.addLog("Starting transcription of "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "info");
 
@@ -397,6 +408,20 @@ class WhisperService {
             }).finally(() => {
                 this.transcriptionRunning = false;
             });
+        }
+        else if(transcriptionDebug) {
+            this.app.addLog("Not starting transcription of "+(nextInQueue ? nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle : "none")+" because:", "debug");
+            if(this.transcriptionRunning) {
+                this.app.addLog("Transcription is already running", "debug");
+            }
+            if(nextInQueue) {
+                if(nextInQueue.preProcessing != 'complete') {
+                    this.app.addLog("Pre-processing is not complete for "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "debug");
+                }
+                if(nextInQueue.status != 'queued') {
+                    this.app.addLog("Status is not queued for "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "debug");
+                }
+            }
         }
 
         this.notifyUsers();
