@@ -155,7 +155,15 @@ class WhisperService {
 
         //get the mongoose model for TranscriptionQueueItem
         const TranscriptionQueueItem = this.app.apiServer.mongoose.model('TranscriptionQueueItem');
+        let allItems = await TranscriptionQueueItem.find({ status: { $in: ['queued', 'running'] } }).sort({ updatedAt: 1 });
         let items = await TranscriptionQueueItem.find({ project: msg.data.project });
+
+        //for each item - figure out it's place in the queue
+        items.forEach(item => {
+            item.queuePosition = 0;
+            item.queuePosition = allItems.findIndex(i => i.id == item.id);
+        });
+
         ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, data: items, result: true }));
     }
 
@@ -228,7 +236,8 @@ class WhisperService {
             preProcessing: "queued",
             preProcessingRuns: 0,
             transcriptionData: {},
-            userNotified: false
+            userNotified: false,
+            queuePosition: -1
         });
 
         await item.save();
@@ -351,7 +360,7 @@ class WhisperService {
 
         //get all items in the database queue that has the status 'queued' or 'running'
         const TranscriptionQueueItem = this.app.apiServer.mongoose.model('TranscriptionQueueItem');
-        let items = await TranscriptionQueueItem.find({ status: { $in: ['queued', 'running'] } });
+        let items = await TranscriptionQueueItem.find({ status: { $in: ['queued', 'running'] } }).sort({ updatedAt: 1 });
 
         if(this.transcriptionDebug) {
             this.app.addLog("Transcription queue items (queued or running): "+items.length, "debug");
@@ -387,11 +396,10 @@ class WhisperService {
             }
         });
 
-        //get the next in queue based on the updatedAt date
-        let nextInQueue = items.sort((a, b) => {
-            return a.updatedAt - b.updatedAt;
-        })[0];
-
+        if(items.length == 0) {
+            return;
+        }
+        let nextInQueue = items[0];
 
         if(this.transcriptionDebug) {
             this.app.addLog("Next in queue: "+(nextInQueue ? nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle : "none"), "debug");
@@ -399,7 +407,7 @@ class WhisperService {
 
         if(nextInQueue && nextInQueue.preProcessing == 'complete' && nextInQueue.status == 'queued' && this.transcriptionRunning == false) {
             this.app.addLog("Starting transcription of "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle, "info");
-
+            
             this.transcriptionRunning = true;
             this.initTranscription(nextInQueue).then(() => {
                 this.app.addLog("Transcription of "+nextInQueue.project+"/"+nextInQueue.session+"/"+nextInQueue.bundle+" complete", "info");

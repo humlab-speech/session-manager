@@ -19,6 +19,7 @@ const path = require('path');
 const { exec } = require('child_process');
 const { nativeSync } = require('rimraf');
 const mime = require('mime-types');
+const { execSync } = require('child_process');
 const WhisperService = require('./WhisperService.class');
 
 class ApiServer {
@@ -100,6 +101,7 @@ class ApiServer {
             preProcessing: String,
             preProcessingRuns: Number,
             userNotified: Boolean,
+            queuePosition: Number
         });
         mongoose.model('TranscriptionQueueItem', this.models.TranscriptionQueueItem);
     }
@@ -1735,33 +1737,49 @@ class ApiServer {
 
     async getProjectById(projectId) {
         const Project = this.mongoose.model('Project');
-        let project = await Project.findOne({ id: projectId });
-        return project;   
+    
+        // Validate input
+        if (!projectId) {
+            throw new Error("Invalid projectId provided.");
+        }
+    
+        try {
+            // Fetch the project with improved performance
+            let project = await Project.findOne({ id: projectId });
+    
+            if (!project) {
+                throw new Error(`Project with id "${projectId}" not found.`);
+            }
+    
+            return project;
+        } catch (error) {
+            console.error(`Error in getProjectById: ${error.message}`);
+            throw error; // Rethrow for upstream handling
+        }
     }
-    /*
+    
     async getSessionById(projectId, sessionId) {
         const Project = this.mongoose.model('Project');
-        let project = await Project.findOne(
-            { id: parseInt(projectId), 'sessions.id': sessionId },
-            { 'sessions.$': 1 }
-        );
-
-        console.log(project);
-
-        console.log(JSON.stringify(project, null, 2));
-
-        let session = project.sessions[0];
-        return session;
-    }
-    */
-    async getSessionById(projectId, sessionId) {
-        const Project = this.mongoose.model('Project');
-        let project = await Project.findOne(
-            { id: projectId }, 
-            { sessions: { $elemMatch: { id: sessionId } } }
-        );
-        let session = project.sessions[0];
-        return session;
+    
+        try {
+            // Query the project and use $elemMatch to fetch the matching session
+            let project = await Project.findOne(
+                { id: projectId },
+                { sessions: { $elemMatch: { id: sessionId } } }
+            );
+    
+            // Safely check if project and session exist
+            if (!project || !project.sessions || project.sessions.length === 0) {
+                throw new Error(`Session with id "${sessionId}" not found in project "${projectId}".`);
+            }
+    
+            let session = project.sessions[0]; // Retrieve the matched session
+            return session;
+    
+        } catch (error) {
+            this.app.addLog(error.message, "error");
+            throw error; // Re-throw the error for upstream handling
+        }
     }
     
 
@@ -1774,14 +1792,14 @@ class ApiServer {
         let session = await this.getSessionById(projectId, sessionId);
 
         if(!project || !session) {
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", result: "Could not find project or session", requestId: msg.requestId }));
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", result: false, message: "Could not find project or session", requestId: msg.requestId }));
             return;
         }
 
         //check that this user is a project member and has the role 'admin'
         let userIsAdmin = project.members.find(m => m.username == user.username && m.role == "admin");
         if(!userIsAdmin) {
-            ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", result: "User is not admin for this project", requestId: msg.requestId }));
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", result: false, message: "User is not admin for this project", requestId: msg.requestId }));
             return;
         }
         
@@ -1797,6 +1815,8 @@ class ApiServer {
         
         if(!nativeSync(repoBundlePath)) {
             this.app.addLog("Could not delete file "+repoBundlePath, "error");
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", result: false, message: "Could not delete file "+repoBundlePath, requestId: msg.requestId }));
+            return;
         }
 
         const Project = this.mongoose.model('Project');
@@ -1805,30 +1825,30 @@ class ApiServer {
             { $pull: { "sessions.$.files": { name: fileName } } }
         );
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", result: "Success", requestId: msg.requestId }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteBundle", progress: "end", message: "Success", requestId: msg.requestId }));
     }
 
     async deleteProject(ws, user, msg) {
         let totalStepsNum = 3;
         let stepNum = 0;
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Initiating" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, message: "Initiating", result: true }));
 
         let project = msg.data.project;
         let repoPath = "/repositories/"+project.id;
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Deleting project from database" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, message: "Deleting project from database", result: true }));
         const Project = this.mongoose.model('Project');
         await Project.deleteOne({ id: project.id });
 
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Deleting project from filesystem" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, message: "Deleting project from filesystem", result: true }));
         if(!nativeSync(repoPath)) {
             this.app.addLog("Could not delete project "+repoPath, "error");
         }
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: "end", result: "Project deleted" }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: "end", message: "Project deleted", result: true }));
     }
 
     async createProject(ws, user, msg) {
-        let totalStepsNum = 5;
+        let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
         let customAlphabet = nanoid.customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
@@ -1897,17 +1917,17 @@ session-manager_1    | }
         */
         this.app.addLog("Creating project");
 
-        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Validating input" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Validating input" }));
         if(!this.validateProjectForm(projectFormData)) {
             return;
         }
         
-        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Initializing project directory" })); 
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Initializing project directory" })); 
         if(!await this.initProjectDirectory(user, projectFormData)) {
             this.app.addLog("Failed initializing project directory", "warn");
         }
 
-        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Storing project in MongoDB" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Storing project in MongoDB" }));
         
         let mongoProject = await this.mongoose.model('Project').create({
             id: projectFormData.id,
@@ -1944,9 +1964,9 @@ session-manager_1    | }
 
         this._saveBundleLists(user.username, projectFormData.id, bundles)
 
-        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
-        await this.saveProjectEmuDb(user, projectFormData, true);
-        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Building project directory" }));
+        await this.saveProjectEmuDb(user, projectFormData, true, ws, msg);
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: "end", result: true, message: "Done" }));
     }
 
     async _saveBundleLists(username, projectId, bundles) {
@@ -1990,7 +2010,7 @@ session-manager_1    | }
     }
 
     async updateProject(ws, user, msg) {
-        let totalStepsNum = 3;
+        let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
 
@@ -2006,8 +2026,8 @@ session-manager_1    | }
         //await this.saveSprSession(projectFormData);
         
         ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Building project directory" }));
-        await this.saveProjectEmuDb(user, projectFormData, false);
-        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: (++stepNum)+"/"+totalStepsNum, result: "Done" }));
+        await this.saveProjectEmuDb(user, projectFormData, false, ws, msg);
+        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: "saveProject", progress: "end", result: "Done" }));
     }
 
     async saveSprSession(projectFormData) {
@@ -2049,14 +2069,10 @@ session-manager_1    | }
         for (let formSession of projectFormData.sessions) {
 
             if(formSession.deleted) {
-                this.app.addLog("Deleting session "+formSession.name+" from mongo project", "debug");
-                await mongoProject.updateOne(
-                    {
-                      $pull: {
-                        sessions: { id: formSession.id },
-                      },
-                    }
-                  );
+                this.app.addLog("Deleting session with id "+formSession.id+" from mongo project", "debug");
+
+                mongoProject.sessions = mongoProject.sessions.filter(session => session.id !== formSession.id);
+                mongoProject.markModified('sessions');
 
                 this.sprSessionDelete(formSession.id);
 
@@ -2144,6 +2160,123 @@ session-manager_1    | }
         collection.deleteOne({ sessionId: sessionId });
     }
 
+    async convertAllInDirectoryToWav(projectId, dir) {
+        let processedFiles = [];
+        dir = path.join(dir, "emudb-sessions");
+        this.app.addLog("Converting all files in " + dir + " to WAV");
+    
+        //does the directory exist?
+        if (!fs.existsSync(dir)) {
+            this.app.addLog("Directory " + dir + " does not exist, aborting", "info");
+            return processedFiles;
+        }
+
+        // Scan the parent directory for session directories
+        let sessionDirs = fs.readdirSync(dir);
+    
+        for (const sessionDir of sessionDirs) {
+            if (sessionDir === "." || sessionDir === "..") {
+                continue;
+            }
+    
+            const sessionDirPath = path.join(dir, sessionDir);
+            const sessionDirFiles = fs.readdirSync(sessionDirPath);
+    
+            for (const file of sessionDirFiles) {
+                if (file === "." || file === "..") {
+                    continue;
+                }
+    
+                const filePath = path.join(sessionDirPath, file);
+                const fileExt = path.extname(filePath);
+    
+                if (fileExt.toLowerCase() !== ".wav") {
+                    const newFilePath = path.join(sessionDirPath, path.basename(file, fileExt) + ".wav");
+
+                    let runResult = {
+                        newFilePath: newFilePath,
+                        oldFilePath: filePath,
+                        result: "",
+                        message: ""
+                    };
+
+                    //check that there isn't already a file with the new name
+                    if(fs.existsSync(newFilePath)) {
+                        //if there is, we need to delete this entire file/bundle from the session since we can't have non-wav files in the project
+                        this.app.addLog("File "+newFilePath+" already exists, not converting", "warning");
+
+                        //delete the original file
+                        fs.unlinkSync(filePath);
+                        runResult.result = "warning";
+                        runResult.message = "Deleted file "+filePath+" since a file with the same name already exists in the session.";
+                        continue;
+                    }
+
+                    this.app.addLog(`Converting ${filePath} to ${newFilePath}`);
+
+                    try {
+                        execSync(
+                            `ffmpeg -i "${filePath}" -acodec pcm_s16le -ac 1 -ar 44100 "${newFilePath}"`,
+                            { stdio: "pipe" }
+                        );
+                        this.app.addLog(`Successfully converted ${filePath} to ${newFilePath}`);
+    
+                        let fileName = path.basename(filePath);
+
+                        //the second parent directory in the "dir" path is the project id
+                        //so it's <username>/<project_id>/emudb-sessions/<session_id>
+                        await this.updateFileMetaDataOfConvertedFile(newFilePath, projectId, sessionDir, fileName);
+                        
+                        //delete the original file
+                        fs.unlinkSync(filePath);
+
+                        runResult.result = "info";
+                        processedFiles.push(runResult);
+
+                    } catch (error) {
+                        this.app.addLog(`Failed converting ${filePath} to WAV: ${error.message}`, "error");
+                        runResult.result = "error";
+                        runResult.message = `Failed converting ${filePath} to WAV: ${error.message}`;
+                        processedFiles.push(runResult);
+                    }
+                }
+            }
+        }
+
+        return processedFiles;
+    }
+
+    async updateFileMetaDataOfConvertedFile(newFilePath, projectId, sessionId, fileName) {
+        // Fetch the project by its ID
+        let project = await this.getProjectById(projectId);
+
+        // Find the specific session by sessionId
+        let session = project.sessions.find(s => s.id === sessionId);
+
+        // Ensure the session exists
+        if (!session) {
+            throw new Error(`Session with ID ${sessionId} not found.`);
+        }
+
+        // Find the specific file by fileName
+        let file = session.files.find(f => f.name === fileName);
+
+        // Ensure the file exists
+        if (!file) {
+            throw new Error(`File with name ${fileName} not found in session ${sessionId}.`);
+        }
+
+        // Update the file name to have a ".wav" extension
+        file.name = fileName.replace(/\.[^/.]+$/, ".wav");
+        file.size = fs.statSync(newFilePath).size;
+        file.type = "audio/wav";
+
+        // Save the updated project
+        project.markModified('sessions');
+        await project.save();
+    }
+    
+
     /**
      * This method will spin up a container, mount the repo volume and create or update the EmuDB directory structure and files
      * 
@@ -2151,9 +2284,15 @@ session-manager_1    | }
      * @param {*} user 
      * @param {*} projectFormData 
      */
-    async saveProjectEmuDb(user, projectFormData, newProject = true) {
+    async saveProjectEmuDb(user, projectFormData, newProject = true, ws = null, msg = null) {
+        let totalStepsNum = 18;
+        let stepNum = 2;
+
         if(typeof projectFormData.id == "undefined") {
             this.app.addLog("No project id specified in saveProjectEmuDb, aborting", "error");
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "" }));
+            }
             return;
         }
 
@@ -2179,6 +2318,15 @@ session-manager_1    | }
             }
         }
 
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Converting audio files to WAV" }));
+        }
+        const runResults = await this.convertAllInDirectoryToWav(projectFormData.id, uploadsSrcDirLocal);
+
+
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Preparing EMU-DB operations" }));
+        }
         //createSession
         const gitRepoVolume = {
             source: this.app.absRootPath+"/mounts/repositories/"+projectFormData.id,
@@ -2235,27 +2383,44 @@ session-manager_1    | }
         let result = null;
         if(newProject) {
             //createEmuDb
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating EMU-DB" }));
+            }
             resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
             result = JSON.parse(resultJson);
             if(result.code != 200) {
                 this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                await this.app.sessMan.deleteSession(session.accessCode);
                 return;
+            }
+        }
+        else {
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Skipping creation of EMU-DB" }));
             }
         }
 
         //emudb-create-sessions
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating EMU-DB sessions" }));
+        }
         resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
         result = JSON.parse(resultJson);
         if(result.code != 200) {
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+            await this.app.sessMan.deleteSession(session.accessCode);
             return;
         }
         
         //emudb-create-bundlelist
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating EMU-DB bundlelists" }));
+        }
         resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
         result = JSON.parse(resultJson);
         if(result.code != 200) {
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+            await this.app.sessMan.deleteSession(session.accessCode);
             return;
         }
 
@@ -2269,6 +2434,9 @@ session-manager_1    | }
         //mongoBundleList.save();
 
         //read VISP_DBconfig.json
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Reading EMU-DB config" }));
+        }
         resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-read-dbconfig"], envVars);
         let dbConfig = JSON.parse(resultJson).body;
 
@@ -2291,6 +2459,9 @@ session-manager_1    | }
         */
 
         //emudb-create-annotlevels
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Setting annotation levels" }));
+        }
         for(let key in projectFormData.annotLevels) {
             //check if this annot level already exists in the dbConfig
             let annotLevel = projectFormData.annotLevels[key];
@@ -2307,6 +2478,7 @@ session-manager_1    | }
             result = JSON.parse(resultJson);
             if(result.code != 200) {
                 this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                await this.app.sessMan.deleteSession(session.accessCode);
                 return;
             }
         }
@@ -2323,13 +2495,20 @@ session-manager_1    | }
                 resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-remove-annotlevel"], env.concat(envVars));
                 result = JSON.parse(resultJson);
                 if(result.code != 200) {
+                    if(ws && msg) {
+                        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed removing annoations levels" }));
+                    }
                     this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                    await this.app.sessMan.deleteSession(session.accessCode);
                     return;
                 }
             }
         }
 
         //emudb-create-annotlevellinks
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Setting annotation level links" }));
+        }
         for(let key in projectFormData.annotLevelLinks) {
             let env = [];
             let annotLevelLink = projectFormData.annotLevelLinks[key];
@@ -2347,7 +2526,11 @@ session-manager_1    | }
             resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
             result = JSON.parse(resultJson);
             if(result.code != 200) {
+                if(ws && msg) {
+                    ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to create annotation level links" }));
+                }
                 this.app.addLog("Failed creating annotation level link (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                await this.app.sessMan.deleteSession(session.accessCode);
                 return;
             }
         }
@@ -2362,10 +2545,15 @@ session-manager_1    | }
                 let env = [];
                 env.push("ANNOT_LEVEL_LINK_SUPER="+link.superlevelName);
                 env.push("ANNOT_LEVEL_LINK_SUB="+link.sublevelName);
+                
                 resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-remove-annotlevellink"], env.concat(envVars));
                 result = JSON.parse(resultJson);
                 if(result.code != 200) {
+                    if(ws && msg) {
+                        ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to remove annoation level link in EMU-DB" }));
+                    }
                     this.app.addLog("Failed removing annotation level link (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                    await this.app.sessMan.deleteSession(session.accessCode);
                     return;
                 }
             }
@@ -2374,18 +2562,32 @@ session-manager_1    | }
         let env = [];
         env.push("ANNOT_LEVELS="+Buffer.from(JSON.stringify(projectFormData.annotLevels)).toString('base64'));
         //emudb-add-default-perspectives
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Adding default perspectives" }));
+        }
         resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
         result = JSON.parse(resultJson);
         if(result.code != 200) {
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to add default perspectives" }));
+            }
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+            await this.app.sessMan.deleteSession(session.accessCode);
             return;
         }
 
         //emudb-setlevelcanvasesorder
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Setting level canvases order" }));
+        }
         resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
         result = JSON.parse(resultJson);
         if(result.code != 200) {
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to set level canvases order" }));
+            }
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+            await this.app.sessMan.deleteSession(session.accessCode);
             return;
         }
 
@@ -2400,25 +2602,66 @@ session-manager_1    | }
         */
 
         //emudb-track-definitions (reindeer)
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
-        result = JSON.parse(resultJson);
-        if(result.code != 200) {
-            this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
-            return;
+
+
+        //if this project contains wav files that are beyond 1GB in size, we skip this step
+
+        let largeFiles = [];
+        let skipTrackDefinitionCreation = false;
+        mongoProject.sessions.forEach(session => {
+            session.files.forEach(file => {
+                if(file.type == "audio/wav" && file.size > 1000000000) {
+                    skipTrackDefinitionCreation = true;
+                    largeFiles.push(file.name);
+                }
+            })
+        });
+        if(!skipTrackDefinitionCreation) {
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating track definitions" }));
+            }
+            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
+            result = JSON.parse(resultJson);
+            if(result.code != 200) {
+                if(ws && msg) {
+                    ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to create track definitions" }));
+                }
+                this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+                await this.app.sessMan.deleteSession(session.accessCode);
+                return;
+            }
+        }
+        else {
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Skipping track definitions" }));
+            }
+            this.app.addLog("Skipping track definition creation since the following files are too large: "+largeFiles.join(", "), "warn");
         }
 
         //emudb-setsignalcanvasesorder
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Setting signal canvases order" }));
+        }
         resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
         result = JSON.parse(resultJson);
         if(result.code != 200) {
+            if(ws && msg) {
+                ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to set signal canvases order" }));
+            }
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+            await this.app.sessMan.deleteSession(session.accessCode);
             return;
         }
 
+
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Copying docs" }));
+        }
         resultJson = await session.copyUploadedDocs();
         result = JSON.parse(resultJson);
         if(result.code != 200 && result.code != 400) { //accept 400 as a success code here since it generally just means that there were no documents to copy, which is fine
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
+            await this.app.sessMan.deleteSession(session.accessCode);
             return;
         }
         
@@ -2427,15 +2670,59 @@ session-manager_1    | }
 
         let repoDir = "/repositories/"+projectFormData.id;
         this.app.addLog("Committing project "+repoDir, "debug");
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Committing project" }));
+        }
+
+        this.app.addLog("Initializing simpleGit", "debug");
         let git = await simpleGit(repoDir);
+        this.app.addLog("Setting ownership", "debug");
         await this.setOwnershipRecursive(repoDir, 0, 0);
+        this.app.addLog("git config user.name", "debug");
         await git.addConfig('user.name', user.firstName+" "+user.lastName);
+        this.app.addLog("git config user.email", "debug");
         await git.addConfig('user.email', user.email);
-        await git.add('.');
+        this.app.addLog("git add", "debug");
+        try {
+            //this operation might fail with the error: GitError: fatal: Unable to create '/repositories/<projectId>/.git/index.lock': File exists.
+            //await git.add('.');
+            await this.addFilesToGit(git, projectFormData.id);
+        }
+        catch(error) {
+            this.app.addLog("Failed adding files to git: "+error.toString(), "error");
+        }
+        
+        this.app.addLog("git commit", "debug");
         await git.commit("System commit");
+        this.app.addLog("Setting ownership", "debug");
         await this.setOwnershipRecursive(repoDir, 1000, 1000);
         
+        if(ws && msg) {
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Shutting down toolset" }));
+        }
         await this.app.sessMan.deleteSession(session.accessCode);
+    }
+
+    async addFilesToGit(git, projectId) {
+        const lockFilePath = path.join('/repositories', projectId, '.git', 'index.lock');
+    
+        try {
+            // This operation might fail with the error: GitError: fatal: Unable to create '/repositories/<projectId>/.git/index.lock': File exists.
+            await git.add('.');
+        } catch (error) {
+            if (error.message.includes('Unable to create') && error.message.includes('index.lock')) {
+                this.app.addLog(`Lock file exists, attempting to delete: ${lockFilePath}`, "warn");
+                try {
+                    await fs.unlink(lockFilePath);
+                    this.app.addLog("Lock file deleted, retrying git add operation.", "info");
+                    await git.add('.'); // Retry the operation
+                } catch (unlinkError) {
+                    this.app.addLog("Failed to delete lock file: " + unlinkError.toString(), "error");
+                }
+            } else {
+                this.app.addLog("Failed adding files to git: " + error.toString(), "error");
+            }
+        }
     }
 
     validateProjectForm(projectFormData) {
@@ -2777,14 +3064,29 @@ session-manager_1    | }
         project.sessions.forEach(sess => {
             if(sess.id == sessionId) {
                 files.forEach(file => {
+                    //check that this session does not already have a file with this exact name
+                    //if it does, then just update the size and type
+
+                    let fileExists = false;
+
                     let fileSize = fs.statSync(fileLocation+"/"+file).size;
                     let fileMimeType = mime.lookup(fileLocation+"/"+file);
 
-                    sess.files.push({
-                        name: file,
-                        size: fileSize,
-                        type: fileMimeType
+                    sess.files.forEach(file => {
+                        if(file.name == file) {
+                            fileExists = true;
+                            file.size = fileSize;
+                            file.type = fileMimeType;
+                        }
                     });
+
+                    if(!fileExists) {
+                        sess.files.push({
+                            name: file,
+                            size: fileSize,
+                            type: fileMimeType
+                        });
+                    }
                 });
                 
             }
