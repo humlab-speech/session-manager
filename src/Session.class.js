@@ -79,6 +79,7 @@ class Session {
 
         if(startOfJson == -1 || endOfJson == -1) {
             this.app.addLog("Could not reduce to JSON: "+data);
+            return "{ error: \""+data+"\" }";
         }
         else {
             data = data.substring(startOfJson); //Strip leading garbage

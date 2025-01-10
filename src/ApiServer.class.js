@@ -21,6 +21,7 @@ const { nativeSync } = require('rimraf');
 const mime = require('mime-types');
 const { execSync } = require('child_process');
 const WhisperService = require('./WhisperService.class');
+const AdmZip = require('adm-zip');
 
 class ApiServer {
     constructor(app) {
@@ -192,8 +193,12 @@ class ApiServer {
 
                 ws.on('message', message => this.handleIncomingWebSocketMessage(ws, message));
                 ws.on('close', () => {
-                    this.app.addLog("Client closed connection.");
+                    this.app.addLog("Websocket connection closed.");
                     this.handleConnectionClosed(client);
+                });
+
+                ws.on('error', (error) => {
+                    this.app.addLog("WebSocket error: "+error, "error");
                 });
             });
 
@@ -512,7 +517,7 @@ class ApiServer {
                 envVars.push(pair.key+"="+pair.value);
             });
 
-            session.runCommand(["/usr/bin/node", "/container-agent/main.js", msg.caCmd], envVars).then((result) => {
+            session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", msg.caCmd], envVars).then((result) => {
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: msg.caCmd, session: msg.appSession, result: result }));
             });
         }
@@ -564,7 +569,7 @@ class ApiServer {
                     "PROJECT_PATH=/home/rstudio/project",
                     "UPLOAD_PATH=/home/uploads"
                 ];
-                session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-scan"], envVars).then((emuDbScanResult) => {
+                session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-scan"], envVars).then((emuDbScanResult) => {
                     ws.send(JSON.stringify({ type: "cmd-result", cmd: "scanEmuDb", session: msg.sessionAccessCode, result: emuDbScanResult }));
                 });
             }
@@ -657,6 +662,15 @@ class ApiServer {
         if(msg.cmd == "deleteBundle") {
             try {
                 this.deleteBundle(ws, user, msg);
+            }
+            catch(error) {
+                this.app.addLog(error, "error")
+            }
+        }
+
+        if(msg.cmd == "downloadBundle") {
+            try {
+                this.downloadBundle(ws, user, msg);
             }
             catch(error) {
                 this.app.addLog(error, "error")
@@ -1350,7 +1364,7 @@ class ApiServer {
                 "BUNDLE_LISTS="+new Buffer.from(JSON.stringify(msg.data)).toString("base64")
             ];
             
-            await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-update-bundle-lists"], envVars).then((result) => {
+            await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-update-bundle-lists"], envVars).then((result) => {
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "updateBundleLists", progress: "1/2", session: msg.sessionAccessCode, result: result }));
             });
             await session.commit().then((result) => {
@@ -1406,7 +1420,7 @@ class ApiServer {
             progress: "2", 
             result: "Creating sessions"
         }));
-        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        await containerSession.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
 
         ws.send(JSON.stringify({
             type: "cmd-result", 
@@ -1414,7 +1428,7 @@ class ApiServer {
             progress: "3", 
             result: "Creating bundle lists"
         }));
-        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
+        await containerSession.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
 
         
         ws.send(JSON.stringify({
@@ -1423,7 +1437,7 @@ class ApiServer {
             progress: "4", 
             result: "Adding track definitions" 
         }));
-        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        await containerSession.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
 
         ws.send(JSON.stringify({
             type: "cmd-result", 
@@ -1458,7 +1472,7 @@ class ApiServer {
             let annotLevel = msg.data.form.emuDb.annotLevels[key];
             env.push("ANNOT_LEVEL_DEF_NAME="+annotLevel.name);
             env.push("ANNOT_LEVEL_DEF_TYPE="+annotLevel.type);
-            await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevels"], env.concat(envVars));
+            await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-annotlevels"], env.concat(envVars));
         }
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createAnnotationLevels", progress: "done" }));
@@ -1472,7 +1486,7 @@ class ApiServer {
              env.push("ANNOT_LEVEL_LINK_SUPER="+annotLevelLink.superLevel);
              env.push("ANNOT_LEVEL_LINK_SUB="+annotLevelLink.subLevel);
              env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
-             await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
+             await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
          }
 
          ws.send(JSON.stringify({ type: "cmd-result", cmd: "createAnnotationLevelLinks", progress: "done" }));
@@ -1483,14 +1497,14 @@ class ApiServer {
         env.push("ANNOT_LEVELS="+Buffer.from(JSON.stringify(msg.data.form.emuDb.annotLevels)).toString('base64'));
         //emudb-add-default-perspectives
         
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
     }
 
     async setEmuDbLevelCanvasesOrder(ws, msg) {
         //emudb-setlevelcanvasesorder
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
     }
@@ -1498,13 +1512,13 @@ class ApiServer {
     async setEmuDbTrackDefinitions(ws, msg) {
         //emudb-track-definitions (reindeer)
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "12", result: "Adding track definitions" }));
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
     }
 
     async setEmuDbSignalCanvasesOrder(ws, msg) {
         //emudb-setsignalcanvasesorder
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "13", result: "Setting signal canvases order" }));
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
     }
 
     async validateInviteCode(ws, msg, userInfo) {
@@ -1606,7 +1620,7 @@ class ApiServer {
             "EMUDB_SESSIONS=[]"
         ];
 
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
 
         ws.send(JSON.stringify({ type: "cmd-result", cmd: "createEmuDb", progress: "done" }));
     }
@@ -1781,6 +1795,46 @@ class ApiServer {
             throw error; // Re-throw the error for upstream handling
         }
     }
+
+    async downloadBundle(ws, user, msg) {
+        let projectId = msg.data.projectId;
+        let sessionId = msg.data.sessionId;
+        let fileName = msg.data.fileName;
+    
+        let project = await this.getProjectById(projectId);
+        let session = await this.getSessionById(projectId, sessionId);
+    
+        if (!project || !session) {
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "downloadBundle", progress: "end", result: false, message: "Could not find project or session", requestId: msg.requestId }));
+            return;
+        }
+    
+        let fileBaseName = path.basename(fileName, path.extname(fileName));
+        let repoBundlePath = "/repositories/" + project.id + "/Data/VISP_emuDB/" + session.name + "_ses/" + fileBaseName + "_bndl";
+        this.app.addLog("Downloading bundle directory " + repoBundlePath, "debug");
+    
+        // Check that the bundle directory exists
+        if (!fs.existsSync(repoBundlePath)) {
+            this.app.addLog("Trying to download bundle directory " + repoBundlePath + ", but it does not exist", "error");
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "downloadBundle", progress: "end", result: false, message: "Bundle directory does not exist", requestId: msg.requestId }));
+            return;
+        }
+    
+        // Create an instance of AdmZip for in-memory zipping
+        let zip = new AdmZip();
+    
+        // Add the directory to the zip
+        zip.addLocalFolder(repoBundlePath);
+    
+        // Get the zip file data as a buffer (in-memory, no disk write)
+        let zipBuffer = zip.toBuffer();
+    
+        // Send the zip file to the client as a base64 string
+        ws.send(JSON.stringify({
+            type: "cmd-result", cmd: "downloadBundle", progress: "end", result: true, message: "Success", requestId: msg.requestId,
+            data: { fileName: fileBaseName + ".zip", file: zipBuffer.toString('base64') }
+        }));
+    }
     
 
     async deleteBundle(ws, user, msg) {
@@ -1805,7 +1859,7 @@ class ApiServer {
         
         //delete from both mongodb and repository path
         let fileBaseName = path.basename(fileName, path.extname(fileName));
-        let repoBundlePath = "/repositories/"+project.id+"/Data/VISP_emuDB/"+this.slugify(session.name)+"_ses/"+fileBaseName+"_bndl";
+        let repoBundlePath = "/repositories/"+project.id+"/Data/VISP_emuDB/"+session.name+"_ses/"+fileBaseName+"_bndl";
         this.app.addLog("Deleting bundle directory "+repoBundlePath, "debug");
         
         //check that the bundle directory exists
@@ -2386,9 +2440,9 @@ session-manager_1    | }
             if(ws && msg) {
                 ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating EMU-DB" }));
             }
-            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
+            resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create"], envVars);
             result = JSON.parse(resultJson);
-            if(result.code != 200) {
+            if(!result || result.code != 200) {
                 this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
                 await this.app.sessMan.deleteSession(session.accessCode);
                 return;
@@ -2404,9 +2458,9 @@ session-manager_1    | }
         if(ws && msg) {
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating EMU-DB sessions" }));
         }
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
         result = JSON.parse(resultJson);
-        if(result.code != 200) {
+        if(!result || result.code != 200) {
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
             await this.app.sessMan.deleteSession(session.accessCode);
             return;
@@ -2416,9 +2470,9 @@ session-manager_1    | }
         if(ws && msg) {
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating EMU-DB bundlelists" }));
         }
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-bundlelist"], envVars);
         result = JSON.parse(resultJson);
-        if(result.code != 200) {
+        if(!result || result.code != 200) {
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
             await this.app.sessMan.deleteSession(session.accessCode);
             return;
@@ -2437,7 +2491,7 @@ session-manager_1    | }
         if(ws && msg) {
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Reading EMU-DB config" }));
         }
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-read-dbconfig"], envVars);
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-read-dbconfig"], envVars);
         let dbConfig = JSON.parse(resultJson).body;
 
         dbConfig.ssffTrackDefinitions;
@@ -2474,9 +2528,9 @@ session-manager_1    | }
             let env = [];
             env.push("ANNOT_LEVEL_DEF_NAME="+annotLevel.name);
             env.push("ANNOT_LEVEL_DEF_TYPE="+annotLevel.type);
-            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevel"], env.concat(envVars));
+            resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-annotlevel"], env.concat(envVars));
             result = JSON.parse(resultJson);
-            if(result.code != 200) {
+            if(!result || result.code != 200) {
                 this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
                 await this.app.sessMan.deleteSession(session.accessCode);
                 return;
@@ -2492,9 +2546,9 @@ session-manager_1    | }
                 this.app.addLog("Level "+level.name+" exists in the dbConfig, but not in the projectFormData.annotLevels, deleting", "debug");
                 let env = [];
                 env.push("ANNOT_LEVEL_DEF_NAME="+level.name);
-                resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-remove-annotlevel"], env.concat(envVars));
+                resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-remove-annotlevel"], env.concat(envVars));
                 result = JSON.parse(resultJson);
-                if(result.code != 200) {
+                if(!result || result.code != 200) {
                     if(ws && msg) {
                         ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed removing annoations levels" }));
                     }
@@ -2523,9 +2577,9 @@ session-manager_1    | }
             env.push("ANNOT_LEVEL_LINK_SUPER="+annotLevelLink.superLevel);
             env.push("ANNOT_LEVEL_LINK_SUB="+annotLevelLink.subLevel);
             env.push("ANNOT_LEVEL_LINK_DEF_TYPE="+annotLevelLink.type);
-            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
+            resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-annotlevellink"], env.concat(envVars));
             result = JSON.parse(resultJson);
-            if(result.code != 200) {
+            if(!result || result.code != 200) {
                 if(ws && msg) {
                     ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to create annotation level links" }));
                 }
@@ -2546,9 +2600,9 @@ session-manager_1    | }
                 env.push("ANNOT_LEVEL_LINK_SUPER="+link.superlevelName);
                 env.push("ANNOT_LEVEL_LINK_SUB="+link.sublevelName);
                 
-                resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-remove-annotlevellink"], env.concat(envVars));
+                resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-remove-annotlevellink"], env.concat(envVars));
                 result = JSON.parse(resultJson);
-                if(result.code != 200) {
+                if(!result || result.code != 200) {
                     if(ws && msg) {
                         ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to remove annoation level link in EMU-DB" }));
                     }
@@ -2565,9 +2619,9 @@ session-manager_1    | }
         if(ws && msg) {
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Adding default perspectives" }));
         }
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-add-default-perspectives"], env.concat(envVars));
         result = JSON.parse(resultJson);
-        if(result.code != 200) {
+        if(!result || result.code != 200) {
             if(ws && msg) {
                 ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to add default perspectives" }));
             }
@@ -2580,9 +2634,9 @@ session-manager_1    | }
         if(ws && msg) {
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Setting level canvases order" }));
         }
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-setlevelcanvasesorder"], env.concat(envVars));
         result = JSON.parse(resultJson);
-        if(result.code != 200) {
+        if(!result || result.code != 200) {
             if(ws && msg) {
                 ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to set level canvases order" }));
             }
@@ -2593,7 +2647,7 @@ session-manager_1    | }
 
         /*
         //emudb-ssff-track-definitions
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-ssff-track-definitions"], env.concat(envVars));
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-ssff-track-definitions"], env.concat(envVars));
         result = JSON.parse(resultJson);
         if(result.code != 200) {
             this.app.addLog("Failed defining ssff tracks (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
@@ -2620,9 +2674,9 @@ session-manager_1    | }
             if(ws && msg) {
                 ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Creating track definitions" }));
             }
-            resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
+            resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-track-definitions"], env.concat(envVars));
             result = JSON.parse(resultJson);
-            if(result.code != 200) {
+            if(!result || result.code != 200) {
                 if(ws && msg) {
                     ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to create track definitions" }));
                 }
@@ -2642,9 +2696,9 @@ session-manager_1    | }
         if(ws && msg) {
             ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Setting signal canvases order" }));
         }
-        resultJson = await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
+        resultJson = await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-setsignalcanvasesorder"], env.concat(envVars));
         result = JSON.parse(resultJson);
-        if(result.code != 200) {
+        if(!result || result.code != 200) {
             if(ws && msg) {
                 ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: "end", result: false, message: "Failed to set signal canvases order" }));
             }
@@ -2659,7 +2713,7 @@ session-manager_1    | }
         }
         resultJson = await session.copyUploadedDocs();
         result = JSON.parse(resultJson);
-        if(result.code != 200 && result.code != 400) { //accept 400 as a success code here since it generally just means that there were no documents to copy, which is fine
+        if(!result || (result.code != 200 && result.code != 400)) { //accept 400 as a success code here since it generally just means that there were no documents to copy, which is fine
             this.app.addLog("Failed creating emuDB (code "+result.code+"): stdout: "+result.body.stdout+". stderr: "+result.body.stderr, "error");
             await this.app.sessMan.deleteSession(session.accessCode);
             return;
@@ -2698,7 +2752,7 @@ session-manager_1    | }
         await this.setOwnershipRecursive(repoDir, 1000, 1000);
         
         if(ws && msg) {
-            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Shutting down toolset" }));
+            ws.send(JSON.stringify({ requestId: msg.requestId, type: "cmd-result", cmd: msg.cmd, progress: (++stepNum)+"/"+totalStepsNum, result: true, message: "Finishing up" }));
         }
         await this.app.sessMan.deleteSession(session.accessCode);
     }
@@ -2996,7 +3050,7 @@ session-manager_1    | }
     }
 
     async importAudioFiles(projectId, sessionId) {
-
+        this.app.addLog("Starting SPR audio files import", "info");
         /**
          * This method will import audio files from the speech recorder into the project directory.
          * It will do this in two main steps:
@@ -3048,10 +3102,12 @@ session-manager_1    | }
             "WRITE_META_JSON=false"
         ];
 
+        //first delete any old versions of bundles in this session that might exist (if this session has been previously recorded)
+        await containerSession.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-delete-session-bundles"], envVars);
+
         //emudb-create-sessions
-        //await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
-        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
-        await containerSession.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        await containerSession.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        await containerSession.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
         
         //shutdown the container
         await this.app.sessMan.deleteSession(containerSession.accessCode);
@@ -3072,11 +3128,12 @@ session-manager_1    | }
                     let fileSize = fs.statSync(fileLocation+"/"+file).size;
                     let fileMimeType = mime.lookup(fileLocation+"/"+file);
 
-                    sess.files.forEach(file => {
-                        if(file.name == file) {
+                    sess.files.forEach(sessFile => {
+                        if(sessFile.name == file) {
                             fileExists = true;
-                            file.size = fileSize;
-                            file.type = fileMimeType;
+                            sessFile.size = fileSize;
+                            sessFile.type = fileMimeType;
+                            this.app.addLog("File "+file+" already exists in session "+sessionId+", updating size and type", "debug");
                         }
                     });
 
@@ -3086,6 +3143,7 @@ session-manager_1    | }
                             size: fileSize,
                             type: fileMimeType
                         });
+                        this.app.addLog("File "+file+" added to session "+sessionId, "debug");
                     }
                 });
                 
@@ -3102,6 +3160,8 @@ session-manager_1    | }
             fs.unlinkSync(filePath);
         });
         */
+
+        this.app.addLog("SPR audio files imported", "info");
 
         return new ApiResponse(200, "Audio files imported");
 
@@ -3246,9 +3306,9 @@ session-manager_1    | }
         ];
 
         //emudb-create-sessions
-        //await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
-        await session.runCommand(["/usr/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
+        //await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
+        await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
         //await session.commit();
 
         //now delete the files copied for import
