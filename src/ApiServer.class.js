@@ -192,9 +192,9 @@ class ApiServer {
                 this.wsClients.push(client);
 
                 ws.on('message', message => this.handleIncomingWebSocketMessage(ws, message));
-                ws.on('close', () => {
+                ws.on('close', (evt) => {
                     this.app.addLog("Websocket connection closed.");
-                    this.handleConnectionClosed(client);
+                    this.handleConnectionClosed(client, evt);
                 });
 
                 ws.on('error', (error) => {
@@ -279,7 +279,23 @@ class ApiServer {
     }
 
 
-    handleConnectionClosed(client) {
+    handleConnectionClosed(client, event) {
+
+        if (event.wasClean) {
+            this.app.addLog(`WebSocket closed cleanly, code=${event.code}, reason=${event.reason}`, "debug");
+        } else {
+            this.app.addLog(`WebSocket disconnected unexpectedly, code=${event.code}`, "warn");
+        }
+    
+        // Determine who closed the connection
+        if (event.code === 1000) {
+            this.app.addLog("Client or server closed the connection normally.", "debug");
+        } else if (event.code === 1006) {
+            this.app.addLog("Connection lost.", "warn");
+        } else {
+            this.app.addLog("Closed with code:", event.code);
+        }
+
         //If this client has any active operations-sessions, kill them
         if(client.userSession) {
             this.app.sessMan.getUserSessions(client.userSession.username).forEach((session) => {
