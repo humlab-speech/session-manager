@@ -2270,7 +2270,7 @@ session-manager_1    | }
 
                     try {
                         execSync(
-                            `ffmpeg -i "${filePath}" -acodec pcm_s16le -ac 1 -ar 44100 "${newFilePath}"`,
+                            `ffmpeg -i "${filePath}" -acodec pcm_s16le -ac 1 -ar 16000 "${newFilePath}"`,
                             { stdio: "pipe" }
                         );
                         this.app.addLog(`Successfully converted ${filePath} to ${newFilePath}`);
