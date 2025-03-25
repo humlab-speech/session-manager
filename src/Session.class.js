@@ -148,13 +148,14 @@ class Session {
     getContainerConfig() {
         let mounts = [];
         for(let key in this.volumes) {
+            let mode = this.volumes[key]['mode'] || "rw,Z";
             mounts.push({
                 Target: this.volumes[key]['target'],
                 Source: this.volumes[key]['source'],
                 Type: "bind",
-                Mode: "rw,Z",
-                RW: true,
-                ReadOnly: false
+                Mode: mode,
+                RW: mode !== "ro,Z",
+                ReadOnly: mode === "ro,Z"
             });
         }
 
