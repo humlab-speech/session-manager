@@ -92,6 +92,7 @@ class ApiServer {
             bundle: String,
             initiatedByUser: String,
             language: String,
+            model: String,
             status: String,
             error: String,
             log: String,
@@ -833,16 +834,6 @@ class ApiServer {
             source: this.app.absRootPath+"/mounts/repositories/"+project.id,
             target: '/home/'+containerUser+'/project'
         });
-
-        //if we are in development mode, mount the container-agent folder from the local filesystem
-        //so that changes can easily be tested without having to rebuild the container
-        let devlopmentMode = process.env.DEVELOPMENT_MODE == "true";
-        if(devlopmentMode) {
-            volumes.push({
-                source: this.app.absRootPath+"/container-agent/dist",
-                target: '/container-agent'
-            });
-        }
         
         this.getSessionContainer(user.username, msg.projectId, msg.appName, volumes).subscribe(status => {
             if(status.type == "status-update") {
@@ -1177,7 +1168,7 @@ class ApiServer {
             }
 
             //also return information about any running containers for this project
-            projects[key].liveAppSessions = this.app.sessMan.getContainerSessionsByProjectId(project.id);
+            projects[key].liveAppSessions = this.app.sessMan.getContainerSessionsOverviewByProjectId(project.id);
         }
     
         //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: projects }));
@@ -1901,7 +1892,15 @@ class ApiServer {
     async deleteProject(ws, user, msg) {
         let totalStepsNum = 3;
         let stepNum = 0;
-        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, message: "Initiating", result: true }));
+        ws.send(JSON.stringify({ type: "cmd-result", cmd: "deleteProject", progress: (++stepNum)+"/"+totalStepsNum, message: "Stopping all running containers", result: true }));
+
+        //first, stop all running container sessions for this project
+        let sessions = await this.app.sessMan.getContainerSessionsByProjectId(msg.data.project.id);
+
+        for(let key in sessions) {
+            let session = sessions[key];
+            await this.app.sessMan.deleteSession(session.accessCode);
+        }
 
         let project = msg.data.project;
         let repoPath = "/repositories/"+project.id;
