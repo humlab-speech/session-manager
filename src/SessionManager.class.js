@@ -165,6 +165,10 @@ class SessionManager {
           sess = new RstudioSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
         break;
         case "jupyter":
+            const sourcePath = `${process.env.ABS_ROOT_PATH}/mounts/whisper/models`;
+            // This is a default volume, used for whisper models, to allow updating whisper models 
+            // without refreshing the image.
+            volumes.push({ source: sourcePath, target: '/whisper_models', mode: 'ro,Z' });
           sess = new JupyterSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
         break;
         case "operations":
