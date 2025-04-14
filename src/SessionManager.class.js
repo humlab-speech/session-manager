@@ -96,7 +96,7 @@ class SessionManager {
       return false;
     }
 
-    getContainerSessionsByProjectId(projectId) {
+    getContainerSessionsOverviewByProjectId(projectId) {
       this.refreshSessions();
 
       let sessions = [];
@@ -108,6 +108,18 @@ class SessionManager {
             type: session.hsApp,
             sessionAccessCode: session.accessCode
           });
+        }
+      });
+      return sessions;
+    }
+
+    async getContainerSessionsByProjectId(projectId) {
+      await this.refreshSessions();
+
+      let sessions = [];
+      this.sessions.forEach(session => {
+        if(session.project.id == projectId) {
+          sessions.push(session);
         }
       });
       return sessions;
@@ -172,7 +184,7 @@ class SessionManager {
       return sess;
     }
 
-    refreshSessions() {
+    async refreshSessions() {
       //check with the docker daemon for running containers
       //if we find any that are not in the sessions array, add them
       //if we find any in the sessions array that are not in the docker daemon, remove them
@@ -347,7 +359,7 @@ class SessionManager {
       }
     }
 
-    deleteSession(sessionId) {
+    async deleteSession(sessionId) {
       return new Promise((resolve, reject) => {
         let sess = this.getSessionByCode(sessionId);
         if(sess === false) {
