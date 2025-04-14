@@ -158,6 +158,19 @@ class Session {
             });
         }
 
+        let devlopmentMode = process.env.DEVELOPMENT_MODE == "true";
+        if(devlopmentMode) {
+            this.app.addLog("Development mode enabled, mounting container-agent from local filesystem", "debug");
+            mounts.push({
+                Source: this.app.absRootPath+"/container-agent/dist",
+                Target: '/container-agent',
+                Type: "bind",
+                Mode: "ro,Z",
+                RW: false,
+                ReadOnly: true
+            });
+        }
+
         let config = {
             Image: this.imageName,
             name: this.getContainerName(this.user.username, this.project.id),
@@ -204,7 +217,6 @@ class Session {
         this.app.addLog(this.hsApp+" "+this.user.username+" "+this.project.id);
 
         let dockerContainerId = null;
-
         let containerConfig = this.getContainerConfig();
 
         this.app.addLog("containerConfig: "+JSON.stringify(containerConfig), "debug");
