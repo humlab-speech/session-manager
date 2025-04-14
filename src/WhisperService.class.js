@@ -209,6 +209,7 @@ class WhisperService {
             if(existingItem.status != 'queued') {
                 existingItem.status = 'queued';
                 existingItem.language = msg.data.language ? msg.data.language : existingItem.language;
+                existingItem.model = msg.data.model ? msg.data.model : existingItem.model;
                 existingItem.updatedAt = new Date();
                 existingItem.userNotified = false;
                 await existingItem.save();
@@ -228,6 +229,7 @@ class WhisperService {
             initiatedByUser: user.eppn,
             status: "queued",
             language: msg.data.language,
+            model: msg.data.model,
             error: "",
             log: "",
             createdAt: new Date(),
@@ -585,6 +587,16 @@ class WhisperService {
         //make it lowercase, unless it is "Automatic Detection"
         const selectedLanguage = queueItem.language != "Automatic Detection" ? queueItem.language.toLowerCase() : queueItem.language;
 
+        let selectedModel = "large-v2";
+        switch(queueItem.model) {
+            case "whisper":
+                selectedModel = "large-v2";
+                break;
+            case "kb-whisper":
+                selectedModel = "models--KB-whisper-medium-ct2";
+                break;
+        }
+
         let fileBuffer = fs.readFileSync(filePath+queueItem.bundle);
         const fileBlob = new Blob([fileBuffer]);
 
@@ -594,7 +606,7 @@ class WhisperService {
                 input_folder_path: "",
                 file_format: "SRT",
                 add_timestamp: true,
-                progress: "large-v2",
+                progress: selectedModel,
                 param_5: selectedLanguage,
                 param_6: false,
                 param_7: 5, 		
