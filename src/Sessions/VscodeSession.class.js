@@ -1,8 +1,4 @@
-const nanoid = require('nanoid');
-const httpProxy = require('http-proxy');
-const { Docker } = require('node-docker-api');
-const { ApiResponse } = require('../ApiResponse.class');
-const Session = require('../Session.class');
+const Session = require("../Session.class");
 
 class VscodeSession extends Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
@@ -16,12 +12,10 @@ class VscodeSession extends Session {
     getContainerConfig() {
         let config = super.getContainerConfig();
 
-        config.Env = [
-            "DOCKER_USER=abc"
-        ];
+        config.Env = ["DOCKER_USER=abc"];
 
         return config;
     }
 }
 
-module.exports = VscodeSession
+module.exports = VscodeSession;

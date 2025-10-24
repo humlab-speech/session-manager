@@ -1,8 +1,4 @@
-const nanoid = require('nanoid');
-const httpProxy = require('http-proxy');
-const { Docker } = require('node-docker-api');
-const { ApiResponse } = require('../ApiResponse.class');
-const Session = require('../Session.class');
+const Session = require("../Session.class");
 
 class OperationsSession extends Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
@@ -17,13 +13,10 @@ class OperationsSession extends Session {
     getContainerConfig() {
         let config = super.getContainerConfig();
 
-        config.Env = [
-            "DISABLE_AUTH=true",
-            "PASSWORD="+this.rstudioPassword
-        ];
+        config.Env = ["DISABLE_AUTH=true", "PASSWORD=" + this.rstudioPassword];
 
         return config;
     }
 }
 
-module.exports = OperationsSession
+module.exports = OperationsSession;
