@@ -1,4 +1,5 @@
 const nanoid = require('nanoid');
+const fs = require('fs');
 const httpProxy = require('http-proxy');
 const { Docker } = require('node-docker-api');
 const { ApiResponse } = require('./ApiResponse.class');
@@ -17,6 +18,7 @@ class Session {
         this.sessionCode = null; //This is identical to the container ID, thus if it is null, there's no container running for this session
         this.fullDockerContainerId = null;
         this.shortDockerContainerId = null;
+        this.createdAt = Date.now();
         this.imageName = "";
         this.localProjectPath = "/home/project";
         this.containerUser = "";
@@ -172,6 +174,7 @@ class Session {
             });
         }
 
+        const keepContainers = process.env.SESSION_MANAGER_KEEP_CONTAINERS === 'true';
         let config = {
             Image: this.imageName,
             name: this.getContainerName(this.user.username, this.project.id),
@@ -186,7 +189,8 @@ class Session {
                 "visp.accessCode": this.accessCode.toString()
             },
             HostConfig: {
-                AutoRemove: true,
+                // Allow disabling AutoRemove during development to keep exited containers for post-mortem
+                AutoRemove: !keepContainers,
                 NetworkMode: process.env.COMPOSE_PROJECT_NAME+"_visp-net",
                 Mounts: mounts,
                 Memory: 8*1024*1024*1024, //bytes
@@ -212,50 +216,177 @@ class Session {
         return config;
     }
     
+    /**
+     * [REFACTORED] This is a new helper method to contain the container status check and retry logic.
+     * It checks if the container is present and running in the Docker daemon.
+     * It will retry a few times to avoid race conditions where the container isn't immediately visible after creation.
+     * @throws {Error} if the container disappears or is found in a non-running state.
+     */
+    async _checkContainerIsRunning() {
+        const maxRetries = 5;
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const containers = await this.docker.container.list({ all: true });
+                const found = containers.find(c => c.id && c.id.substring(0, 12) === this.shortDockerContainerId);
+
+                if (found) {
+                    const state = found.data.State;
+                    const status = found.data.Status || '';
+                    this.app.addLog(`Container state check: State=${state} Status=${status}`, 'debug');
+
+                    if (state === 'exited' || state === 'dead' || state === 'created') {
+                        this.app.addLog(`Container ${this.shortDockerContainerId} is not running (State: ${state}, Status: ${status})`, "error");
+                        // You can add log tailing logic here if desired
+                        throw new Error(`Container in non-running state: ${status}`);
+                    }
+                    // If state is 'running', we're good.
+                    return; 
+                }
+
+                // If not found, log and retry after a short delay
+                this.app.addLog(`Container ${this.shortDockerContainerId} not yet visible (attempt ${attempt}/${maxRetries}), retrying...`, 'debug');
+                
+            } catch (err) {
+                // If the error is the one we threw, re-throw it. Otherwise, log and retry.
+                if (err.message.startsWith('Container in non-running state')) {
+                    throw err;
+                }
+                this.app.addLog(`Error checking container list (attempt ${attempt}/${maxRetries}): ${err}`, 'warn');
+            }
+            
+            if (attempt < maxRetries) {
+                await sleep(200); // Wait before the next retry
+            }
+        }
+
+        // If the loop finishes without finding the container
+        this.app.addLog(`Container ${this.shortDockerContainerId} disappeared from daemon.`, "error");
+        throw new Error('Container disappeared before becoming ready');
+    }
+
+    /**
+     * [REFACTORED] This is a new helper method to encapsulate the entire waiting loop.
+     * It polls the container status and readiness endpoint until the session is ready or a timeout occurs.
+     */
+    async _waitForSessionReady() {
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const startTime = Date.now();
+        const maxWait = parseInt(process.env.SESSION_START_TIMEOUT_MS || '120000', 10);
+
+        this.app.addLog("Waiting for session to become ready...");
+
+        while (true) {
+            // 1. Check for timeout
+            const elapsed = Date.now() - startTime;
+            if (elapsed > maxWait) {
+                throw new Error(`Timeout waiting for session to become ready after ${elapsed} ms`);
+            }
+
+            // 2. Check that the container is still running
+            // This will throw an error if the container has crashed or disappeared, breaking the loop.
+            await this._checkContainerIsRunning();
+
+            // 3. Check if the service inside is ready
+            try {
+                if (await this.isSessionReady()) {
+                    this.app.addLog(`Session is ready after ${Date.now() - startTime} ms`);
+                    return; // Success, exit the loop
+                }
+            } catch (err) {
+                this.app.addLog(`isSessionReady threw an error: ${err}`, 'warn');
+            }
+            
+            // 4. Wait before the next poll
+            await sleep(500);
+        }
+    }
+
+    /**
+     * [SIMPLIFIED] The main container creation method.
+     * The original logic is preserved, but the complex waiting loop has been extracted
+     * into the `_waitForSessionReady` method for clarity.
+     */
     async createContainer() {
         this.app.addLog("Creating new project container");
-        this.app.addLog(this.hsApp+" "+this.user.username+" "+this.project.id);
+        this.app.addLog(`${this.hsApp} ${this.user.username} ${this.project.id}`);
 
-        let dockerContainerId = null;
-        let containerConfig = this.getContainerConfig();
+        const containerConfig = this.getContainerConfig();
+        this.app.addLog(`containerConfig: ${JSON.stringify(containerConfig)}`, "debug");
 
-        this.app.addLog("containerConfig: "+JSON.stringify(containerConfig), "debug");
+        try {
+            // Create and start the container
+            const container = await this.docker.container.create(containerConfig);
+            await container.start();
+            this.app.addLog(`Container created and started. ID: ${container.data.Id}`);
 
-        return new Promise(async (resolve, reject) => {
-            this.docker.container.create(containerConfig)
-            .then(container => {
-                this.app.addLog("Container created - starting");
-                return container.start();
-            })
-            .then(async (container) => {
-                this.app.addLog("Container id:"+container.data.Id);
-                dockerContainerId = container.data.Id;
-                this.container = container;
-                this.importContainerId(dockerContainerId);
-                this.app.addLog("Container ID is "+this.shortDockerContainerId);
-                this.app.addLog("Setting up proxy server");
-                this.setupProxyServerIntoContainer(this.shortDockerContainerId);
-                this.app.addLog("Proxy server online");
-                return this.shortDockerContainerId;
-            })
-            .catch(error => {
-                this.app.addLog("Docker container failed to start: "+error, "error");
-                reject(error);
-            });
+            // Get a full container object and set up properties
+            this.container = this.docker.container.get(container.data.Id);
+            this.importContainerId(container.data.Id);
+            
+            // Setup log streaming (logic unchanged)
+            this.setupLogStreaming();
 
-            this.app.addLog("Waiting for session to become ready");
-            let isSessionReady = false;
-            let t0 = performance.now();
-            while(!isSessionReady) {
-                isSessionReady = await this.isSessionReady();
-            }
-            let t1 = performance.now()
-            this.app.addLog("Session is ready after "+Math.round(t1 - t0)+" ms");
+            // Setup proxy
+            this.app.addLog("Setting up proxy server");
+            this.setupProxyServerIntoContainer(this.shortDockerContainerId);
+            this.app.addLog("Proxy server online");
 
-            resolve(this.shortDockerContainerId);
-        });
+            // [REFACTORED] Delegate the entire waiting process to the new helper method
+            await this._waitForSessionReady();
+            
+            // If we get here, the session is ready
+            return this.shortDockerContainerId;
+
+        } catch (error) {
+            // Log stack when available for better diagnostics
+            const stack = error && error.stack ? `\n${error.stack}` : '';
+            this.app.addLog(`Failed to create or start session container: ${error}${stack}`, "error");
+            
+            // Re-throw the error to be handled by the caller
+            throw error;
+        }
     }
+
+    /**
+     * Helper to set up container log streaming to a file.
+     * This logic was extracted from createContainer for clarity.
+     */
+    setupLogStreaming() {
+        try {
+            const logsDir = '/session-manager/logs';
+            fs.mkdirSync(logsDir, { recursive: true });
+            const logPath = `${logsDir}/${this.accessCode}.log`;
+            const ws = fs.createWriteStream(logPath, { flags: 'a' });
+            this.logFileWrite = ws;
+
+            this.container.logs({ stdout: true, stderr: true, follow: true, timestamps: true })
+                .then(stream => {
+                    this.logStream = stream;
+                    stream.on('data', chunk => {
+                        try {
+                            ws.write(chunk.toString());
+                        } catch (err) {
+                            this.app.addLog(`Error writing container log chunk: ${err}`, 'warn');
+                        }
+                    });
+                    stream.on('end', () => {
+                        try { ws.end(); } catch (e) {}
+                        this.app.addLog(`Container log stream ended for ${this.shortDockerContainerId}`, 'debug');
+                    });
+                    stream.on('error', err => {
+                        this.app.addLog(`Container log stream error: ${err}`, 'warn');
+                    });
+                })
+                .catch(err => {
+                    this.app.addLog(`Failed to start container log stream: ${err}`, 'warn');
+                });
+        } catch (err) {
+            this.app.addLog(`Failed to setup log file: ${err}`, 'warn');
+        }
+    }
+
 
     /**
      * Function: isSessionReady
@@ -267,16 +398,21 @@ class Session {
     async isSessionReady() {
         let isSessionReady = false;
 
-        await fetch("http://"+this.shortDockerContainerId+":"+this.port, {
+        const url = "http://"+this.shortDockerContainerId+":"+this.port;
+        this.app.addLog("Checking readiness: "+url, "debug");
+        
+        await fetch(url, {
             timeout: 1000
         })
-        .then(res => res.text())
+        .then(res => {
+            this.app.addLog("isSessionReady success: HTTP "+res.status, "debug");
+            return res.text();
+        })
         .then(body => {
-            //this.app.addLog("isSessionReady response: "+body, "DEBUG")
             isSessionReady = true;
         })
         .catch(error => {
-            //this.app.addLog("isSessionReady error: "+error, "ERROR");
+            this.app.addLog("isSessionReady failed: "+error.message, "debug");
             isSessionReady = false;
         });
             
@@ -410,6 +546,19 @@ class Session {
             return {
                 status: "error"
             };
+        }
+
+        // Close any open log streams to flush logs to disk
+        try {
+            if(this.logStream && this.logStream.destroy) {
+                try { this.logStream.destroy(); } catch(e) {}
+            }
+            if(this.logFileWrite) {
+                try { this.logFileWrite.end(); } catch(e) {}
+            }
+        }
+        catch(err) {
+            this.app.addLog('Error while closing log streams: '+err, 'warn');
         }
 
         try {

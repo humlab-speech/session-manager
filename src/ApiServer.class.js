@@ -11,7 +11,7 @@ const Rx = require('rxjs');
 const validator = require('validator');
 const mongodb = require('mongodb');
 const UserSession = require('./models/UserSession.class');
-const nanoid = require("nanoid");
+const { nanoid } = require('nanoid');
 const mongoose = require('mongoose');
 const fs = require('fs-extra');
 const simpleGit = require('simple-git');
@@ -842,6 +842,9 @@ class ApiServer {
             if(status.type == "data") {
                 ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: status.accessCode,  result: true, requestId: msg.requestId }));
             }
+        }, error => {
+            this.app.addLog("launchContainerSession failed: "+error, "error");
+            ws.send(JSON.stringify({ type: "cmd-result", cmd: "launchContainerSession", progress: "end", message: "Failed to launch session: "+error.message, result: false, requestId: msg.requestId }));
         });
     }
 
@@ -1188,7 +1191,7 @@ class ApiServer {
     createSprProject(projectName, ws = null) {
         //insert the project into the database
         let project = {
-            projectId: nanoid.nanoid(),
+            projectId: nanoid(),
             name: projectName,
             description: 'No description',
             audioFormat: {
@@ -1570,7 +1573,7 @@ class ApiServer {
     async generateInviteCode(ws, msg) {
         let user = this.getUserSessionBySocket(ws);
 
-        let inviteCode = nanoid.nanoid();
+        let inviteCode = nanoid();
         //insert the invite code into the mongodb collection "invite_codes"
         let db = await this.connectToMongo("visp");
         let collection = db.collection("invite_codes");
@@ -2900,34 +2903,61 @@ session-manager_1    | }
     }
 
     getSessionContainer(username, projectId, hsApp = "operations", volumes  = [], options = []) {
-        return new Rx.Observable(async (observer) => {
+        return new Rx.Observable((observer) => {
+            let completed = false;
 
-            let user = null;
-            let project = null;
-
-            //look up user and project via mongoose
+            // Look up user and project via mongoose
             let UserModel = this.mongoose.model('User');
             let p1 = UserModel.findOne({ username: username }).then(res => {
-                user = res;
+                if (completed) return;
+                observer.next({ type: "status-update", message: "Pre-flight" });
+                return res;
+            }).catch(err => {
+                if (!completed) {
+                    observer.error(new Error("Failed to find user: " + err.message));
+                }
             });
+
             let ProjectModel = this.mongoose.model('Project');
             let p2 = ProjectModel.findOne({ id: projectId }).then(res => {
-                project = res;
-            });
-
-            observer.next({ type: "status-update", message: "Pre-flight" });
-
-            Promise.all([p1, p2]).then(values => {
+                if (completed) return;
                 observer.next({ type: "status-update", message: "Pre-flight complete" });
                 observer.next({ type: "status-update", message: "Creating session" });
+                return res;
+            }).catch(err => {
+                if (!completed) {
+                    observer.error(new Error("Failed to find project: " + err.message));
+                }
+            });
+
+            Promise.all([p1, p2]).then(([user, project]) => {
+                if (completed) return;
+
                 let session = this.app.sessMan.createSession(user, project, hsApp, volumes);
                 observer.next({ type: "status-update", message: "Spawning container" });
+
                 session.createContainer().then(containerId => {
+                    if (completed) return;
                     observer.next({ type: "status-update", message: "Session ready" });
                     this.app.addLog("Creating container complete");
                     observer.next({ type: "data", accessCode: session.accessCode });
                     this.app.addLog("Sending sessionAccessCode to client.");
+                    observer.complete();
+                }).catch(error => {
+                    if (!completed) {
+                        this.app.addLog("Failed to create container: "+error, "error");
+                        observer.error(new Error("Failed to create container: "+error.message));
+                    }
                 });
+            }).catch(err => {
+                if (!completed) {
+                    observer.error(new Error("Database lookup failed: " + err.message));
+                }
+            });
+
+            // Return a proper Subscription object
+            return new Rx.Subscription(() => {
+                completed = true;
             });
         });
     }

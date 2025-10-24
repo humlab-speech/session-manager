@@ -1,4 +1,5 @@
-const nanoid = require('nanoid');
+// Require nanoid explicitly. Fail fast if it's missing or doesn't provide the expected export.
+const { nanoid } = require('nanoid');
 const Session = require('./Session.class');
 const fetch = require('node-fetch');
 const { Docker } = require('node-docker-api');
@@ -80,9 +81,9 @@ class SessionManager {
     }
     
     getContainerAccessCode() {
-      let code = nanoid.nanoid(32);
+      let code = nanoid(32);
       while(this.checkIfCodeIsUsed(code)) {
-        code = nanoid.nanoid(32);
+        code = nanoid(32);
       }
       return code;
     }
@@ -192,19 +193,53 @@ class SessionManager {
       //check with the docker daemon for running containers
       //if we find any that are not in the sessions array, add them
       //if we find any in the sessions array that are not in the docker daemon, remove them
-      this.docker.container.list().then(containers => {
+      this.docker.container.list({ all: true }).then(containers => {
         let containerIds = [];
         containers.forEach(container => {
           let shortId = container.id.substring(0, 12);
           containerIds.push(shortId);
         });
 
-        this.sessions.forEach(session => {
-          if(containerIds.indexOf(session.shortDockerContainerId) == -1) {
-            this.app.addLog("Session "+session.accessCode+" not found in docker daemon, removing", "debug");
-            session.delete();
+        this.app.addLog("refreshSessions: Found "+containerIds.length+" containers in docker daemon", "debug");
+        this.app.addLog("refreshSessions: Checking "+this.sessions.length+" sessions", "debug");
+
+        // Check each session
+        for (let i = this.sessions.length - 1; i >= 0; i--) {
+          let session = this.sessions[i];
+          
+          // Skip sessions created in the last 10 seconds to avoid race conditions
+          if (session.createdAt && (Date.now() - session.createdAt) < 10000) {
+            this.app.addLog("refreshSessions: Skipping recently created session "+session.accessCode+" (created "+(Date.now() - session.createdAt)+"ms ago)", "debug");
+            continue;
           }
-        });
+          
+          if(session.shortDockerContainerId === null) {
+            this.app.addLog("refreshSessions: Skipping session "+session.accessCode+" - container not yet created", "debug");
+            continue;
+          }
+          
+          // Check if container exists in Docker daemon
+          if(containerIds.indexOf(session.shortDockerContainerId) == -1) {
+            this.app.addLog("Session "+session.accessCode+" (container "+session.shortDockerContainerId+") not found in docker daemon, removing", "debug");
+            session.delete();
+            continue;
+          }
+          
+          // Check if container is actually running by inspecting it
+          let containerFound = containers.find(c => c.id.substring(0, 12) === session.shortDockerContainerId);
+          if(containerFound && containerFound.data && containerFound.data.State) {
+            let state = containerFound.data.State;
+            if(state === 'exited' || state === 'dead') {
+              this.app.addLog("Session "+session.accessCode+" (container "+session.shortDockerContainerId+") is in state "+state+", removing", "debug");
+              session.delete();
+              continue;
+            }
+          }
+          
+          this.app.addLog("Session "+session.accessCode+" (container "+session.shortDockerContainerId+") found and running", "debug");
+        }
+      }).catch(error => {
+        this.app.addLog("refreshSessions: Error listing containers: "+error, "error");
       });
     }
 
