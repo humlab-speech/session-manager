@@ -22,6 +22,7 @@ const mime = require('mime-types');
 const { execSync } = require('child_process');
 const WhisperService = require('./WhisperService.class');
 const AdmZip = require('adm-zip');
+const { parseFile } = require('music-metadata');
 
 class ApiServer {
     constructor(app) {
@@ -106,6 +107,19 @@ class ApiServer {
             queuePosition: Number
         });
         mongoose.model('TranscriptionQueueItem', this.models.TranscriptionQueueItem);
+
+        this.models.OctraVirtualTask = new mongoose.Schema({
+            id: String,
+            projectId: String,
+            sessionId: String,
+            bundleName: String,
+            createdBy: String,
+            createdAt: Date,
+            savedBy: String,
+            savedAt: Date,
+            closed: Boolean
+        });
+        mongoose.model('OctraVirtualTask', this.models.OctraVirtualTask);
     }
 
     async fetchMongoUser(eppn) {
@@ -436,6 +450,16 @@ class ApiServer {
             //this.app.addLog("User "+user.eppn+" authorized", "debug");
         }
 
+        if(msg.cmd == "createOctraTask") {
+            this.createOctraTask(ws, user, msg);
+            return;
+        }
+
+        if(msg.cmd == "saveOctraTask") {
+            this.saveOctraTask(ws, user, msg);
+            return;
+        }
+
         if(msg.cmd == "authorizeUser") {
             //since we are already authorized, we can just send a success message
             ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
@@ -762,6 +786,201 @@ class ApiServer {
             this.importEmuDbSessions(ws, msg.appSession);
         }
         */
+    }
+
+    async createOctraTask(ws, user, msg) {
+        //msg contains: projectId, sessionId, bundleName
+
+        //check if there exists an <bundlename>_annot.json file in the appropriate project/session/bundle directory
+        const Project = this.mongoose.model('Project');
+        let project = await Project.findOne({ id: msg.projectId });
+        if(!project) {
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 400,
+                msg: 'Project not found'
+            }).toJSON());
+            return;
+        }
+
+        let session = project.sessions.find(s => s.id == msg.sessionId);
+        if(!session) {
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 400,
+                msg: 'Session not found'
+            }).toJSON());
+            return;
+        }
+
+        //bundlePathName should be the filename minus the file extension and + _bndl
+        let bundleBaseName = path.parse(msg.bundleName).name;
+        let bundlePathName = bundleBaseName + "_bndl";
+        let projectBundlePath = "/repositories/"+msg.projectId+"/Data/VISP_emuDB/"+session.name+"_ses/"+bundlePathName;
+        let annotationFilePath = projectBundlePath+"/"+bundleBaseName+"_annot.json";
+        let annotationFileExists = await fs.pathExists(annotationFilePath);
+
+        //we create a new virtual id to represent these variables and then we store this combination in a collection 'OctraVirtualTask'
+        const OctraVirtualTask = this.mongoose.model('OctraVirtualTask');
+        let newTask = new OctraVirtualTask({
+            id: nanoid.nanoid(64),
+            projectId: msg.projectId,
+            sessionId: msg.sessionId,
+            bundleName: msg.bundleName,
+            createdBy: user.username,
+            createdAt: new Date(),
+            annotationFile: annotationFileExists,
+            closed: false
+        });
+
+        await newTask.save();
+
+        // If annotation file exists, update it to set the "annotates" field to <taskid>.wav and make sure the "name" field is correct and other things
+        if(annotationFileExists) {
+            try {
+                let annotationData = await fs.readJson(annotationFilePath);
+                annotationData.annotates = newTask.id + ".wav";
+                annotationData.name = bundleBaseName+"_annot.json";
+
+                //ensure levels array exists
+                if(!annotationData.levels) {
+                    annotationData.levels = [];
+                }
+
+                let wavFilePath = projectBundlePath+"/"+bundleBaseName+".wav";
+                annotationData = await this.ensureValidAnnotationDataStruct(annotationData, wavFilePath);
+
+                await fs.writeJson(annotationFilePath, annotationData, { spaces: 2 });
+                this.app.addLog("Updated annotation file with task ID: " + newTask.id, "info");
+            } catch (err) {
+                this.app.addLog("Error updating annotation file: " + err.toString(), "error");
+            }
+        }
+
+        ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+            result: 200,
+            taskId: newTask.id,
+            annotationFile: annotationFileExists,
+        }).toJSON());
+    }
+
+    async ensureValidAnnotationDataStruct(annotationData, wavFilePath) {
+        //get the sampleDur metadata from the wav file (in samples: duration * sample_rate)
+        
+        this.app.addLog("Reading wav file info from: " + wavFilePath, "debug");
+        let sampleDurSamples = 0;
+        try {
+            const metadata = await parseFile(wavFilePath);
+            const sampleRate = metadata.format.sampleRate;
+            const durSeconds = metadata.format.duration;
+            sampleDurSamples = Math.round(durSeconds * sampleRate);
+        } catch (err) {
+            this.app.addLog("Error reading wav file info, defaulting sampleDur to 0: " + err.toString(), "warn");
+            sampleDurSamples = 0;
+        }
+
+        //ensure OCTRA_1 level exists
+        let octraLevel = annotationData.levels.find(level => level.name === "OCTRA_1");
+        if(!octraLevel) {
+            this.app.addLog("OCTRA_1 level not found in annotation file, creating it.", "info");
+            octraLevel = {
+                name: "OCTRA_1",
+                type: "SEGMENT",
+                items: [{
+                    id: 1,
+                    labels: [{ name: "OCTRA_1", value: "" }],
+                    sampleStart: 0,
+                    sampleDur: sampleDurSamples
+                }]
+            };
+            annotationData.levels.push(octraLevel);
+        }
+        
+
+        //for all SEGMENT levels, ensure there is at least one item. If empty, add a default item with OCTRA_1 label and proper sampleDur
+        annotationData.levels.forEach(level => {
+            if(level.type && level.type.toUpperCase() === 'SEGMENT') {
+                if(!Array.isArray(level.items) || level.items.length === 0) {
+                    this.app.addLog(`Adding default item to SEGMENT level ${level.name}`, "debug");
+                    level.items = [{
+                        id: 1,
+                        labels: [{ name: "OCTRA_1", value: "" }],
+                        sampleStart: 0,
+                        sampleDur: sampleDurSamples
+                    }];
+                }
+            }
+        });
+
+        //go through all levels and ensure that none of them have an items array with an item containing the attribute "type"
+        annotationData.levels.forEach(level => {
+            if(Array.isArray(level.items)) {
+                level.items.forEach(item => {
+                    if(item.hasOwnProperty("type")) {
+                        delete item.type;
+                        this.app.addLog(`Removed deprecated "type" attribute from item in level ${level.name}`, "debug");
+                    }
+                });
+            }
+        });
+
+        return annotationData;
+    }
+
+    async saveOctraTask(ws, user, msg) {
+        //msg will contain "octraTaskId" and "annotation", which is a json struct representing the annotation data
+        const OctraVirtualTask = this.mongoose.model('OctraVirtualTask');
+        let task = await OctraVirtualTask.findOne({ id: msg.octraTaskId });
+        if(task === null || task.createdBy !== user.username) {
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 400,
+                msg: 'Task not found or access denied'
+            }).toJSON());
+            return;
+        }
+        task.savedAt = new Date();
+        task.savedBy = user.username;
+        task.closed = true;
+        
+        await task.save();
+
+        //get session name from sessionId
+        const Project = this.mongoose.model('Project');
+        let project = await Project.findOne({ id: task.projectId });
+        if(!project) {
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 400,
+                msg: 'Project not found'
+            }).toJSON());
+            return;
+        }
+
+        let session = project.sessions.find(s => s.id == task.sessionId);
+        if(!session) {
+            ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 400,
+                msg: 'Session not found'
+            }).toJSON());
+            return;
+        }
+
+        //bundlePathName should be the filename minus the file extension and + _bndl
+        let bundleBaseName = path.parse(task.bundleName).name;
+        let bundlePathName = bundleBaseName + "_bndl";
+
+        //now save the annotation data as a file to disk in the project bundle directory
+        let projectBundlePath = "/repositories/"+task.projectId+"/Data/VISP_emuDB/"+session.name+"_ses/"+bundlePathName;
+        let annotationFilePath = projectBundlePath+"/"+bundleBaseName+"_annot.json";
+
+        msg.annotation.name = bundleBaseName+"_annot.json";
+        msg.annotation.annotates = bundleBaseName+".wav";
+
+        console.log("Saving annotation to "+annotationFilePath);
+        await fs.writeFile(annotationFilePath, JSON.stringify(msg.annotation, null, 2));
+
+
+        ws.send(new WebSocketMessage(msg.requestId, msg.cmd, {
+            result: 200,
+            msg: 'Task updated successfully'
+        }).toJSON());
     }
 
     async getUserByPhpSessionId(phpSessId) {
