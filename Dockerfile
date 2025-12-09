@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 # Copy package files
 COPY package*.json ./
 
-# Install all dependencies (including devDependencies for linting, if needed)
+# Install dependencies from package-lock.json
 RUN npm ci
 
 # ============================================================================
