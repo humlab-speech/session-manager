@@ -127,7 +127,7 @@ class Session {
     }
 
     getContainerName(userId, projectId) {
-        let salt = nanoid.nanoid(4);
+        let salt = nanoid(4);
         return "hsapp-session-"+projectId+"-"+userId+"-"+salt;
     }
 

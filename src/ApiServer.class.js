@@ -821,7 +821,7 @@ class ApiServer {
         //we create a new virtual id to represent these variables and then we store this combination in a collection 'OctraVirtualTask'
         const OctraVirtualTask = this.mongoose.model('OctraVirtualTask');
         let newTask = new OctraVirtualTask({
-            id: nanoid.nanoid(64),
+            id: nanoid(64),
             projectId: msg.projectId,
             sessionId: msg.sessionId,
             bundleName: msg.bundleName,
