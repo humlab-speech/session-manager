@@ -1,4 +1,4 @@
-const nanoid = require('nanoid');
+const { nanoid } = require('nanoid');
 const fs = require('fs');
 const httpProxy = require('http-proxy');
 const { Docker } = require('node-docker-api');
