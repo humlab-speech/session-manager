@@ -11,7 +11,7 @@ const Rx = require('rxjs');
 const validator = require('validator');
 const mongodb = require('mongodb');
 const UserSession = require('./models/UserSession.class');
-const { nanoid } = require('nanoid');
+const { nanoid, customAlphabet } = require('nanoid');
 const mongoose = require('mongoose');
 const fs = require('fs-extra');
 const simpleGit = require('simple-git');
@@ -2142,8 +2142,7 @@ class ApiServer {
         let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
-        let customAlphabet = nanoid.customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
-        projectFormData.id = customAlphabet();
+        projectFormData.id = customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
         /*
             example user:
             {
