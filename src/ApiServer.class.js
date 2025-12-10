@@ -11,7 +11,7 @@ const Rx = require('rxjs');
 const validator = require('validator');
 const mongodb = require('mongodb');
 const UserSession = require('./models/UserSession.class');
-const { nanoid, customAlphabet } = require('nanoid');
+const nanoid = require('nanoid');
 const mongoose = require('mongoose');
 const fs = require('fs-extra');
 const simpleGit = require('simple-git');
@@ -821,7 +821,7 @@ class ApiServer {
         //we create a new virtual id to represent these variables and then we store this combination in a collection 'OctraVirtualTask'
         const OctraVirtualTask = this.mongoose.model('OctraVirtualTask');
         let newTask = new OctraVirtualTask({
-            id: nanoid(64),
+            id: nanoid.nanoid(64),
             projectId: msg.projectId,
             sessionId: msg.sessionId,
             bundleName: msg.bundleName,
@@ -1410,7 +1410,7 @@ class ApiServer {
     createSprProject(projectName, ws = null) {
         //insert the project into the database
         let project = {
-            projectId: nanoid(),
+            projectId: nanoid.nanoid(),
             name: projectName,
             description: 'No description',
             audioFormat: {
@@ -1792,7 +1792,7 @@ class ApiServer {
     async generateInviteCode(ws, msg) {
         let user = this.getUserSessionBySocket(ws);
 
-        let inviteCode = nanoid();
+        let inviteCode = nanoid.nanoid();
         //insert the invite code into the mongodb collection "invite_codes"
         let db = await this.connectToMongo("visp");
         let collection = db.collection("invite_codes");
@@ -2142,7 +2142,8 @@ class ApiServer {
         let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
-        projectFormData.id = customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
+        //projectFormData.id = nanoid.customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
+        projectFormData.id = nanoid.nanoid(21);
         /*
             example user:
             {

@@ -1,5 +1,5 @@
 // Require nanoid explicitly. Fail fast if it's missing or doesn't provide the expected export.
-const { nanoid } = require('nanoid');
+const nanoid = require('nanoid');
 const Session = require('./Session.class');
 const fetch = require('node-fetch');
 const { Docker } = require('node-docker-api');
@@ -81,7 +81,7 @@ class SessionManager {
     }
     
     getContainerAccessCode() {
-      let code = nanoid(32);
+      let code = nanoid.nanoid(32);
       while(this.checkIfCodeIsUsed(code)) {
         code = nanoid(32);
       }

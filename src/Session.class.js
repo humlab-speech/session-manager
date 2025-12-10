@@ -1,4 +1,4 @@
-const { nanoid } = require('nanoid');
+const nanoid = require('nanoid');
 const fs = require('fs');
 const httpProxy = require('http-proxy');
 const { Docker } = require('node-docker-api');
@@ -127,7 +127,7 @@ class Session {
     }
 
     getContainerName(userId, projectId) {
-        let salt = nanoid(4);
+        let salt = nanoid.nanoid(4);
         return "hsapp-session-"+projectId+"-"+userId+"-"+salt;
     }
 

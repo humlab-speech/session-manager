@@ -1,4 +1,4 @@
-const { nanoid } = require("nanoid");
+const nanoid = require("nanoid");
 const fs = require("fs");
 const { execSync } = require("child_process");
 const { Blob } = require("buffer");
@@ -455,7 +455,7 @@ class WhisperService {
 
         //add to the mongo db
         let item = new TranscriptionQueueItem({
-            id: nanoid(),
+            id: nanoid.nanoid(),
             project: msg.data.project,
             session: msg.data.session,
             bundle: msg.data.bundle,
