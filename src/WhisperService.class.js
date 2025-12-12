@@ -130,6 +130,9 @@ class WhisperService {
         (async () => {
             const gradio = await import("@gradio/client");
             const { Client } = gradio;
+            // Exponential backoff when trying to connect to the Whisper/Gradio service.
+            let backoff = 5000; // start at 5s
+            const maxBackoff = 5 * 60 * 1000; // cap at 5 minutes
             while (!this.gradioReady) {
                 try {
                     this.gradioConn = await Client.connect(
@@ -141,11 +144,13 @@ class WhisperService {
                         "info",
                     );
                 } catch (err) {
+                    const errMsg = (err && err.stack) ? err.stack : String(err);
                     this.app.addLog(
-                        "Error connecting to Whisper service, will try again.",
+                        `Error connecting to Whisper service: ${errMsg}. Retrying in ${Math.round(backoff/1000)}s.`,
                         "warn",
                     );
-                    await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait for 5 seconds before retrying
+                    await new Promise((resolve) => setTimeout(resolve, backoff));
+                    backoff = Math.min(maxBackoff, backoff * 2);
                 }
             }
         })();
@@ -160,9 +165,14 @@ class WhisperService {
                 await new Promise((resolve) => setTimeout(resolve, 1000));
             }
             this.app.addLog("Initiating transcription queue interval.", "info");
+            // Run the transcription queue at a lower frequency to avoid tight looping
+            // while the external service is transiently unavailable.
             setInterval(() => {
-                this.runTranscriptionQueue();
-            }, 5000);
+                if (this.gradioReady) {
+                    this.runTranscriptionQueue();
+                }
+                // Silent skip when Whisper is not ready
+            }, 15000); // 15s interval
         };
 
         waitForGradioReady();
@@ -709,7 +719,9 @@ class WhisperService {
             );
 
             this.transcriptionRunning = true;
-            this.initTranscription(nextInQueue)
+            // Double-wrapped promise handling to catch both sync throws and async rejections
+            Promise.resolve()
+                .then(() => this.initTranscription(nextInQueue))
                 .then(() => {
                     this.app.addLog(
                         "Transcription of " +
@@ -731,7 +743,7 @@ class WhisperService {
                             "/" +
                             nextInQueue.bundle +
                             ": " +
-                            err,
+                            (err.stack || err.message || err),
                         "error",
                     );
                 })
@@ -1104,15 +1116,30 @@ class WhisperService {
             await queueItem.save();
             return result;
         } catch (err) {
-            let errStr = JSON.stringify(err);
+            // Robust error serialization: try message, stack, then JSON stringify
+            let errStr = err.message || err.toString();
+            if (err.stack) {
+                errStr = err.stack;
+            } else {
+                try {
+                    errStr = JSON.stringify(err);
+                } catch (jsonErr) {
+                    // If JSON.stringify fails, just use string representation
+                    errStr = String(err);
+                }
+            }
+            
             this.app.addLog(
-                "Error running whisper command: " + errStr,
+                "Transcription failed for " + queueItem.project + "/" + 
+                queueItem.session + "/" + queueItem.bundle + ": " + errStr,
                 "error",
             );
-            queueItem.error = "Error running whisper command: " + errStr;
+            queueItem.error = "Transcription failed: " + errStr;
             queueItem.status = "error";
             queueItem.updatedAt = new Date();
             await queueItem.save();
+            
+            // Return gracefully without throwing - allows queue processing to continue
             return;
         }
     }
