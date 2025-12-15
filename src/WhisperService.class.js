@@ -1021,11 +1021,27 @@ class WhisperService {
         }
 
         let fileBuffer = fs.readFileSync(filePath + queueItem.bundle);
-        const fileBlob = new Blob([fileBuffer]);
+        // Use File instead of Blob to preserve filename for Gradio
+        const { File } = await import("buffer");
+        const file = new File([fileBuffer], queueItem.bundle, { type: "audio/wav" });
 
         try {
+            // Upload file to Gradio first (it handles conversion to server paths)
+            const uploadResponse = await this.gradioConn.upload_files("http://whisper:7860", [file]);
+            if (uploadResponse.error) {
+                throw new Error(`File upload failed: ${uploadResponse.error}`);
+            }
+            
+            // Format uploaded file paths as FileData objects
+            const fileData = uploadResponse.files.map(path => ({
+                path: path,
+                meta: { _type: 'gradio.FileData' },
+                orig_name: queueItem.bundle,
+                url: path
+            }));
+            
             const result = await this.gradioConn.predict("/transcribe_file", {
-                files: [fileBlob],
+                files: fileData,
                 input_folder_path: "",
                 include_subdirectory: false,
                 save_same_dir: false,
@@ -1055,28 +1071,30 @@ class WhisperService {
                 param_27: false,
                 param_28: "\"'“¿([{-",
                 param_29: "\"'.。,，!！?？:：”)]}、",
-                param_30: 0,
+                param_30: 3,
                 param_31: 30,
-                param_32: 0,
+                param_32: 3,
                 param_33: "",
-                param_34: 0,
+                param_34: 0.5,
                 param_35: 1,
                 param_36: 24,
-                param_37: false,
-                param_38: 0.5,
-                param_39: 250,
-                param_40: 9999,
-                param_41: 1000,
-                param_42: 2000,
-                param_43: false,
-                param_44: "cpu",
-                param_45: "",
-                param_46: true,
-                param_47: "UVR-MDX-NET-Inst_HQ_4",
-                param_48: "cpu",
-                param_49: 256,
-                param_50: false,
-                param_51: true,
+                param_37: true,
+                param_38: false,
+                param_39: 0.5,
+                param_40: 250,
+                param_41: 9999,
+                param_42: 1000,
+                param_43: 2000,
+                param_44: false,
+                param_45: "cpu",
+                param_46: "",
+                param_47: true,
+                param_48: false,
+                param_49: "UVR-MDX-NET-Inst_HQ_4",
+                param_50: "cpu",
+                param_51: 256,
+                param_52: false,
+                param_53: true,
             });
 
             http.get(result.data[1][0].url, (response) => {
