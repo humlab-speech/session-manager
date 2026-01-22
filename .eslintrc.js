@@ -4,6 +4,6 @@ module.exports = {
   extends: ['eslint:recommended', 'prettier'],
   parserOptions: { ecmaVersion: 2020, requireConfigFile: false },
   rules: {
-    // Add any custom rules here if needed
+    'no-unused-vars': 'off'
   }
 };
