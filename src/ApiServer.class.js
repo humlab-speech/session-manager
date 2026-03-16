@@ -45,10 +45,12 @@ class ApiServer {
         this.setupEndpoints();
         this.startServer();
         this.startWsServer();
+        this.importQueueRunning = false;
         this.talkToMeGoose().then((mongoose) => {
             this.mongoose = mongoose;
             this.defineModels();
             this.whisperService.init();
+            this.startImportQueueProcessor();
         });
     }
 
@@ -125,6 +127,17 @@ class ApiServer {
             closed: Boolean,
         });
         mongoose.model("OctraVirtualTask", this.models.OctraVirtualTask);
+
+        this.models.ImportQueueItem = new mongoose.Schema({
+            projectId: String,
+            sessionId: String,
+            status: { type: String, default: "pending" },
+            error: String,
+            createdAt: { type: Date, default: Date.now },
+            updatedAt: Date,
+            finishedAt: Date,
+        });
+        mongoose.model("ImportQueueItem", this.models.ImportQueueItem, "wsrngimportqueueitems");
     }
 
     async fetchMongoUser(eppn) {
@@ -4881,7 +4894,7 @@ session-manager_1    | }
                     );
                     observer.next({
                         type: "status-update",
-                        message: "Spawning container",
+                        message: "Launching",
                     });
 
                     session
@@ -4952,7 +4965,7 @@ session-manager_1    | }
             );
             observer.next({
                 type: "status-update",
-                message: "Spawning container",
+                message: "Launching",
             });
             let containerId = await session.createContainer();
             let credentials = user.username + ":" + user.personalAccessToken;
@@ -5087,7 +5100,7 @@ session-manager_1    | }
     async importContainerTest() {
         let containerId =
             "b8e26a40bcc364808d9681ccedae8000bdb35ecabdc6e6c9ade2643110921308";
-        let modem = new Modem("/var/run/docker.sock");
+        let modem = new Modem(this.app.dockerSocketPath);
         let container = new Container(modem, containerId);
         console.log(container);
 
@@ -5099,6 +5112,67 @@ session-manager_1    | }
             .model("Project")
             .findOne({ id: projectId });
         return mongoProject;
+    }
+
+    async registerAudioFilesForImport(projectId, sessionId) {
+        this.app.addLog("Registering audio files for import: project " + projectId + ", session " + sessionId, "info");
+        const ImportQueueItem = this.mongoose.model("ImportQueueItem");
+        const queueItem = new ImportQueueItem({
+            projectId: projectId,
+            sessionId: sessionId,
+            status: "pending",
+            createdAt: new Date(),
+        });
+        await queueItem.save();
+        this.app.addLog("Import queue item registered: " + queueItem._id, "info");
+        return queueItem;
+    }
+
+    startImportQueueProcessor() {
+        this.app.addLog("Starting import queue processor", "info");
+        setInterval(async () => {
+            if (this.importQueueRunning) {
+                return;
+            }
+            try {
+                this.importQueueRunning = true;
+                const ImportQueueItem = this.mongoose.model("ImportQueueItem");
+                const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+                const item = await ImportQueueItem.findOne({
+                    status: "pending",
+                    createdAt: { $lte: oneMinuteAgo },
+                }).sort({ createdAt: 1 });
+
+                if (!item) {
+                    this.importQueueRunning = false;
+                    return;
+                }
+
+                this.app.addLog("Processing import queue item: " + item._id + " (project: " + item.projectId + ", session: " + item.sessionId + ")", "info");
+                item.status = "processing";
+                item.updatedAt = new Date();
+                await item.save();
+
+                try {
+                    const result = await this.importAudioFiles(item.projectId, item.sessionId);
+                    item.status = "completed";
+                    item.finishedAt = new Date();
+                    item.updatedAt = new Date();
+                    await item.save();
+                    this.app.addLog("Import queue item completed: " + item._id, "info");
+                } catch (err) {
+                    this.app.addLog("Import queue item failed: " + item._id + " - " + err.message, "error");
+                    item.status = "failed";
+                    item.error = err.message;
+                    item.updatedAt = new Date();
+                    await item.save();
+                }
+            } catch (err) {
+                this.app.addLog("Import queue processor error: " + err.message, "error");
+            } finally {
+                this.importQueueRunning = false;
+            }
+        }, 15000);
     }
 
     async importAudioFiles(projectId, sessionId) {
@@ -5419,13 +5493,17 @@ session-manager_1    | }
     }
 
     setupEndpoints() {
-        this.expressApp.post("/api/importaudiofiles", (req, res) => {
-            this.app.addLog("importAudioFiles", "debug");
-            this.importAudioFiles(req.body.projectId, req.body.sessionId).then(
-                (ar) => {
-                    res.status(ar.code).end(ar.toJSON());
-                },
-            );
+        this.expressApp.post("/api/importaudiofiles", async (req, res) => {
+            this.app.addLog("importAudioFiles - registering for import", "debug");
+            try {
+                const queueItem = await this.registerAudioFilesForImport(req.body.projectId, req.body.sessionId);
+                let ar = new ApiResponse(200, "Audio files registered for import");
+                res.status(ar.code).end(ar.toJSON());
+            } catch (err) {
+                this.app.addLog("Error registering audio files for import: " + err.message, "error");
+                let ar = new ApiResponse(500, "Error registering audio files for import");
+                res.status(ar.code).end(ar.toJSON());
+            }
         });
 
         this.expressApp.get("/api/importtest", (req, res) => {
