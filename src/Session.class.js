@@ -21,7 +21,7 @@ class Session {
         this.localProjectPath = "/home/project";
         this.containerUser = "";
         this.container = null;
-        this.docker = new Docker({ socketPath: "/var/run/docker.sock" });
+        this.docker = new Docker({ socketPath: this.app.dockerSocketPath });
     }
 
     overrideImage(image) {

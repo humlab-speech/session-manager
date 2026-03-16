@@ -13,7 +13,7 @@ class SessionManager {
     constructor(app) {
       this.app = app;
       this.sessions = [];
-      this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
+      this.docker = new Docker({ socketPath: this.app.dockerSocketPath });
     }
 
     importSuspendedSessions() {

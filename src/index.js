@@ -11,6 +11,7 @@ class Application {
     this.hsApiAccessToken = process.env.HS_API_ACCESS_TOKEN;
     this.absRootPath = process.env.ABS_ROOT_PATH;
     this.logLevel = process.env.LOG_LEVEL.toUpperCase();
+    this.dockerSocketPath = process.env.DOCKER_SOCKET_PATH || '/run/user/1000/podman/podman.sock';
     colors.enable();
 
     this.sessMan = new SessionManager(this);
