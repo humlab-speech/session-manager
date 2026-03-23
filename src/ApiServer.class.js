@@ -1923,6 +1923,63 @@ class ApiServer {
         );
     }
 
+    async getProjectHealthStatus(projectId) {
+        // Check EmuDB config and count audio files
+        const repoPath = `/repositories/${projectId}`;
+        const emuDbConfigPath = path.join(repoPath, "Data", "VISP_emuDB", "VISP_DBconfig.json");
+        const dataPath = path.join(repoPath, "Data");
+
+        let health = {
+            hasEmuDbConfig: false,
+            audioFileCount: 0,
+            issues: [],
+        };
+
+        try {
+            // Check if EmuDB config exists
+            if (fs.existsSync(emuDbConfigPath)) {
+                health.hasEmuDbConfig = true;
+            } else {
+                health.issues.push("Missing EmuDB config");
+            }
+
+            // Count audio files recursively in Data directory
+            if (fs.existsSync(dataPath)) {
+                const findAudioFilesRecursive = (dir) => {
+                    let count = 0;
+                    try {
+                        const files = fs.readdirSync(dir);
+                        files.forEach((file) => {
+                            const fullPath = path.join(dir, file);
+                            const stat = fs.statSync(fullPath);
+                            if (stat.isDirectory()) {
+                                count += findAudioFilesRecursive(fullPath);
+                            } else if (
+                                file.toLowerCase().endsWith(".wav") ||
+                                file.toLowerCase().endsWith(".mp3") ||
+                                file.toLowerCase().endsWith(".flac")
+                            ) {
+                                count++;
+                            }
+                        });
+                    } catch (err) {
+                        // Silently skip inaccessible directories
+                    }
+                    return count;
+                };
+
+                health.audioFileCount = findAudioFilesRecursive(dataPath);
+            }
+        } catch (err) {
+            this.app.addLog(
+                `Error checking project health for ${projectId}: ${err.message}`,
+                "debug",
+            );
+        }
+
+        return health;
+    }
+
     async fetchProjects(ws, user, msg) {
         const Project = this.mongoose.model("Project");
 
@@ -1970,6 +2027,27 @@ class ApiServer {
                 this.app.sessMan.getContainerSessionsOverviewByProjectId(
                     project.id,
                 );
+
+            // Add health status and file count
+            try {
+                projects[key].healthStatus = await this.getProjectHealthStatus(
+                    project.id,
+                );
+                this.app.addLog(
+                    `Project ${project.id} health: ${JSON.stringify(projects[key].healthStatus)}`,
+                    "debug",
+                );
+            } catch (err) {
+                this.app.addLog(
+                    `Error getting health status for project ${project.id}: ${err.message}`,
+                    "error",
+                );
+                projects[key].healthStatus = {
+                    hasEmuDbConfig: false,
+                    audioFileCount: 0,
+                    issues: ["Error checking health"],
+                };
+            }
         }
 
         //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: projects }));
