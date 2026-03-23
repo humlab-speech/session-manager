@@ -131,8 +131,8 @@ class WhisperService {
             const gradio = await import("@gradio/client");
             const { Client } = gradio;
             // Exponential backoff when trying to connect to the Whisper/Gradio service.
-            let backoff = 5000; // start at 5s
-            const maxBackoff = 5 * 60 * 1000; // cap at 5 minutes
+            let backoff = 100 * 1000; // start at 100s
+            const maxBackoff = 3600 * 1000; // cap at 3600s (1h)
             while (!this.gradioReady) {
                 try {
                     this.gradioConn = await Client.connect(
@@ -144,11 +144,12 @@ class WhisperService {
                         "info",
                     );
                 } catch (err) {
-                    const errMsg = (err && err.stack) ? err.stack : String(err);
+                    const briefErr = (err?.message || String(err)).split("\n")[0];
                     this.app.addLog(
-                        `Error connecting to Whisper service: ${errMsg}. Retrying in ${Math.round(backoff/1000)}s.`,
+                        `Error connecting to Whisper service: ${briefErr}. Retrying in ${Math.round(backoff / 1000)}s.`,
                         "warn",
                     );
+                    // Do not log stack trace at all.
                     await new Promise((resolve) => setTimeout(resolve, backoff));
                     backoff = Math.min(maxBackoff, backoff * 2);
                 }
