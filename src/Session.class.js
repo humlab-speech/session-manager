@@ -208,7 +208,7 @@ class Session {
             HostConfig: {
                 // Allow disabling AutoRemove during development to keep exited containers for post-mortem
                 AutoRemove: !keepContainers,
-                NetworkMode: process.env.COMPOSE_PROJECT_NAME + "_visp-net",
+                NetworkMode: process.env.VISP_NETWORK_NAME || process.env.COMPOSE_PROJECT_NAME + "_visp-net",
                 Mounts: mounts,
                 Memory: 8 * 1024 * 1024 * 1024, //bytes
                 MemorySwap: 16 * 1024 * 1024 * 1024,
@@ -375,17 +375,138 @@ class Session {
         );
 
         try {
-            // Create and start the container
-            const container =
-                await this.docker.container.create(containerConfig);
-            await container.start();
+            // Use the libpod native API for both create and start.
+            //
+            // The Docker-compat /containers/create endpoint bakes OomScoreAdj:0 into
+            // the stored OCI spec. At start time, Podman/conmon then tries to write that
+            // value to /proc/self/oom_score_adj — which is denied (EPERM) under rootless
+            // Podman on WSL2 even though the value is 0. The native libpod create endpoint
+            // does not inject OomScoreAdj at all, so start proceeds without that write.
+            //
+            // Translate Docker-compat config → libpod SpecGenerator format:
+            const env = {};
+            for (const e of containerConfig.Env || []) {
+                const idx = e.indexOf("=");
+                if (idx !== -1) {
+                    env[e.substring(0, idx)] = e.substring(idx + 1);
+                }
+            }
+            const networkName = containerConfig.HostConfig.NetworkMode;
+            const libpodMounts = (containerConfig.HostConfig.Mounts || []).map(
+                (m) => ({
+                    type: (m.Type || "bind").toLowerCase(),
+                    source: m.Source,
+                    destination: m.Target,
+                    options: m.Mode ? m.Mode.split(",") : ["rw"],
+                }),
+            );
+            const libpodSpec = {
+                image: containerConfig.Image,
+                name: containerConfig.name,
+                env: env,
+                labels: containerConfig.Labels || {},
+                remove: containerConfig.HostConfig.AutoRemove || false,
+                netns: { nsmode: "bridge" },
+                networks: { [networkName]: {} },
+                mounts: libpodMounts,
+                resource_limits: {
+                    memory: {
+                        limit: containerConfig.HostConfig.Memory,
+                        swap: containerConfig.HostConfig.MemorySwap,
+                    },
+                    cpu: {
+                        shares: containerConfig.HostConfig.CpuShares,
+                    },
+                },
+            };
             this.app.addLog(
-                `Container created and started. ID: ${container.data.Id}`,
+                `libpodSpec: ${JSON.stringify(libpodSpec)}`,
+                "debug",
             );
 
-            // Get a full container object and set up properties
-            this.container = this.docker.container.get(container.data.Id);
-            this.importContainerId(container.data.Id);
+            const http = require("http");
+
+            // Create via libpod native API
+            const containerId = await new Promise((resolve, reject) => {
+                const reqBody = JSON.stringify(libpodSpec);
+                const req = http.request(
+                    {
+                        socketPath: this.app.dockerSocketPath,
+                        path: "/v4.0.0/libpod/containers/create",
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Content-Length": Buffer.byteLength(reqBody),
+                        },
+                    },
+                    (res) => {
+                        let data = "";
+                        res.on("data", (d) => (data += d));
+                        res.on("end", () => {
+                            if (res.statusCode === 201) {
+                                try {
+                                    resolve(JSON.parse(data).Id);
+                                } catch (e) {
+                                    reject(
+                                        new Error(
+                                            `Failed to parse create response: ${data}`,
+                                        ),
+                                    );
+                                }
+                            } else {
+                                reject(
+                                    new Error(
+                                        `Container create failed (HTTP ${res.statusCode}): ${data}`,
+                                    ),
+                                );
+                            }
+                        });
+                    },
+                );
+                req.on("error", reject);
+                req.write(reqBody);
+                req.end();
+            });
+            this.app.addLog(
+                `Container created via libpod. ID: ${containerId}`,
+                "debug",
+            );
+
+            // Start via libpod native API (no OomScoreAdj write triggered)
+            await new Promise((resolve, reject) => {
+                const req = http.request(
+                    {
+                        socketPath: this.app.dockerSocketPath,
+                        path: `/v4.0.0/libpod/containers/${containerId}/start`,
+                        method: "POST",
+                    },
+                    (res) => {
+                        // 204 = started, 304 = already started — both are fine
+                        if (res.statusCode === 204 || res.statusCode === 304) {
+                            return resolve();
+                        }
+                        let body = "";
+                        res.on("data", (d) => (body += d));
+                        res.on("end", () =>
+                            reject(
+                                new Error(
+                                    `Container start failed (HTTP ${res.statusCode}): ${body}`,
+                                ),
+                            ),
+                        );
+                    },
+                );
+                req.on("error", reject);
+                req.end();
+            });
+            this.app.addLog(
+                `Container created and started. ID: ${containerId}`,
+            );
+
+            // Get a full container object and set up properties.
+            // docker.container.get() is a read-only wrapper — safe to use Docker-compat here.
+            this.container = this.docker.container.get(containerId);
+            this.importContainerId(containerId);
 
             // Setup log streaming (logic unchanged)
             this.setupLogStreaming();
