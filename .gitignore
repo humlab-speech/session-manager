@@ -1,5 +1,8 @@
 .vscode
 
+# Local development notes (not for upstream)
+docs/
+
 # Logs
 logs
 *.log
