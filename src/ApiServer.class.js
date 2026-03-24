@@ -1066,12 +1066,16 @@ class ApiServer {
                 "OCTRA_1 level not found in annotation file, creating it.",
                 "info",
             );
+            // Compute next unique item ID across all existing levels
+            let maxItemId = annotationData.levels.reduce((max, level) => {
+                return level.items ? level.items.reduce((m, item) => Math.max(m, item.id || 0), max) : max;
+            }, 0);
             octraLevel = {
                 name: "OCTRA_1",
                 type: "SEGMENT",
                 items: [
                     {
-                        id: 1,
+                        id: maxItemId + 1,
                         labels: [{ name: "OCTRA_1", value: "" }],
                         sampleStart: 0,
                         sampleDur: sampleDurSamples,
@@ -1089,9 +1093,13 @@ class ApiServer {
                         `Adding default item to SEGMENT level ${level.name}`,
                         "debug",
                     );
+                    // Compute next unique item ID across all levels (including those already processed)
+                    let maxItemId = annotationData.levels.reduce((max, lvl) => {
+                        return lvl.items ? lvl.items.reduce((m, item) => Math.max(m, item.id || 0), max) : max;
+                    }, 0);
                     level.items = [
                         {
-                            id: 1,
+                            id: maxItemId + 1,
                             labels: [{ name: "OCTRA_1", value: "" }],
                             sampleStart: 0,
                             sampleDur: sampleDurSamples,
@@ -3322,13 +3330,16 @@ session-manager_1    | }
         await this.saveSessionsMongo(projectFormData);
 
         //create a bundlelist for the user creating the project
+        // NOTE: emuR's import_mediaFiles() replaces spaces with underscores in filenames/bundle names,
+        // so we must apply the same sanitization here so MongoDB names match the files on disk.
         let bundles = [];
         projectFormData.sessions.forEach((session) => {
             session.files.forEach((file) => {
-                let bundleName = file.name.replace(/\.[^/.]+$/, "");
+                let sanitizedFileName = file.name.replace(/ /g, "_");
+                let bundleName = sanitizedFileName.replace(/\.[^/.]+$/, "");
                 bundles.push({
                     comment: "",
-                    fileName: file.name,
+                    fileName: sanitizedFileName,
                     finishedEditing: session.sessionId,
                     name: bundleName,
                     session: session.name,
@@ -3348,7 +3359,11 @@ session-manager_1    | }
                 message: "Building project directory",
             }),
         );
-        await this.saveProjectEmuDb(user, projectFormData, true, ws, msg);
+        const emuDbOk = await this.saveProjectEmuDb(user, projectFormData, true, ws, msg);
+        if (emuDbOk === false) {
+            // saveProjectEmuDb already sent the error progress=end message, nothing more to do
+            return;
+        }
         ws.send(
             JSON.stringify({
                 requestId: msg.requestId,
@@ -3370,7 +3385,7 @@ session-manager_1    | }
 
         let bundleList = null;
         if (bundleListResult.length > 0) {
-            //update
+            //update - full replace (used on createProject)
             bundleList = bundleListResult[0];
             bundleList.bundles = bundles;
         } else {
@@ -3455,7 +3470,10 @@ session-manager_1    | }
                 result: "Building project directory",
             }),
         );
-        await this.saveProjectEmuDb(user, projectFormData, false, ws, msg);
+        const emuDbOk = await this.saveProjectEmuDb(user, projectFormData, false, ws, msg);
+        if (emuDbOk === false) {
+            return;
+        }
         ws.send(
             JSON.stringify({
                 requestId: msg.requestId,
@@ -3549,7 +3567,10 @@ session-manager_1    | }
                     dataSource: formSession.dataSource,
                     sessionScript: formSession.sessionScript,
                     sessionId: formSession.sessionId,
-                    files: formSession.files,
+                    files: formSession.files.map((f) => ({
+                        ...f,
+                        name: f.name.replace(/ /g, "_"),
+                    })),
                 });
 
                 this.sprSessionCreate(projectFormData.id, formSession);
@@ -3572,7 +3593,7 @@ session-manager_1    | }
             mongoSession.sessionId = formSession.sessionId;
 
             mongoSession.files = formSession.files.map((fileMeta) => ({
-                name: fileMeta.name,
+                name: fileMeta.name.replace(/ /g, "_"),
                 size: fileMeta.size,
                 type: fileMeta.type,
             }));
@@ -3821,6 +3842,16 @@ session-manager_1    | }
             user.username +
             "/" +
             context;
+        this.app.addLog(
+            "Upload directory: " +
+                uploadsSrcDirLocal +
+                " (container-internal) → " +
+                uploadsSrcDir +
+                " (host path). " +
+                "Uploaded files are at: " +
+                uploadsSrcDir +
+                "/emudb-sessions/<sessionId>/<filename>",
+        );
         if (!fs.existsSync(uploadsSrcDirLocal)) {
             this.app.addLog(
                 "Directory " +
@@ -3976,19 +4007,54 @@ session-manager_1    | }
                 ],
                 envVars,
             );
-            result = JSON.parse(resultJson);
-            if (!result || result.code != 200) {
-                this.app.addLog(
-                    "Failed creating emuDB (code " +
-                        result.code +
-                        "): stdout: " +
-                        result.body.stdout +
-                        ". stderr: " +
-                        result.body.stderr,
-                    "error",
-                );
+            try {
+                result = JSON.parse(resultJson);
+            } catch (parseErr) {
+                const errMsg =
+                    "Failed to parse emudb-create output (container-agent may be missing or crashed). " +
+                    "Raw output: " +
+                    String(resultJson).substring(0, 500);
+                this.app.addLog(errMsg, "error");
+                console.error("[saveProjectEmuDb] emudb-create parse error:", parseErr, "raw:", resultJson);
+                if (ws && msg) {
+                    ws.send(
+                        JSON.stringify({
+                            requestId: msg.requestId,
+                            type: "cmd-result",
+                            cmd: msg.cmd,
+                            progress: "end",
+                            result: false,
+                            message: "Failed to create EMU-DB: container-agent output could not be parsed. Check server logs.",
+                        }),
+                    );
+                }
                 await this.app.sessMan.deleteSession(session.accessCode);
-                return;
+                return false;
+            }
+            if (!result || result.code != 200) {
+                const errMsg =
+                    "Failed creating emuDB (code " +
+                    result.code +
+                    "): stdout: " +
+                    result.body.stdout +
+                    ". stderr: " +
+                    result.body.stderr;
+                this.app.addLog(errMsg, "error");
+                console.error("[saveProjectEmuDb] emudb-create failed:", errMsg);
+                if (ws && msg) {
+                    ws.send(
+                        JSON.stringify({
+                            requestId: msg.requestId,
+                            type: "cmd-result",
+                            cmd: msg.cmd,
+                            progress: "end",
+                            result: false,
+                            message: "Failed to create EMU-DB (code " + result.code + "): " + result.body.stderr,
+                        }),
+                    );
+                }
+                await this.app.sessMan.deleteSession(session.accessCode);
+                return false;
             }
         } else {
             if (ws && msg) {
@@ -4697,6 +4763,7 @@ session-manager_1    | }
             );
         }
         await this.app.sessMan.deleteSession(session.accessCode);
+        return true;
     }
 
     async addFilesToGit(git, projectId) {
