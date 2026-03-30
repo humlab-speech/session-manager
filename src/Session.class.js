@@ -138,7 +138,7 @@ class Session {
 
     getContainerName(userId, projectId) {
         let salt = nanoid.nanoid(4);
-        return "hsapp-session-" + projectId + "-" + userId + "-" + salt;
+        return "visp-session-" + projectId + "-" + userId + "-" + salt;
     }
 
     importContainerId(dockerContainerId) {
