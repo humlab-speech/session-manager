@@ -3844,6 +3844,44 @@ session-manager_1    | }
             user.username +
             "/" +
             context;
+
+        // Option B: Lazy cleanup — remove old formContextId directories for this user
+        // that are not the current one and are older than 24 hours.
+        // This catches orphaned uploads from crashed/abandoned saves.
+        const userUploadDirLocal = "/tmp/uploads/" + user.username;
+        try {
+            if (fs.existsSync(userUploadDirLocal)) {
+                const entries = fs.readdirSync(userUploadDirLocal, { withFileTypes: true });
+                const now = Date.now();
+                const maxAgeMs = 24 * 60 * 60 * 1000; // 24 hours
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    if (entry.name === context) continue; // skip current upload
+                    const dirPath = userUploadDirLocal + "/" + entry.name;
+                    try {
+                        const stat = fs.statSync(dirPath);
+                        const ageMs = now - stat.mtimeMs;
+                        if (ageMs > maxAgeMs) {
+                            this.app.addLog(
+                                "Cleaning up stale upload directory: " + dirPath +
+                                " (age: " + Math.round(ageMs / 3600000) + "h)",
+                            );
+                            fs.removeSync(dirPath);
+                        }
+                    } catch (cleanupErr) {
+                        this.app.addLog(
+                            "Failed to clean up stale upload directory " + dirPath + ": " + cleanupErr.toString(),
+                            "warn",
+                        );
+                    }
+                }
+            }
+        } catch (scanErr) {
+            this.app.addLog(
+                "Failed to scan for stale upload directories: " + scanErr.toString(),
+                "warn",
+            );
+        }
         this.app.addLog(
             "Upload directory: " +
                 uploadsSrcDirLocal +
@@ -4765,6 +4803,27 @@ session-manager_1    | }
             );
         }
         await this.app.sessMan.deleteSession(session.accessCode);
+
+        // Option A: Delete the upload directory after all operations succeeded.
+        // The audio files have been copied into the EmuDB repository by
+        // container-agent's import_mediaFiles(), so the originals are no longer
+        // needed.  Without this cleanup, every saveProject/updateProject call
+        // accumulates a new formContextId directory that is never removed.
+        try {
+            if (fs.existsSync(uploadsSrcDirLocal)) {
+                this.app.addLog(
+                    "Cleaning up upload directory after successful save: " + uploadsSrcDirLocal,
+                );
+                fs.removeSync(uploadsSrcDirLocal);
+            }
+        } catch (cleanupErr) {
+            // Non-fatal — log and continue. The files are already in the repo.
+            this.app.addLog(
+                "Failed to clean up upload directory " + uploadsSrcDirLocal + ": " + cleanupErr.toString(),
+                "warn",
+            );
+        }
+
         return true;
     }
 
