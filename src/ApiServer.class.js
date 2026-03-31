@@ -3655,8 +3655,10 @@ session-manager_1    | }
         //does the directory exist?
         if (!fs.existsSync(dir)) {
             this.app.addLog(
-                "Directory " + dir + " does not exist, aborting",
-                "info",
+                "Upload directory " + dir + " does not exist — no audio files were uploaded. " +
+                "This usually means the file upload POST failed (check webapi logs for permission errors). " +
+                "The project will be created without audio files.",
+                "warning",
             );
             return processedFiles;
         }
