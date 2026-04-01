@@ -574,6 +574,18 @@ class ApiServer {
             this.fetchProjects(ws, user, msg);
         }
 
+        if (msg.cmd == "cleanupOrphanedSessions") {
+            this.cleanupOrphanedSessions(msg.data.projectId).then((result) => {
+                ws.send(
+                    new WebSocketMessage(
+                        msg.requestId,
+                        msg.cmd,
+                        result,
+                    ).toJSON(),
+                );
+            });
+        }
+
         if (msg.cmd == "validateProjectName") {
             this.validateProjectName(ws, msg);
         }
@@ -1932,14 +1944,17 @@ class ApiServer {
     }
 
     async getProjectHealthStatus(projectId) {
-        // Check EmuDB config and count audio files
+        // Check EmuDB config, count audio files, and verify MongoDB/EmuDB consistency
         const repoPath = `/repositories/${projectId}`;
-        const emuDbConfigPath = path.join(repoPath, "Data", "VISP_emuDB", "VISP_DBconfig.json");
+        const emuDbPath = path.join(repoPath, "Data", "VISP_emuDB");
+        const emuDbConfigPath = path.join(emuDbPath, "VISP_DBconfig.json");
         const dataPath = path.join(repoPath, "Data");
 
         let health = {
             hasEmuDbConfig: false,
             audioFileCount: 0,
+            mongoSessionCount: 0,
+            emuDbSessionCount: 0,
             issues: [],
         };
 
@@ -1952,31 +1967,96 @@ class ApiServer {
             }
 
             // Count audio files recursively in Data directory
-            if (fs.existsSync(dataPath)) {
-                const findAudioFilesRecursive = (dir) => {
-                    let count = 0;
-                    try {
-                        const files = fs.readdirSync(dir);
-                        files.forEach((file) => {
-                            const fullPath = path.join(dir, file);
-                            const stat = fs.statSync(fullPath);
-                            if (stat.isDirectory()) {
-                                count += findAudioFilesRecursive(fullPath);
-                            } else if (
-                                file.toLowerCase().endsWith(".wav") ||
-                                file.toLowerCase().endsWith(".mp3") ||
-                                file.toLowerCase().endsWith(".flac")
-                            ) {
-                                count++;
-                            }
-                        });
-                    } catch (err) {
-                        // Silently skip inaccessible directories
-                    }
-                    return count;
-                };
+            const findAudioFilesRecursive = (dir) => {
+                let count = 0;
+                try {
+                    const files = fs.readdirSync(dir);
+                    files.forEach((file) => {
+                        const fullPath = path.join(dir, file);
+                        const stat = fs.statSync(fullPath);
+                        if (stat.isDirectory()) {
+                            count += findAudioFilesRecursive(fullPath);
+                        } else if (
+                            file.toLowerCase().endsWith(".wav") ||
+                            file.toLowerCase().endsWith(".mp3") ||
+                            file.toLowerCase().endsWith(".flac")
+                        ) {
+                            count++;
+                        }
+                    });
+                } catch (err) {
+                    // Silently skip inaccessible directories
+                }
+                return count;
+            };
 
+            if (fs.existsSync(dataPath)) {
                 health.audioFileCount = findAudioFilesRecursive(dataPath);
+            }
+
+            // Get MongoDB session data for this project
+            const Project = this.mongoose.model("Project");
+            const mongoProject = await Project.findOne({ id: projectId }).lean();
+
+            if (mongoProject && mongoProject.sessions) {
+                health.mongoSessionCount = mongoProject.sessions.length;
+                const mongoSessionNames = new Set(
+                    mongoProject.sessions.map((s) => s.name),
+                );
+
+                // Count MongoDB file references
+                let mongoFileCount = 0;
+                for (const session of mongoProject.sessions) {
+                    if (session.files) {
+                        mongoFileCount += session.files.length;
+                    }
+                }
+
+                // Get EmuDB session directories on disk
+                if (fs.existsSync(emuDbPath)) {
+                    const emuDbEntries = fs.readdirSync(emuDbPath);
+                    const emuDbSessionDirs = emuDbEntries.filter(
+                        (entry) =>
+                            entry.endsWith("_ses") &&
+                            fs.statSync(path.join(emuDbPath, entry)).isDirectory(),
+                    );
+                    health.emuDbSessionCount = emuDbSessionDirs.length;
+
+                    const emuDbSessionNames = new Set(
+                        emuDbSessionDirs.map((d) => d.replace(/_ses$/, "")),
+                    );
+
+                    // Check for orphaned EmuDB sessions (on disk but not in MongoDB)
+                    const orphanedSessions = [...emuDbSessionNames].filter(
+                        (name) => !mongoSessionNames.has(name),
+                    );
+                    if (orphanedSessions.length > 0) {
+                        health.issues.push(
+                            `${orphanedSessions.length} orphaned EmuDB session(s) on disk: ${orphanedSessions.join(", ")}`,
+                        );
+                    }
+
+                    // Check for missing EmuDB sessions (in MongoDB but not on disk)
+                    const missingSessions = [...mongoSessionNames].filter(
+                        (name) => !emuDbSessionNames.has(name),
+                    );
+                    if (missingSessions.length > 0) {
+                        health.issues.push(
+                            `${missingSessions.length} session(s) in database missing from disk: ${missingSessions.join(", ")}`,
+                        );
+                    }
+
+                    // Compare audio file count: disk vs MongoDB
+                    if (
+                        health.audioFileCount > 0 &&
+                        mongoFileCount > 0 &&
+                        health.audioFileCount !== mongoFileCount
+                    ) {
+                        health.issues.push(
+                            `File count mismatch: ${health.audioFileCount} audio files on disk vs ${mongoFileCount} in database`,
+                        );
+                    }
+                }
             }
         } catch (err) {
             this.app.addLog(
@@ -1986,6 +2066,83 @@ class ApiServer {
         }
 
         return health;
+    }
+
+    async cleanupOrphanedSessions(projectId) {
+        /**
+         * Cleans up orphaned EmuDB session directories for a given project.
+         * Sessions marked as deleted in MongoDB may leave stale _ses directories on disk.
+         * This method scans the EmuDB folder and removes _ses directories that do not
+         * correspond to active (non-deleted) sessions.
+         *
+         * Returns: { success: bool, removed: [string], errors: [string] }
+         */
+        const Project = this.mongoose.model("Project");
+        const result = {
+            success: false,
+            removed: [],
+            errors: [],
+        };
+
+        try {
+            // Get project from database
+            const project = await Project.findOne({ id: projectId }).lean();
+            if (!project) {
+                result.errors.push("Project not found");
+                return result;
+            }
+
+            const emuDbPath = `/repositories/${projectId}/Data/VISP_emuDB`;
+            if (!fs.existsSync(emuDbPath)) {
+                result.errors.push("EmuDB path does not exist");
+                return result;
+            }
+
+            // Build set of active (non-deleted) session names
+            const activeSessionNames = new Set();
+            for (const sess of project.sessions) {
+                if (!sess.deleted && sess.name) {
+                    activeSessionNames.add(sess.name);
+                }
+            }
+
+            // Scan disk for _ses directories and identify orphans
+            const entries = fs.readdirSync(emuDbPath);
+            for (const entry of entries) {
+                if (!entry.endsWith("_ses")) continue;
+
+                const fullPath = path.join(emuDbPath, entry);
+                if (!fs.statSync(fullPath).isDirectory()) continue;
+
+                const sessionName = entry.replace(/_ses$/, "");
+                if (!activeSessionNames.has(sessionName)) {
+                    try {
+                        fs.removeSync(fullPath);
+                        result.removed.push(entry);
+                        this.app.addLog(
+                            `Cleaned up orphaned EmuDB session: ${entry}`,
+                            "info",
+                        );
+                    } catch (err) {
+                        result.errors.push(`Failed to remove ${entry}: ${err.message}`);
+                        this.app.addLog(
+                            `Failed to remove orphaned session ${entry}: ${err.message}`,
+                            "warn",
+                        );
+                    }
+                }
+            }
+
+            result.success = result.errors.length === 0;
+            return result;
+        } catch (err) {
+            result.errors.push(`Cleanup failed: ${err.message}`);
+            this.app.addLog(
+                `Error cleaning up orphaned sessions: ${err.message}`,
+                "error",
+            );
+            return result;
+        }
     }
 
     async fetchProjects(ws, user, msg) {
