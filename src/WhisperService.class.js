@@ -1,120 +1,129 @@
 const nanoid = require("nanoid");
 const fs = require("fs");
 const { execSync } = require("child_process");
-const { Blob } = require("buffer");
 const http = require("http");
 const nodemailer = require("nodemailer");
+const path = require("path");
 
 class WhisperService {
     constructor(app) {
         this.app = app;
         this.preProcessTranscriptionPromises = [];
         this.transcriptionRunning = false;
-        this.gradioConn = null;
-        this.gradioReady = false;
-        //languages in the model
+        this.whisperReady = false;
+        this.socketPath = process.env.WHISPERX_SOCKET_PATH || "/run/whisperx/whisperx.sock";
+        // Track which model package is loaded in WhisperVault.
+        // Starts as "multilingual" because the quadlet default is faster-whisper-large-v3.
+        // Switched to "sv-standard" when Swedish is explicitly requested.
+        this.currentPackage = null;
+        this.currentOverridesKey = null;
+        // Language name → ISO 639-1 code mapping (matches whisperx LANGUAGES dict).
+        // WhisperVault expects ISO codes; the webclient sends full English names.
+        this.languageToIso = {
+            "afrikaans": "af",
+            "albanian": "sq",
+            "amharic": "am",
+            "arabic": "ar",
+            "armenian": "hy",
+            "assamese": "as",
+            "azerbaijani": "az",
+            "bashkir": "ba",
+            "basque": "eu",
+            "belarusian": "be",
+            "bengali": "bn",
+            "bosnian": "bs",
+            "breton": "br",
+            "bulgarian": "bg",
+            "cantonese": "yue",
+            "catalan": "ca",
+            "chinese": "zh",
+            "croatian": "hr",
+            "czech": "cs",
+            "danish": "da",
+            "dutch": "nl",
+            "english": "en",
+            "estonian": "et",
+            "faroese": "fo",
+            "finnish": "fi",
+            "french": "fr",
+            "galician": "gl",
+            "georgian": "ka",
+            "german": "de",
+            "greek": "el",
+            "gujarati": "gu",
+            "haitian creole": "ht",
+            "hausa": "ha",
+            "hawaiian": "haw",
+            "hebrew": "he",
+            "hindi": "hi",
+            "hungarian": "hu",
+            "icelandic": "is",
+            "indonesian": "id",
+            "italian": "it",
+            "japanese": "ja",
+            "javanese": "jw",
+            "kannada": "kn",
+            "kazakh": "kk",
+            "khmer": "km",
+            "korean": "ko",
+            "lao": "lo",
+            "latin": "la",
+            "latvian": "lv",
+            "lingala": "ln",
+            "lithuanian": "lt",
+            "luxembourgish": "lb",
+            "macedonian": "mk",
+            "malagasy": "mg",
+            "malay": "ms",
+            "malayalam": "ml",
+            "maltese": "mt",
+            "maori": "mi",
+            "marathi": "mr",
+            "mongolian": "mn",
+            "myanmar": "my",
+            "nepali": "ne",
+            "norwegian": "no",
+            "nynorsk": "nn",
+            "occitan": "oc",
+            "pashto": "ps",
+            "persian": "fa",
+            "polish": "pl",
+            "portuguese": "pt",
+            "punjabi": "pa",
+            "romanian": "ro",
+            "russian": "ru",
+            "sanskrit": "sa",
+            "serbian": "sr",
+            "shona": "sn",
+            "sindhi": "sd",
+            "sinhala": "si",
+            "slovak": "sk",
+            "slovenian": "sl",
+            "somali": "so",
+            "spanish": "es",
+            "sundanese": "su",
+            "swahili": "sw",
+            "swedish": "sv",
+            "tagalog": "tl",
+            "tajik": "tg",
+            "tamil": "ta",
+            "tatar": "tt",
+            "telugu": "te",
+            "thai": "th",
+            "tibetan": "bo",
+            "turkish": "tr",
+            "turkmen": "tk",
+            "ukrainian": "uk",
+            "urdu": "ur",
+            "uzbek": "uz",
+            "vietnamese": "vi",
+            "welsh": "cy",
+            "yiddish": "yi",
+            "yoruba": "yo",
+        };
         this.availableLanguages = [
-            "afrikaans",
-            "albanian",
-            "amharic",
-            "arabic",
-            "armenian",
-            "assamese",
-            "azerbaijani",
-            "bashkir",
-            "basque",
-            "belarusian",
-            "bengali",
-            "bosnian",
-            "breton",
-            "bulgarian",
-            "cantonese",
-            "catalan",
-            "chinese",
-            "croatian",
-            "czech",
-            "danish",
-            "dutch",
-            "english",
-            "estonian",
-            "faroese",
-            "finnish",
-            "french",
-            "galician",
-            "georgian",
-            "german",
-            "greek",
-            "gujarati",
-            "haitian creole",
-            "hausa",
-            "hawaiian",
-            "hebrew",
-            "hindi",
-            "hungarian",
-            "icelandic",
-            "indonesian",
-            "italian",
-            "japanese",
-            "javanese",
-            "kannada",
-            "kazakh",
-            "khmer",
-            "korean",
-            "lao",
-            "latin",
-            "latvian",
-            "lingala",
-            "lithuanian",
-            "luxembourgish",
-            "macedonian",
-            "malagasy",
-            "malay",
-            "malayalam",
-            "maltese",
-            "maori",
-            "marathi",
-            "mongolian",
-            "myanmar",
-            "nepali",
-            "norwegian",
-            "nynorsk",
-            "occitan",
-            "pashto",
-            "persian",
-            "polish",
-            "portuguese",
-            "punjabi",
-            "romanian",
-            "russian",
-            "sanskrit",
-            "serbian",
-            "shona",
-            "sindhi",
-            "sinhala",
-            "slovak",
-            "slovenian",
-            "somali",
-            "spanish",
-            "sundanese",
-            "swahili",
-            "swedish",
-            "tagalog",
-            "tajik",
-            "tamil",
-            "tatar",
-            "telugu",
-            "thai",
-            "tibetan",
-            "turkish",
-            "turkmen",
-            "ukrainian",
-            "urdu",
-            "uzbek",
-            "vietnamese",
-            "welsh",
-            "yiddish",
-            "yoruba",
             "Automatic Detection",
+            ...Object.keys(this.languageToIso),
         ];
 
         this.transporter = nodemailer.createTransport({
@@ -128,30 +137,41 @@ class WhisperService {
         });
 
         (async () => {
-            const gradio = await import("@gradio/client");
-            const { Client } = gradio;
-            // Exponential backoff when trying to connect to the Whisper/Gradio service.
-            let backoff = 100 * 1000; // start at 100s
-            const maxBackoff = 3600 * 1000; // cap at 3600s (1h)
-            while (!this.gradioReady) {
+            // Poll WhisperVault health endpoint over Unix Domain Socket.
+            // The socket only appears once the container and model are ready.
+            let backoff = 10 * 1000; // start at 10s
+            const maxBackoff = 300 * 1000; // cap at 5min
+            while (!this.whisperReady) {
                 try {
-                    this.gradioConn = await Client.connect(
-                        "http://whisper:7860",
-                    );
-                    this.gradioReady = true;
-                    this.app.addLog(
-                        "Whisper service connected and ready.",
-                        "info",
-                    );
+                    const health = await this.whisperRequest("GET", "/health");
+                    if (health && health.ready) {
+                        this.whisperReady = true;
+                        this.currentPackage = "multilingual";
+                        const model = health.model || "unknown";
+                        this.app.addLog(
+                            `WhisperVault connected and ready (model: ${model}).`,
+                            "info",
+                        );
+                    } else if (health && health.idle_unloaded) {
+                        // Server is up but model is idle-unloaded — that's fine,
+                        // /transcribe will auto-reload it.
+                        this.whisperReady = true;
+                        this.currentPackage = "multilingual";
+                        this.app.addLog(
+                            "WhisperVault connected (model idle-unloaded, will auto-reload on first transcription).",
+                            "info",
+                        );
+                    } else {
+                        throw new Error("Health check returned unexpected status: " + JSON.stringify(health));
+                    }
                 } catch (err) {
                     const briefErr = (err?.message || String(err)).split("\n")[0];
                     this.app.addLog(
-                        `Error connecting to Whisper service: ${briefErr}. Retrying in ${Math.round(backoff / 1000)}s.`,
+                        `WhisperVault not ready: ${briefErr}. Retrying in ${Math.round(backoff / 1000)}s.`,
                         "warn",
                     );
-                    // Do not log stack trace at all.
                     await new Promise((resolve) => setTimeout(resolve, backoff));
-                    backoff = Math.min(maxBackoff, backoff * 2);
+                    backoff = Math.min(maxBackoff, backoff * 1.5);
                 }
             }
         })();
@@ -160,23 +180,198 @@ class WhisperService {
     init() {
         this.cancelRuns();
 
-        // Start transcription queue only after mongoose is connected
-        const waitForGradioReady = async () => {
-            while (!this.gradioReady) {
+        // Start transcription queue only after WhisperVault is reachable
+        const waitForWhisperReady = async () => {
+            while (!this.whisperReady) {
                 await new Promise((resolve) => setTimeout(resolve, 1000));
             }
             this.app.addLog("Initiating transcription queue interval.", "info");
             // Run the transcription queue at a lower frequency to avoid tight looping
             // while the external service is transiently unavailable.
             setInterval(() => {
-                if (this.gradioReady) {
+                if (this.whisperReady) {
                     this.runTranscriptionQueue();
                 }
-                // Silent skip when Whisper is not ready
+                // Silent skip when WhisperVault is not ready
             }, 15000); // 15s interval
         };
 
-        waitForGradioReady();
+        waitForWhisperReady();
+    }
+
+    /**
+     * Make an HTTP request to WhisperVault over the Unix Domain Socket.
+     * @param {string} method - HTTP method (GET, POST)
+     * @param {string} urlPath - URL path (e.g. /health, /transcribe, /models)
+     * @param {object} [options] - Optional: { body, headers, timeout }
+     * @returns {Promise<object>} Parsed JSON response
+     */
+    whisperRequest(method, urlPath, options = {}) {
+        return new Promise((resolve, reject) => {
+            const reqOptions = {
+                socketPath: this.socketPath,
+                path: urlPath,
+                method: method,
+                headers: options.headers || {},
+                timeout: options.timeout || 30000,
+            };
+
+            const req = http.request(reqOptions, (res) => {
+                let data = "";
+                res.on("data", (chunk) => { data += chunk; });
+                res.on("end", () => {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        reject(new Error(`Failed to parse WhisperVault response: ${data.substring(0, 200)}`));
+                    }
+                });
+            });
+
+            req.on("error", (err) => reject(err));
+            req.on("timeout", () => {
+                req.destroy();
+                reject(new Error("WhisperVault request timed out"));
+            });
+
+            if (options.body) {
+                req.write(options.body);
+            }
+            req.end();
+        });
+    }
+
+    /**
+     * Send a multipart POST /transcribe request to WhisperVault.
+     * @param {Buffer} audioBuffer - Audio file contents
+     * @param {string} filename - Original filename
+     * @param {object} params - Transcription parameters (language, diarize, output_format, etc.)
+     * @returns {Promise<object>} Parsed JSON response with outputs.srt, outputs.txt, etc.
+     */
+    whisperTranscribe(audioBuffer, filename, params = {}) {
+        return new Promise((resolve, reject) => {
+            const boundary = "----WhisperBoundary" + Date.now().toString(16);
+            const paramsJson = JSON.stringify(params);
+
+            // Build multipart body
+            const parts = [];
+            // audio file part
+            parts.push(Buffer.from(
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="audio"; filename="${filename}"\r\n` +
+                `Content-Type: audio/wav\r\n\r\n`
+            ));
+            parts.push(audioBuffer);
+            parts.push(Buffer.from("\r\n"));
+            // params JSON part
+            parts.push(Buffer.from(
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="params"\r\n` +
+                `Content-Type: application/json\r\n\r\n` +
+                paramsJson + "\r\n"
+            ));
+            // closing boundary
+            parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+            const body = Buffer.concat(parts);
+
+            const reqOptions = {
+                socketPath: this.socketPath,
+                path: "/transcribe",
+                method: "POST",
+                headers: {
+                    "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                    "Content-Length": body.length,
+                },
+                // Transcription can take a long time for large files
+                timeout: 3600000, // 1 hour
+            };
+
+            const req = http.request(reqOptions, (res) => {
+                let data = "";
+                res.on("data", (chunk) => { data += chunk; });
+                res.on("end", () => {
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`WhisperVault transcription failed (HTTP ${res.statusCode}): ${data.substring(0, 500)}`));
+                        return;
+                    }
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        reject(new Error(`Failed to parse WhisperVault transcription response: ${data.substring(0, 200)}`));
+                    }
+                });
+            });
+
+            req.on("error", (err) => reject(err));
+            req.on("timeout", () => {
+                req.destroy();
+                reject(new Error("WhisperVault transcription timed out"));
+            });
+
+            req.write(body);
+            req.end();
+        });
+    }
+
+    /**
+     * Ensure the correct WhisperVault model package is loaded for the user's
+     * chosen model.
+     *
+     * "kb-whisper" → sv-standard package (KB Whisper, Swedish-specific)
+     * "whisper"    → multilingual package (Whisper large-v3, all languages)
+     *
+     * Calls POST /reload only when the currently loaded package differs from
+     * the required one, so back-to-back transcriptions with the same model
+     * incur no switching overhead.
+     *
+     * @param {string} modelId - "kb-whisper" or "whisper"
+     * @returns {Promise<void>}
+     */
+    async ensureModelPackage(modelId, advancedOptions = {}) {
+        const neededPackage = modelId === "kb-whisper" ? "sv-standard" : "multilingual";
+
+        // Build reload-time overrides from advanced options
+        const reloadOverrides = {};
+        if (advancedOptions.beamSize !== undefined) {
+            reloadOverrides.beam_size = Math.max(5, Math.min(10, Number(advancedOptions.beamSize) || 5));
+        }
+        if (advancedOptions.repetitionPenalty !== undefined) {
+            reloadOverrides.repetition_penalty = Number(advancedOptions.repetitionPenalty);
+        }
+        if (advancedOptions.conditionOnPreviousText !== undefined) {
+            reloadOverrides.condition_on_previous_text = !!advancedOptions.conditionOnPreviousText;
+        }
+        if (advancedOptions.vad !== undefined) {
+            reloadOverrides.vad_method = advancedOptions.vad ? "pyannote" : "none";
+        }
+        if (advancedOptions.vadOnset !== undefined && advancedOptions.vad) {
+            reloadOverrides.vad_onset = Number(advancedOptions.vadOnset);
+        }
+
+        // Check if we need a reload: different package OR different ASR options
+        const overridesKey = JSON.stringify(reloadOverrides);
+        if (this.currentPackage === neededPackage && this.currentOverridesKey === overridesKey) {
+            return;
+        }
+
+        this.app.addLog(
+            `Switching WhisperVault model: ${this.currentPackage || "(none)"} → ${neededPackage}`,
+            "info",
+        );
+
+        const result = await this.whisperRequest("POST", "/reload", {
+            body: JSON.stringify({ package: neededPackage, ...reloadOverrides }),
+            headers: { "Content-Type": "application/json" },
+            timeout: 120000, // model loading can take up to 2 min
+        });
+
+        this.currentPackage = neededPackage;
+        this.currentOverridesKey = overridesKey;
+        this.app.addLog(
+            `WhisperVault model package loaded: ${neededPackage} (model: ${result.model})`,
+            "info",
+        );
     }
 
     async fetchTranscription(ws, user, msg) {
@@ -442,6 +637,12 @@ class WhisperService {
                 existingItem.model = msg.data.model
                     ? msg.data.model
                     : existingItem.model;
+                existingItem.diarize = msg.data.diarize !== undefined
+                    ? msg.data.diarize
+                    : existingItem.diarize;
+                if (msg.data.advancedOptions) {
+                    existingItem.advancedOptions = msg.data.advancedOptions;
+                }
                 existingItem.updatedAt = new Date();
                 existingItem.userNotified = false;
                 await existingItem.save();
@@ -474,6 +675,8 @@ class WhisperService {
             status: "queued",
             language: msg.data.language,
             model: msg.data.model,
+            diarize: !!msg.data.diarize,
+            advancedOptions: msg.data.advancedOptions || {},
             error: "",
             log: "",
             createdAt: new Date(),
@@ -1009,129 +1212,86 @@ class WhisperService {
         const selectedLanguage =
             queueItem.language != "Automatic Detection"
                 ? queueItem.language.toLowerCase()
-                : queueItem.language;
+                : null;
 
-        let selectedModel = "large-v2";
-        switch (queueItem.model) {
-            case "whisper":
-                selectedModel = "large-v2";
-                break;
-            case "kb-whisper":
-                selectedModel = "models--KB-whisper-medium-ct2";
-                break;
+        // Convert full language name to ISO 639-1 code for WhisperVault
+        const languageCode = selectedLanguage
+            ? this.languageToIso[selectedLanguage] || selectedLanguage
+            : null;
+
+        // Read the pre-processed audio file
+        const audioFilePath = filePath + queueItem.bundle;
+        let fileBuffer;
+        try {
+            fileBuffer = fs.readFileSync(audioFilePath);
+        } catch (err) {
+            throw new Error(`Failed to read audio file ${audioFilePath}: ${err.message}`);
         }
 
-        let fileBuffer = fs.readFileSync(filePath + queueItem.bundle);
-        // Use File instead of Blob to preserve filename for Gradio
-        const { File } = await import("buffer");
-        const file = new File([fileBuffer], queueItem.bundle, { type: "audio/wav" });
+        // Build WhisperVault transcription parameters
+        const transcribeParams = {
+            output_format: ["srt", "txt"],
+        };
+
+        // Set language (WhisperVault uses ISO-639-1 codes; null = auto-detect)
+        if (languageCode) {
+            transcribeParams.language = languageCode;
+        }
+
+        // Enable speaker diarization if requested
+        if (queueItem.diarize) {
+            transcribeParams.diarize = true;
+        }
+
+        // Ensure the right model package is loaded based on user's model choice:
+        //   kb-whisper → KB Whisper (sv-standard),  whisper → Whisper large-v3 (multilingual)
+        try {
+            await this.ensureModelPackage(
+                queueItem.model || "whisper",
+                queueItem.advancedOptions || {},
+            );
+        } catch (err) {
+            throw new Error(`Failed to switch WhisperVault model package: ${err.message}`);
+        }
 
         try {
-            // Upload file to Gradio first (it handles conversion to server paths)
-            const uploadResponse = await this.gradioConn.upload_files("http://whisper:7860", [file]);
-            if (uploadResponse.error) {
-                throw new Error(`File upload failed: ${uploadResponse.error}`);
+            this.app.addLog(
+                `Sending transcription request to WhisperVault: ${queueItem.bundle} ` +
+                `(language: ${transcribeParams.language || "auto"})`,
+                "info",
+            );
+
+            const result = await this.whisperTranscribe(
+                fileBuffer,
+                queueItem.bundle,
+                transcribeParams,
+            );
+
+            // Write SRT output directly from response
+            if (result.outputs && result.outputs.srt) {
+                fs.writeFileSync(outputPath + "/transcription.srt", result.outputs.srt);
+            } else {
+                throw new Error("WhisperVault response missing SRT output");
             }
-            
-            // Format uploaded file paths as FileData objects
-            const fileData = uploadResponse.files.map(path => ({
-                path: path,
-                meta: { _type: 'gradio.FileData' },
-                orig_name: queueItem.bundle,
-                url: path
-            }));
-            
-            const result = await this.gradioConn.predict("/transcribe_file", {
-                files: fileData,
-                input_folder_path: "",
-                include_subdirectory: false,
-                save_same_dir: false,
-                file_format: "SRT",
-                add_timestamp: true,
-                progress: selectedModel,
-                param_7: selectedLanguage,
-                param_8: false,
-                param_9: 5,
-                param_10: -1,
-                param_11: 0.6,
-                param_12: "float32",
-                param_13: 5,
-                param_14: 1,
-                param_15: true,
-                param_16: 0.5,
-                param_17: "",
-                param_18: 0,
-                param_19: 2.4,
-                param_20: 1,
-                param_21: 1,
-                param_22: 0,
-                param_23: "",
-                param_24: true,
-                param_25: "[-1]",
-                param_26: 1,
-                param_27: false,
-                param_28: "\"'“¿([{-",
-                param_29: "\"'.。,，!！?？:：”)]}、",
-                param_30: 3,
-                param_31: 30,
-                param_32: 3,
-                param_33: "",
-                param_34: 0.5,
-                param_35: 1,
-                param_36: 24,
-                param_37: true,
-                param_38: false,
-                param_39: 0.5,
-                param_40: 250,
-                param_41: 9999,
-                param_42: 1000,
-                param_43: 2000,
-                param_44: false,
-                param_45: "cpu",
-                param_46: "",
-                param_47: true,
-                param_48: false,
-                param_49: "UVR-MDX-NET-Inst_HQ_4",
-                param_50: "cpu",
-                param_51: 256,
-                param_52: false,
-                param_53: true,
-            });
 
-            http.get(result.data[1][0].url, (response) => {
-                if (response.statusCode !== 200) {
-                    this.app.addLog(
-                        "Failed to get transcription file: " +
-                            response.statusCode,
-                        "error",
-                    );
-                    return;
-                }
+            // Write TXT output (use response if available, otherwise convert from SRT)
+            if (result.outputs && result.outputs.txt) {
+                fs.writeFileSync(outputPath + "/transcription.txt", result.outputs.txt);
+            } else {
+                this.convertSrtToTxt(outputPath);
+            }
 
-                const fileStream = fs.createWriteStream(
-                    outputPath + "/transcription.srt",
-                );
-                response.pipe(fileStream);
+            this.app.addLog(
+                `Transcription complete: ${result.language || "unknown"} language, ` +
+                `${(result.segments || []).length} segments, ${result.duration_seconds || "?"}s processing time`,
+                "info",
+            );
 
-                fileStream.on("finish", () => {
-                    fileStream.close();
-                    this.convertSrtToTxt(outputPath);
-                });
-
-                fileStream.on("error", (err) => {
-                    this.app.addLog(
-                        "Error writing to transcription file: " + err,
-                        "error",
-                    );
-                });
-            }).on("error", (err) => {
-                this.app.addLog(
-                    "Error downloading transcription file: " + err,
-                    "error",
-                );
-            });
-
-            queueItem.transcriptionData = result;
+            queueItem.transcriptionData = {
+                language: result.language,
+                duration_seconds: result.duration_seconds,
+                segmentCount: (result.segments || []).length,
+            };
             queueItem.status = "complete";
             queueItem.updatedAt = new Date();
             await queueItem.save();

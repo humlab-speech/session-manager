@@ -98,6 +98,8 @@ class ApiServer {
             initiatedByUser: String,
             language: String,
             model: String,
+            diarize: Boolean,
+            advancedOptions: Object,
             status: String,
             error: String,
             log: String,
