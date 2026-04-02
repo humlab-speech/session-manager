@@ -2001,14 +2001,16 @@ class ApiServer {
             const mongoProject = await Project.findOne({ id: projectId }).lean();
 
             if (mongoProject && mongoProject.sessions) {
-                health.mongoSessionCount = mongoProject.sessions.length;
+                // Only count active (non-deleted) sessions
+                const activeSessions = mongoProject.sessions.filter((s) => !s.deleted);
+                health.mongoSessionCount = activeSessions.length;
                 const mongoSessionNames = new Set(
-                    mongoProject.sessions.map((s) => s.name),
+                    activeSessions.map((s) => s.name),
                 );
 
-                // Count MongoDB file references
+                // Count MongoDB file references (active sessions only)
                 let mongoFileCount = 0;
-                for (const session of mongoProject.sessions) {
+                for (const session of activeSessions) {
                     if (session.files) {
                         mongoFileCount += session.files.length;
                     }
@@ -2072,23 +2074,24 @@ class ApiServer {
 
     async cleanupOrphanedSessions(projectId) {
         /**
-         * Cleans up orphaned EmuDB session directories for a given project.
-         * Sessions marked as deleted in MongoDB may leave stale _ses directories on disk.
-         * This method scans the EmuDB folder and removes _ses directories that do not
-         * correspond to active (non-deleted) sessions.
+         * Cleans up project consistency issues:
+         * 1. Orphaned EmuDB session directories (on disk but not in MongoDB) — deleted
+         * 2. Ghost MongoDB sessions (in database but missing from disk) — marked deleted
+         * 3. File count mismatches are resolved by the above two operations
          *
-         * Returns: { success: bool, removed: [string], errors: [string] }
+         * Returns: { success: bool, removed: [string], purged: [string], errors: [string] }
          */
         const Project = this.mongoose.model("Project");
         const result = {
             success: false,
-            removed: [],
+            removed: [],   // disk dirs removed
+            purged: [],    // DB sessions marked deleted
             errors: [],
         };
 
         try {
-            // Get project from database
-            const project = await Project.findOne({ id: projectId }).lean();
+            // Get project from database (mutable — we may update it)
+            const project = await Project.findOne({ id: projectId });
             if (!project) {
                 result.errors.push("Project not found");
                 return result;
@@ -2100,7 +2103,7 @@ class ApiServer {
                 return result;
             }
 
-            // Build set of active (non-deleted) session names
+            // Build set of active (non-deleted) session names from MongoDB
             const activeSessionNames = new Set();
             for (const sess of project.sessions) {
                 if (!sess.deleted && sess.name) {
@@ -2108,31 +2111,54 @@ class ApiServer {
                 }
             }
 
-            // Scan disk for _ses directories and identify orphans
+            // Build set of session names on disk
             const entries = fs.readdirSync(emuDbPath);
+            const diskSessionNames = new Set();
             for (const entry of entries) {
                 if (!entry.endsWith("_ses")) continue;
-
                 const fullPath = path.join(emuDbPath, entry);
                 if (!fs.statSync(fullPath).isDirectory()) continue;
+                diskSessionNames.add(entry.replace(/_ses$/, ""));
+            }
 
-                const sessionName = entry.replace(/_ses$/, "");
+            // 1. Remove orphaned disk directories (on disk but not in MongoDB)
+            for (const sessionName of diskSessionNames) {
                 if (!activeSessionNames.has(sessionName)) {
+                    const fullPath = path.join(emuDbPath, sessionName + "_ses");
                     try {
                         fs.removeSync(fullPath);
-                        result.removed.push(entry);
+                        result.removed.push(sessionName + "_ses");
                         this.app.addLog(
-                            `Cleaned up orphaned EmuDB session: ${entry}`,
+                            `Cleaned up orphaned EmuDB session dir: ${sessionName}_ses`,
                             "info",
                         );
                     } catch (err) {
-                        result.errors.push(`Failed to remove ${entry}: ${err.message}`);
+                        result.errors.push(`Failed to remove ${sessionName}_ses: ${err.message}`);
                         this.app.addLog(
-                            `Failed to remove orphaned session ${entry}: ${err.message}`,
+                            `Failed to remove orphaned session ${sessionName}_ses: ${err.message}`,
                             "warn",
                         );
                     }
                 }
+            }
+
+            // 2. Mark ghost MongoDB sessions as deleted (in DB but not on disk)
+            let dbModified = false;
+            for (const sess of project.sessions) {
+                if (sess.deleted || !sess.name) continue;
+                if (!diskSessionNames.has(sess.name)) {
+                    sess.deleted = true;
+                    result.purged.push(sess.name);
+                    dbModified = true;
+                    this.app.addLog(
+                        `Marked ghost session as deleted in DB: ${sess.name} (no _ses dir on disk)`,
+                        "info",
+                    );
+                }
+            }
+
+            if (dbModified) {
+                await project.save();
             }
 
             result.success = result.errors.length === 0;
