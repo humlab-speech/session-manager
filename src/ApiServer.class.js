@@ -1957,6 +1957,7 @@ class ApiServer {
             audioFileCount: 0,
             mongoSessionCount: 0,
             emuDbSessionCount: 0,
+            orphanedBundles: [],
             issues: [],
         };
 
@@ -2047,6 +2048,45 @@ class ApiServer {
                     if (missingSessions.length > 0) {
                         health.issues.push(
                             `${missingSessions.length} session(s) in database missing from disk: ${missingSessions.join(", ")}`,
+                        );
+                    }
+
+                    // Check for orphaned bundles within each session
+                    // (bundle dirs on disk that have no matching file in MongoDB)
+                    for (const session of activeSessions) {
+                        if (!session.name || !emuDbSessionNames.has(session.name)) continue;
+                        const sessionDirPath = path.join(emuDbPath, session.name + "_ses");
+                        try {
+                            const sessionEntries = fs.readdirSync(sessionDirPath);
+                            const diskBundleNames = new Set(
+                                sessionEntries
+                                    .filter((e) => e.endsWith("_bndl") &&
+                                        fs.statSync(path.join(sessionDirPath, e)).isDirectory())
+                                    .map((e) => e.replace(/_bndl$/, "")),
+                            );
+                            // Build set of bundle names from MongoDB files
+                            const mongoBundleNames = new Set(
+                                (session.files || []).map((f) =>
+                                    path.parse(f.name).name.replace(/ /g, "_"),
+                                ),
+                            );
+                            for (const bundleName of diskBundleNames) {
+                                if (!mongoBundleNames.has(bundleName)) {
+                                    health.orphanedBundles.push({
+                                        session: session.name,
+                                        bundle: bundleName,
+                                    });
+                                }
+                            }
+                        } catch (err) {
+                            // Skip inaccessible session directories
+                        }
+                    }
+
+                    if (health.orphanedBundles.length > 0) {
+                        health.issues.push(
+                            `${health.orphanedBundles.length} orphaned bundle(s) on disk: ` +
+                            health.orphanedBundles.map((b) => `${b.session}/${b.bundle}`).join(", "),
                         );
                     }
 
