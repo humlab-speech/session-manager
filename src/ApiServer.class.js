@@ -23,6 +23,7 @@ const { execSync } = require("child_process");
 const WhisperService = require("./WhisperService.class");
 const AdmZip = require("adm-zip");
 const { parseFile } = require("music-metadata");
+const { safePathComponent, safeJoinedPath, safeMountSource } = require("./pathSecurity");
 
 class ApiServer {
     constructor(app) {
@@ -982,14 +983,14 @@ class ApiServer {
 
         //bundlePathName should be the filename minus the file extension and + _bndl
         let bundleBaseName = path.parse(msg.bundleName).name;
+        safePathComponent(msg.projectId, "projectId");
+        safePathComponent(bundleBaseName, "bundleName");
+        safePathComponent(session.name, "sessionName");
         let bundlePathName = bundleBaseName + "_bndl";
-        let projectBundlePath =
-            "/repositories/" +
-            msg.projectId +
-            "/Data/VISP_emuDB/" +
-            session.name +
-            "_ses/" +
-            bundlePathName;
+        let projectBundlePath = safeJoinedPath(
+            "/repositories", msg.projectId, "Data", "VISP_emuDB",
+            session.name + "_ses", bundlePathName,
+        );
         let annotationFilePath =
             projectBundlePath + "/" + bundleBaseName + "_annot.json";
         let annotationFileExists = await fs.pathExists(annotationFilePath);
@@ -1186,16 +1187,16 @@ class ApiServer {
 
         //bundlePathName should be the filename minus the file extension and + _bndl
         let bundleBaseName = path.parse(task.bundleName).name;
+        safePathComponent(task.projectId, "projectId");
+        safePathComponent(bundleBaseName, "bundleName");
+        safePathComponent(session.name, "sessionName");
         let bundlePathName = bundleBaseName + "_bndl";
 
         //now save the annotation data as a file to disk in the project bundle directory
-        let projectBundlePath =
-            "/repositories/" +
-            task.projectId +
-            "/Data/VISP_emuDB/" +
-            session.name +
-            "_ses/" +
-            bundlePathName;
+        let projectBundlePath = safeJoinedPath(
+            "/repositories", task.projectId, "Data", "VISP_emuDB",
+            session.name + "_ses", bundlePathName,
+        );
         let annotationFilePath =
             projectBundlePath + "/" + bundleBaseName + "_annot.json";
 
@@ -1358,8 +1359,9 @@ class ApiServer {
             return;
         }
 
+        safePathComponent(project.id, "projectId");
         volumes.push({
-            source: this.app.absRootPath + "/mounts/repositories/" + project.id,
+            source: safeMountSource(this.app.absRootPath, "mounts/repositories/" + project.id),
             target: "/home/" + containerUser + "/project",
         });
 
@@ -1947,6 +1949,7 @@ class ApiServer {
 
     async getProjectHealthStatus(projectId) {
         // Check EmuDB config, count audio files, and verify MongoDB/EmuDB consistency
+        safePathComponent(projectId, "projectId");
         const repoPath = `/repositories/${projectId}`;
         const emuDbPath = path.join(repoPath, "Data", "VISP_emuDB");
         const emuDbConfigPath = path.join(emuDbPath, "VISP_DBconfig.json");
@@ -2137,6 +2140,7 @@ class ApiServer {
                 return result;
             }
 
+            safePathComponent(projectId, "projectId");
             const emuDbPath = `/repositories/${projectId}/Data/VISP_emuDB`;
             if (!fs.existsSync(emuDbPath)) {
                 result.errors.push("EmuDB path does not exist");
@@ -3026,18 +3030,22 @@ class ApiServer {
 
     async receiveFileUpload(ws, msg) {
         let userSession = this.getUserSessionBySocket(ws);
+        safePathComponent(userSession.id, "userSessionId");
+        safePathComponent(msg.data.projectId, "projectId");
+        safePathComponent(msg.data.sessionName, "sessionName");
+        safePathComponent(msg.data.fileName, "fileName");
         const unimportedAudioPath = "/unimported_audio/" + userSession.id;
-        let path =
+        let filePath =
             unimportedAudioPath +
             "/" +
             msg.data.projectId +
             "/" +
             msg.data.sessionName;
         let fileBinaryData = Buffer.from(msg.data.file, "base64");
-        let mkdirRes = await fs.promises.mkdir(path, { recursive: true });
+        let mkdirRes = await fs.promises.mkdir(filePath, { recursive: true });
 
         let writeRes = await fs.promises.writeFile(
-            path + "/" + msg.data.fileName,
+            filePath + "/" + msg.data.fileName,
             fileBinaryData,
         );
         this.app.addLog("Wrote file " + path);
@@ -3210,14 +3218,13 @@ class ApiServer {
         }
 
         let fileBaseName = path.basename(fileName, path.extname(fileName));
-        let repoBundlePath =
-            "/repositories/" +
-            project.id +
-            "/Data/VISP_emuDB/" +
-            session.name +
-            "_ses/" +
-            fileBaseName +
-            "_bndl";
+        safePathComponent(project.id, "projectId");
+        safePathComponent(session.name, "sessionName");
+        safePathComponent(fileBaseName, "fileName");
+        let repoBundlePath = safeJoinedPath(
+            "/repositories", project.id, "Data", "VISP_emuDB",
+            session.name + "_ses", fileBaseName + "_bndl",
+        );
         this.app.addLog(
             "Downloading bundle directory " + repoBundlePath,
             "debug",
@@ -3312,14 +3319,13 @@ class ApiServer {
 
         //delete from both mongodb and repository path
         let fileBaseName = path.basename(fileName, path.extname(fileName));
-        let repoBundlePath =
-            "/repositories/" +
-            project.id +
-            "/Data/VISP_emuDB/" +
-            session.name +
-            "_ses/" +
-            fileBaseName +
-            "_bndl";
+        safePathComponent(project.id, "projectId");
+        safePathComponent(session.name, "sessionName");
+        safePathComponent(fileBaseName, "fileName");
+        let repoBundlePath = safeJoinedPath(
+            "/repositories", project.id, "Data", "VISP_emuDB",
+            session.name + "_ses", fileBaseName + "_bndl",
+        );
         this.app.addLog("Deleting bundle directory " + repoBundlePath, "debug");
 
         //check that the bundle directory exists
@@ -3388,7 +3394,8 @@ class ApiServer {
         }
 
         let project = msg.data.project;
-        let repoPath = "/repositories/" + project.id;
+        safePathComponent(project.id, "projectId");
+        let repoPath = safeJoinedPath("/repositories", project.id);
 
         ws.send(
             JSON.stringify({
@@ -4059,16 +4066,16 @@ session-manager_1    | }
 
         //Spawning container
         let context = projectFormData.formContextId;
+        safePathComponent(user.username, "username");
+        safePathComponent(context, "formContextId");
         //this is the path from within this container
         let uploadsSrcDirLocal =
             "/tmp/uploads/" + user.username + "/" + context;
         //this is the path from the os root, which is what we will pass as a volume argument to the operations container
-        let uploadsSrcDir =
-            this.app.absRootPath +
-            "/mounts/apache/apache/uploads/" +
-            user.username +
-            "/" +
-            context;
+        let uploadsSrcDir = safeMountSource(
+            this.app.absRootPath,
+            "mounts/apache/apache/uploads/" + user.username + "/" + context,
+        );
 
         // Option B: Lazy cleanup — remove old formContextId directories for this user
         // that are not the current one and are older than 24 hours.
@@ -4177,11 +4184,12 @@ session-manager_1    | }
             );
         }
         //createSession
+        safePathComponent(projectFormData.id, "projectId");
         const gitRepoVolume = {
-            source:
-                this.app.absRootPath +
-                "/mounts/repositories/" +
-                projectFormData.id,
+            source: safeMountSource(
+                this.app.absRootPath,
+                "mounts/repositories/" + projectFormData.id,
+            ),
             target: "/home/rstudio/project",
         };
         const uploadsVolume = {
@@ -4189,9 +4197,10 @@ session-manager_1    | }
             target: "/home/uploads",
         };
         const projectDirectoryTemplateVolume = {
-            source:
-                this.app.absRootPath +
-                "/docker/session-manager/project-template-structure",
+            source: safeMountSource(
+                this.app.absRootPath,
+                "docker/session-manager/project-template-structure",
+            ),
             target: "/project-template-structure",
         };
         let volumes = [
@@ -4975,7 +4984,8 @@ session-manager_1    | }
         envVars.push("GIT_USER_EMAIL=" + user.email);
         envVars.push("GIT_USER_NAME=" + user.firstName + " " + user.lastName);
 
-        let repoDir = "/repositories/" + projectFormData.id;
+        safePathComponent(projectFormData.id, "projectId");
+        let repoDir = safeJoinedPath("/repositories", projectFormData.id);
         this.app.addLog("Committing project " + repoDir, "debug");
         if (ws && msg) {
             ws.send(
@@ -5201,7 +5211,8 @@ session-manager_1    | }
         }
 
         //define project repo path
-        let repoDir = "/repositories/" + projectFormData.id;
+        safePathComponent(projectFormData.id, "projectId");
+        let repoDir = safeJoinedPath("/repositories", projectFormData.id);
 
         //check that target directory does not exist
         if (fs.existsSync(repoDir)) {
@@ -5233,15 +5244,12 @@ session-manager_1    | }
         }
 
         //create personal directory user Applications for this user
+        const userDirName = (user.firstName + " " + user.lastName + " (" + user.eppn + ")")
+            .replace(/[/\\\0]/g, "_"); // Sanitize path separators from IdP-provided names
         let userApplicationsDir =
             repoDir +
             "/Applications/" +
-            user.firstName +
-            " " +
-            user.lastName +
-            " (" +
-            user.eppn +
-            ")";
+            userDirName;
         if (!fs.existsSync(userApplicationsDir)) {
             this.app.addLog(
                 "Creating user applications directory " + userApplicationsDir,
@@ -5615,10 +5623,12 @@ session-manager_1    | }
          * 2. Run an R script in the operations container that will import the files to the correct location in the project directory
          */
 
+        safePathComponent(projectId, "projectId");
         let volumes = [
             {
-                source:
-                    this.app.absRootPath + "/mounts/repositories/" + projectId,
+                source: safeMountSource(
+                    this.app.absRootPath, "mounts/repositories/" + projectId,
+                ),
                 target: "/home/rstudio/project",
             },
         ];
@@ -5702,11 +5712,10 @@ session-manager_1    | }
         //shutdown the container
         await this.app.sessMan.deleteSession(containerSession.accessCode);
 
-        const fileLocation =
-            "/repositories/" +
-            projectId +
-            "/Data/speech_recorder_uploads/emudb-sessions/" +
-            sessionId;
+        const fileLocation = safeJoinedPath(
+            "/repositories", projectId, "Data", "speech_recorder_uploads",
+            "emudb-sessions", sessionId,
+        );
         let files = fs
             .readdirSync(fileLocation)
             .filter((file) => file !== "." && file !== "..");
@@ -5801,7 +5810,7 @@ session-manager_1    | }
             return new ApiResponse(400, "Session already has files");
         }
 
-        let sessionPath = "/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId;
+        let sessionPath = safeJoinedPath("/repositories", project.id, "Data", "speech_recorder_uploads", "emudb-sessions", sessionId);
         //in this sessionPath, each wav file is placed in its own directory (called prompt_1, prompt_2, etc.)
         //there can also be multiple versions in each directory, they are named 0.wav, 1.wav, etc. where the highest number is the latest version and the one we want
         //we need to copy the latest version of each wav file to the Data/unimported_audio directory in the project directory
@@ -5848,20 +5857,20 @@ session-manager_1    | }
             let latestFileName = latestFileVersion+".wav";
 
             //first mkdir
-            if(!fs.existsSync("/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId)) {
-                fs.mkdirSync("/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId, {
+            if(!fs.existsSync(safeJoinedPath("/repositories", project.id, "Data", "speech_recorder_uploads", "emudb-sessions", sessionId))) {
+                fs.mkdirSync(safeJoinedPath("/repositories", project.id, "Data", "speech_recorder_uploads", "emudb-sessions", sessionId), {
                     recursive: true
                 });
             }
 
             let promptDirPath = sessionPath+"/"+promptFile;
 
-            let destPath = "/repositories/"+project.id+"/Data/VISP_emuDB/"+projectSession.name+"/"+promptFile;
+            let destPath = safeJoinedPath("/repositories", project.id, "Data", "VISP_emuDB", projectSession.name, promptFile);
 
             this.app.addLog("Copying "+promptDirPath+" to "+destPath, "debug");
             fs.copyFileSync(promptDirPath, destPath);
 
-            importedFilePaths.push("/repositories/"+project.id+"/Data/speech_recorder_uploads/emudb-sessions/"+sessionId+"/"+promptFile);
+            importedFilePaths.push(safeJoinedPath("/repositories", project.id, "Data", "speech_recorder_uploads", "emudb-sessions", sessionId, promptFile));
 
             mongoProject.sessions[mongoProjectSessionKey].files.push({
                 name: promptFile,
@@ -5874,7 +5883,7 @@ session-manager_1    | }
         await mongoProject.save();
 
         let volumes = [{
-            source: this.app.absRootPath+"/mounts/repositories/"+project.id,
+            source: safeMountSource(this.app.absRootPath, "mounts/repositories/" + project.id),
             target: "/home/rstudio/project"
         }];
 
