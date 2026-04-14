@@ -400,6 +400,34 @@ class Session {
                     options: m.Mode ? m.Mode.split(",") : ["rw"],
                 }),
             );
+            // Security hardening: capability profiles per session type.
+            // All sessions drop ALL capabilities and add back only what's needed.
+            // - RStudio/Operations: run as root, need SETUID/SETGID for user switching,
+            //   FOWNER for R library file operations
+            // - Jupyter/VSCode: run as non-root, caps mainly for entrypoint setup
+            const securityProfiles = {
+                "visp-rstudio-session": {
+                    capAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                    pidsLimit: 512,
+                },
+                "visp-jupyter-session": {
+                    capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
+                    pidsLimit: 512,
+                },
+                "visp-operations-session": {
+                    capAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                    pidsLimit: 256,
+                },
+                "visp-vscode-session": {
+                    capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
+                    pidsLimit: 512,
+                },
+            };
+            const secProfile = securityProfiles[this.imageName] || {
+                capAdd: [],
+                pidsLimit: 512,
+            };
+
             const libpodSpec = {
                 image: containerConfig.Image,
                 name: containerConfig.name,
@@ -409,6 +437,9 @@ class Session {
                 netns: { nsmode: "bridge" },
                 networks: { [networkName]: {} },
                 mounts: libpodMounts,
+                cap_drop: ["ALL"],
+                cap_add: secProfile.capAdd,
+                no_new_privileges: true,
                 resource_limits: {
                     memory: {
                         limit: containerConfig.HostConfig.Memory,
@@ -416,6 +447,9 @@ class Session {
                     },
                     cpu: {
                         shares: containerConfig.HostConfig.CpuShares,
+                    },
+                    pids: {
+                        limit: secProfile.pidsLimit,
                     },
                 },
             };
