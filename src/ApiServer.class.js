@@ -397,6 +397,7 @@ class ApiServer {
                     result: 400,
                     msg: "You are not authorized to use this functionality",
                 },
+                "You are not authorized to use this functionality",
             ).toJSON(),
         );
     }
