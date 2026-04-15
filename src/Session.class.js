@@ -22,6 +22,19 @@ class Session {
         this.containerUser = "";
         this.container = null;
         this.docker = new Docker({ socketPath: this.app.dockerSocketPath });
+
+        // UDS-based network isolation: when true, the container runs with
+        // --network=none and session-manager communicates via a Unix socket
+        // instead of TCP over the Podman bridge network.
+        this.useUDS = false;
+        // Path where session-manager can reach the socket (inside its own container)
+        this.sessionSocketPath = null;
+        // Path where the session container binds the socket
+        this.containerSocketPath = "/run/session/ui.sock";
+        // Proxy sidecar container ID (for cleanup)
+        this.proxyContainerId = null;
+        // Container name (stored after config generation, used by proxy and cleanup)
+        this.containerName = null;
     }
 
     overrideImage(image) {
@@ -198,7 +211,7 @@ class Session {
         let config = {
             Image: this.imageName,
             name: this.getContainerName(this.user.username, this.project.id),
-            Env: ["DISABLE_AUTH=true", "PASSWORD=" + this.rstudioPassword],
+            Env: [],
             Labels: {
                 "visp.hsApp": this.hsApp.toString(),
                 "visp.username": this.user.username.toString(),
@@ -216,13 +229,6 @@ class Session {
             },
             //User: `1000:1000`
         };
-        /*
-        config.Env = [
-            "DISABLE_AUTH=true",
-            "PASSWORD="+this.rstudioPassword
-        ];
-        */
-
         config.Labels = {
             "visp.hsApp": this.hsApp.toString(),
             "visp.username": this.user.username.toString(),
@@ -402,21 +408,12 @@ class Session {
             );
             // Security hardening: capability profiles per session type.
             // All sessions drop ALL capabilities and add back only what's needed.
-            // - RStudio/Operations: run as root, need SETUID/SETGID for user switching,
-            //   FOWNER for R library file operations
-            // - Jupyter/VSCode: run as non-root, caps mainly for entrypoint setup
+            // - Jupyter: runs as jovyan (non-root), also used for operations tasks
+            // - VSCode: runs as non-root, caps mainly for entrypoint setup
             const securityProfiles = {
-                "visp-rstudio-session": {
-                    capAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
-                    pidsLimit: 512,
-                },
                 "visp-jupyter-session": {
-                    capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
-                    pidsLimit: 512,
-                },
-                "visp-operations-session": {
                     capAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
-                    pidsLimit: 256,
+                    pidsLimit: 512,
                 },
                 "visp-vscode-session": {
                     capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
@@ -453,6 +450,67 @@ class Session {
                     },
                 },
             };
+
+            // UDS network isolation: replace bridge networking with --network=none
+            // and mount a shared socket directory for session-manager <-> container
+            // communication via Unix Domain Socket.
+            if (this.useUDS) {
+                const socketDirName = containerConfig.name;
+                const hostSocketDir =
+                    this.app.absRootPath +
+                    "/mounts/sessions/" +
+                    socketDirName;
+                const smSocketDir = "/sessions/" + socketDirName;
+
+                // Create the socket directory (session-manager sees /sessions/)
+                try {
+                    fs.mkdirSync(smSocketDir, { recursive: true, mode: 0o777 });
+                    // Ensure world-writable so the container user can create the socket
+                    fs.chmodSync(smSocketDir, 0o777);
+                    this.app.addLog(
+                        `Created UDS socket dir: ${smSocketDir} (host: ${hostSocketDir})`,
+                    );
+                } catch (err) {
+                    throw new Error(
+                        `Failed to create socket dir ${smSocketDir}: ${err.message}`,
+                    );
+                }
+
+                // Store the path where session-manager will connect
+                this.sessionSocketPath = smSocketDir + "/ui.sock";
+
+                // Replace bridge with none
+                libpodSpec.netns = { nsmode: "none" };
+                delete libpodSpec.networks;
+
+                // Mount the socket directory into the container
+                libpodSpec.mounts.push({
+                    type: "bind",
+                    source: hostSocketDir,
+                    destination: "/run/session",
+                    options: ["rw"],
+                });
+
+                // Override command to tell Jupyter to bind to UDS
+                if (containerConfig.udsCommand) {
+                    libpodSpec.command = containerConfig.udsCommand;
+                }
+
+                this.app.addLog(
+                    `UDS isolation enabled for ${containerConfig.name}: ` +
+                        `network=none, socket at ${this.sessionSocketPath}`,
+                );
+
+                // Store the container name for proxy sidecar naming
+                this.containerName = containerConfig.name;
+
+                // Start the proxy sidecar BEFORE creating the session container
+                // so proxy.sock exists when Jupyter starts its socat bridge.
+                await this.createProxySidecar(
+                    containerConfig.name,
+                    hostSocketDir,
+                );
+            }
             this.app.addLog(
                 `libpodSpec: ${JSON.stringify(libpodSpec)}`,
                 "debug",
@@ -629,6 +687,214 @@ class Session {
     }
 
     /**
+     * Creates and starts a tinyproxy sidecar container that provides outgoing
+     * internet access (pip/conda/CRAN) for --network=none session containers.
+     *
+     * The sidecar runs on the default "podman" bridge network (internet access)
+     * and shares the session's socket directory so that it can create a UDS
+     * (proxy.sock) that socat inside the session container connects to.
+     *
+     * @param {string} sessionContainerName - Name of the session container
+     * @param {string} hostSocketDir - Absolute host path to the shared socket dir
+     */
+    async createProxySidecar(sessionContainerName, hostSocketDir) {
+        const proxyContainerName = sessionContainerName + "-proxy";
+        const proxyImage =
+            process.env.SESSION_PROXY_IMAGE || "visp-session-proxy";
+        const keepContainers =
+            process.env.SESSION_MANAGER_KEEP_CONTAINERS === "true";
+
+        const libpodSpec = {
+            image: proxyImage,
+            name: proxyContainerName,
+            env: {
+                PROXY_SOCKET_PATH: "/run/session/proxy.sock",
+                ...(process.env.PROXY_BLOCKED_NETWORKS
+                    ? {
+                          PROXY_BLOCKED_NETWORKS:
+                              process.env.PROXY_BLOCKED_NETWORKS,
+                      }
+                    : {}),
+            },
+            labels: {
+                "visp.proxyFor": sessionContainerName,
+                "visp.type": "session-proxy",
+            },
+            remove: !keepContainers,
+            // Default podman bridge — gives outbound internet, NOT on visp-net
+            netns: { nsmode: "bridge" },
+            networks: { podman: {} },
+            mounts: [
+                {
+                    type: "bind",
+                    source: hostSocketDir,
+                    destination: "/run/session",
+                    options: ["rw"],
+                },
+            ],
+            cap_drop: ["ALL"],
+            cap_add: [],
+            no_new_privileges: true,
+            resource_limits: {
+                memory: {
+                    limit: 64 * 1024 * 1024, // 64 MB
+                    swap: 128 * 1024 * 1024, // 128 MB
+                },
+                cpu: {
+                    shares: 256,
+                },
+                pids: {
+                    limit: 32,
+                },
+            },
+        };
+
+        this.app.addLog(
+            `Creating proxy sidecar: ${proxyContainerName}`,
+            "debug",
+        );
+
+        const http = require("http");
+
+        // Create the proxy container via libpod API
+        const containerId = await new Promise((resolve, reject) => {
+            const reqBody = JSON.stringify(libpodSpec);
+            const req = http.request(
+                {
+                    socketPath: this.app.dockerSocketPath,
+                    path: "/v4.0.0/libpod/containers/create",
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Content-Length": Buffer.byteLength(reqBody),
+                    },
+                },
+                (res) => {
+                    let data = "";
+                    res.on("data", (d) => (data += d));
+                    res.on("end", () => {
+                        if (res.statusCode === 201) {
+                            try {
+                                resolve(JSON.parse(data).Id);
+                            } catch (e) {
+                                reject(
+                                    new Error(
+                                        `Failed to parse proxy create response: ${data}`,
+                                    ),
+                                );
+                            }
+                        } else {
+                            reject(
+                                new Error(
+                                    `Proxy create failed (HTTP ${res.statusCode}): ${data}`,
+                                ),
+                            );
+                        }
+                    });
+                },
+            );
+            req.on("error", reject);
+            req.write(reqBody);
+            req.end();
+        });
+
+        // Start the proxy container
+        await new Promise((resolve, reject) => {
+            const req = http.request(
+                {
+                    socketPath: this.app.dockerSocketPath,
+                    path: `/v4.0.0/libpod/containers/${containerId}/start`,
+                    method: "POST",
+                },
+                (res) => {
+                    if (res.statusCode === 204 || res.statusCode === 304) {
+                        return resolve();
+                    }
+                    let body = "";
+                    res.on("data", (d) => (body += d));
+                    res.on("end", () =>
+                        reject(
+                            new Error(
+                                `Proxy start failed (HTTP ${res.statusCode}): ${body}`,
+                            ),
+                        ),
+                    );
+                },
+            );
+            req.on("error", reject);
+            req.end();
+        });
+
+        this.proxyContainerId = containerId;
+        this.app.addLog(
+            `Proxy sidecar started: ${proxyContainerName} (${containerId.substring(0, 12)})`,
+        );
+
+        // Wait for socat in the proxy to create proxy.sock (up to 5 seconds)
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const smSocketDir = "/sessions/" + this.containerName;
+        const proxySock = smSocketDir + "/proxy.sock";
+
+        for (let i = 0; i < 20; i++) {
+            if (fs.existsSync(proxySock)) {
+                this.app.addLog(`Proxy socket ready: ${proxySock}`);
+                return;
+            }
+            await sleep(250);
+        }
+        this.app.addLog(
+            "Warning: proxy.sock not found after 5s — Jupyter may start without outgoing proxy",
+            "warn",
+        );
+    }
+
+    /**
+     * Stops and removes the proxy sidecar container. Called during session deletion.
+     */
+    async stopProxySidecar() {
+        if (!this.proxyContainerId) return;
+
+        const http = require("http");
+        const proxyId = this.proxyContainerId;
+        const shortId = proxyId.substring(0, 12);
+
+        try {
+            // Stop the proxy container
+            await new Promise((resolve, reject) => {
+                const req = http.request(
+                    {
+                        socketPath: this.app.dockerSocketPath,
+                        path: `/v4.0.0/libpod/containers/${proxyId}/stop?timeout=5`,
+                        method: "POST",
+                    },
+                    (res) => {
+                        // 204 = stopped, 304 = already stopped, 404 = gone
+                        let body = "";
+                        res.on("data", (d) => (body += d));
+                        res.on("end", () => resolve());
+                    },
+                );
+                req.on("error", (err) => {
+                    this.app.addLog(
+                        `Proxy stop request error: ${err.message}`,
+                        "warn",
+                    );
+                    resolve(); // Don't fail deletion if proxy is already gone
+                });
+                req.end();
+            });
+            this.app.addLog(`Proxy sidecar stopped: ${shortId}`, "debug");
+        } catch (err) {
+            this.app.addLog(
+                `Warning: failed to stop proxy sidecar ${shortId}: ${err.message}`,
+                "warn",
+            );
+        }
+
+        this.proxyContainerId = null;
+    }
+
+    /**
      * Function: isSessionReady
      *
      * This will perform a standard "HTTP GET /" towards the container attached to this session to see if the service inside it is ready to accept requests
@@ -638,39 +904,90 @@ class Session {
     async isSessionReady() {
         let isSessionReady = false;
 
-        const url = "http://" + this.shortDockerContainerId + ":" + this.port;
-        this.app.addLog("Checking readiness: " + url, "debug");
+        if (this.useUDS && this.sessionSocketPath) {
+            // UDS mode: probe the socket directly using Node's http module
+            const probePath = this.sessionSocketPath;
+            this.app.addLog(
+                "Checking readiness via UDS: " + probePath,
+                "debug",
+            );
 
-        await fetch(url, {
-            timeout: 1000,
-        })
-            .then((res) => {
-                this.app.addLog(
-                    "isSessionReady success: HTTP " + res.status,
-                    "debug",
+            await new Promise((resolve) => {
+                const http = require("http");
+                const req = http.get(
+                    {
+                        socketPath: probePath,
+                        path: "/",
+                        timeout: 1000,
+                    },
+                    (res) => {
+                        this.app.addLog(
+                            "isSessionReady (UDS) success: HTTP " + res.status,
+                            "debug",
+                        );
+                        // Consume the response
+                        res.resume();
+                        res.on("end", () => {
+                            isSessionReady = true;
+                            resolve();
+                        });
+                    },
                 );
-                return res.text();
-            })
-            .then(() => {
-                isSessionReady = true;
-            })
-            .catch((error) => {
-                this.app.addLog(
-                    "isSessionReady failed: " + error.message,
-                    "debug",
-                );
-                isSessionReady = false;
+                req.on("error", (err) => {
+                    this.app.addLog(
+                        "isSessionReady (UDS) failed: " + err.message,
+                        "debug",
+                    );
+                    resolve();
+                });
+                req.on("timeout", () => {
+                    req.destroy();
+                    resolve();
+                });
             });
+        } else {
+            // TCP mode: use fetch via container hostname on the bridge network
+            const url =
+                "http://" + this.shortDockerContainerId + ":" + this.port;
+            this.app.addLog("Checking readiness: " + url, "debug");
+
+            await fetch(url, {
+                timeout: 1000,
+            })
+                .then((res) => {
+                    this.app.addLog(
+                        "isSessionReady success: HTTP " + res.status,
+                        "debug",
+                    );
+                    return res.text();
+                })
+                .then(() => {
+                    isSessionReady = true;
+                })
+                .catch((error) => {
+                    this.app.addLog(
+                        "isSessionReady failed: " + error.message,
+                        "debug",
+                    );
+                    isSessionReady = false;
+                });
+        }
 
         return isSessionReady;
     }
 
     setupProxyServerIntoContainer(shortDockerContainerId) {
+        const proxyTarget = this.useUDS
+            ? { socketPath: this.sessionSocketPath }
+            : { host: shortDockerContainerId, port: this.port };
+
+        this.app.addLog(
+            `Proxy target: ${JSON.stringify(proxyTarget)}`,
+            "debug",
+        );
+
         this.proxyServer = httpProxy.createProxyServer({
-            target: {
-                host: shortDockerContainerId,
-                port: this.port,
-            },
+            target: proxyTarget,
         });
 
         this.proxyServer.on("error", (err) => {
@@ -678,7 +995,7 @@ class Session {
         });
 
         this.proxyServer.on("proxyReq", () => {
-            //this.app.addLog("Rstudio-router session proxy received request!", "debug");
+            //this.app.addLog("Session proxy received request!", "debug");
         });
 
         this.proxyServer.on("open", () => {
@@ -688,7 +1005,7 @@ class Session {
 
         this.proxyServer.on("proxyReqWs", (_err, req) => {
             this.app.addLog(
-                "Rstudio-router session proxy received ws request!",
+                "Session proxy received ws request!",
                 "debug",
             );
             this.app.addLog(req.url);
@@ -696,7 +1013,7 @@ class Session {
 
         this.proxyServer.on("upgrade", function () {
             this.app.addLog(
-                "Rstudio-router session proxy received upgrade!",
+                "Session proxy received upgrade!",
                 "debug",
             );
             //this.proxyServer.proxy.ws(req, socket, head);
@@ -845,6 +1162,46 @@ class Session {
             );
         }
 
+        // Stop the proxy sidecar container (if one was created)
+        if (this.proxyContainerId) {
+            try {
+                await this.stopProxySidecar();
+            } catch (err) {
+                this.app.addLog(
+                    `Warning: proxy sidecar cleanup failed: ${err.message}`,
+                    "warn",
+                );
+            }
+        }
+
+        // Clean up UDS socket directory if network-isolated
+        if (this.useUDS && this.sessionSocketPath) {
+            try {
+                const socketDir = require("path").dirname(
+                    this.sessionSocketPath,
+                );
+                // Remove socket files first, then directory
+                const proxySock = socketDir + "/proxy.sock";
+                if (fs.existsSync(proxySock)) {
+                    fs.unlinkSync(proxySock);
+                }
+                if (fs.existsSync(this.sessionSocketPath)) {
+                    fs.unlinkSync(this.sessionSocketPath);
+                }
+                if (fs.existsSync(socketDir)) {
+                    fs.rmdirSync(socketDir);
+                }
+                this.app.addLog(
+                    `Cleaned up UDS socket dir: ${socketDir}`,
+                );
+            } catch (err) {
+                this.app.addLog(
+                    `Warning: failed to clean up socket dir: ${err.message}`,
+                    "warn",
+                );
+            }
+        }
+
         //notify the session manager that this session is now deleted
         this.app.sessMan.sessionDeletionCleanup(this.sessionCode);
 
@@ -855,3 +1212,4 @@ class Session {
 }
 
 module.exports = Session;
+

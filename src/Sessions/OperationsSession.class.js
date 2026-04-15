@@ -3,17 +3,18 @@ const Session = require("../Session.class");
 class OperationsSession extends Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
         super(app, user, project, port, hsApp, volumes);
-        this.imageName = "visp-operations-session";
-        this.port = 8787;
-        this.rstudioPassword = process.env.RSTUDIO_PASSWORD;
-        this.localProjectPath = "/home/rstudio/project";
-        this.containerUser = "rstudio";
+        this.imageName = "visp-jupyter-session";
+        this.port = 8888;
+        this.localProjectPath = "/home/jovyan/project";
+        this.containerUser = "jovyan";
     }
 
     getContainerConfig() {
         let config = super.getContainerConfig();
 
-        config.Env = ["DISABLE_AUTH=true", "PASSWORD=" + this.rstudioPassword];
+        // Operations sessions are headless — no interactive server needed.
+        // Set a minimal env so container-agent can run R + Node scripts.
+        config.Env = [];
 
         return config;
     }

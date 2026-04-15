@@ -4,7 +4,6 @@ const Session = require('./Session.class');
 const fetch = require('node-fetch');
 const { Docker } = require('node-docker-api');
 const ApiResponse = require('./ApiResponse.class');
-const RstudioSession = require('./Sessions/RstudioSession.class');
 const JupyterSession = require('./Sessions/JupyterSession.class');
 const VscodeSession = require('./Sessions/VscodeSession.class');
 const OperationsSession = require('./Sessions/OperationsSession.class');
@@ -159,17 +158,10 @@ class SessionManager {
       return userSessions;
     }
 
-    createSession(user, project, hsApp = 'rstudio', volumes = []) {
+    createSession(user, project, hsApp = 'jupyter', volumes = []) {
       let sess = null;
       switch(hsApp) {
-        case "rstudio":
-          sess = new RstudioSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
-        break;
         case "jupyter":
-            const sourcePath = `${process.env.ABS_ROOT_PATH}/mounts/whisper/models`;
-            // This is a default volume, used for whisper models, to allow updating whisper models 
-            // without refreshing the image.
-            volumes.push({ source: sourcePath, target: '/whisper_models', mode: 'ro,Z' });
           sess = new JupyterSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
         break;
         case "operations":

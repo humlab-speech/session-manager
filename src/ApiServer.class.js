@@ -771,7 +771,7 @@ class ApiServer {
                     msg.sessionAccessCode,
                 );
                 let envVars = [
-                    "PROJECT_PATH=/home/rstudio/project",
+                    "PROJECT_PATH=/home/jovyan/project",
                     "UPLOAD_PATH=/home/uploads",
                 ];
                 session
@@ -1337,9 +1337,6 @@ class ApiServer {
         let containerUser = null;
         switch (msg.appName) {
             case "operations":
-            case "rstudio":
-                containerUser = "rstudio";
-                break;
             case "jupyter":
                 containerUser = "jovyan";
                 break;
@@ -2587,7 +2584,7 @@ class ApiServer {
                 msg.sessionAccessCode,
             );
             let envVars = [
-                "PROJECT_PATH=/home/rstudio/project",
+                "PROJECT_PATH=/home/jovyan/project",
                 "UPLOAD_PATH=/home/uploads",
                 "BUNDLE_LISTS=" +
                     new Buffer.from(JSON.stringify(msg.data)).toString(
@@ -2677,7 +2674,7 @@ class ApiServer {
         let userSession = this.getUserSessionBySocket(ws);
 
         let envVars = [];
-        envVars.push("PROJECT_PATH=/home/rstudio/project");
+        envVars.push("PROJECT_PATH=/home/jovyan/project");
         let sessionsJsonB64 = Buffer.from(
             JSON.stringify(form.sessions),
         ).toString("base64");
@@ -2979,7 +2976,7 @@ class ApiServer {
 
         let envVars = [
             //"PROJECT_PATH=/home/project-setup",
-            "PROJECT_PATH=/home/rstudio/project",
+            "PROJECT_PATH=/home/jovyan/project",
             //"UPLOAD_PATH=/home/uploads",
             "UPLOAD_PATH=/unimported_audio",
             "EMUDB_SESSIONS=[]",
@@ -4190,7 +4187,7 @@ session-manager_1    | }
                 this.app.absRootPath,
                 "mounts/repositories/" + projectFormData.id,
             ),
-            target: "/home/rstudio/project",
+            target: "/home/jovyan/project",
         };
         const uploadsVolume = {
             source: uploadsSrcDir,
@@ -4223,7 +4220,7 @@ session-manager_1    | }
 
         //Define env vars for the container-agent to use for further commands
         let envVars = [
-            "PROJECT_PATH=/home/rstudio/project", //used to be /home/project-setup
+            "PROJECT_PATH=/home/jovyan/project", //used to be /home/project-setup
             "UPLOAD_PATH=/home/uploads",
             "BUNDLE_LIST_NAME=" + user.username,
         ];
@@ -5520,7 +5517,17 @@ session-manager_1    | }
                         });
                     });
                 },
-            );
+            ).on("error", (err) => {
+                this.app.addLog(
+                    "Failed to reach Apache for session validation: " +
+                        err.message,
+                    "error",
+                );
+                resolve({
+                    authenticated: false,
+                    reason: "Authentication service unavailable",
+                });
+            });
         });
     }
 
@@ -5629,7 +5636,7 @@ session-manager_1    | }
                 source: safeMountSource(
                     this.app.absRootPath, "mounts/repositories/" + projectId,
                 ),
-                target: "/home/rstudio/project",
+                target: "/home/jovyan/project",
             },
         ];
 
@@ -5674,8 +5681,8 @@ session-manager_1    | }
             "base64",
         );
         let envVars = [
-            "PROJECT_PATH=/home/rstudio/project", // + /home/project/Data/VISP_emuDB
-            "UPLOAD_PATH=/home/rstudio/project/Data/speech_recorder_uploads",
+            "PROJECT_PATH=/home/jovyan/project", // + /home/project/Data/VISP_emuDB
+            "UPLOAD_PATH=/home/jovyan/project/Data/speech_recorder_uploads",
             //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
             "EMUDB_SESSIONS=" + sessionsJsonB64,
             "WRITE_META_JSON=false",
@@ -5884,7 +5891,7 @@ session-manager_1    | }
 
         let volumes = [{
             source: safeMountSource(this.app.absRootPath, "mounts/repositories/" + project.id),
-            target: "/home/rstudio/project"
+            target: "/home/jovyan/project"
         }];
 
         let user = {
@@ -5910,8 +5917,8 @@ session-manager_1    | }
         }];
         let sessionsJsonB64 = Buffer.from(JSON.stringify(sessions)).toString("base64");
         let envVars = [
-            "PROJECT_PATH=/home/rstudio/project", // + /home/project/Data/VISP_emuDB
-            "UPLOAD_PATH=/home/rstudio/project/Data/speech_recorder_uploads",
+            "PROJECT_PATH=/home/jovyan/project", // + /home/project/Data/VISP_emuDB
+            "UPLOAD_PATH=/home/jovyan/project/Data/speech_recorder_uploads",
             //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
             "EMUDB_SESSIONS="+sessionsJsonB64,
             "WRITE_META_JSON=false"
@@ -5960,6 +5967,27 @@ session-manager_1    | }
             );
             let out = JSON.stringify(sessions);
             res.end(out);
+        });
+
+        // Diagnostic endpoint for visp.py session-doctor.
+        // Returns all in-memory sessions so the doctor can detect containers
+        // that are running but not tracked by session-manager (adrift).
+        this.expressApp.get("/api/debug/sessions", (req, res) => {
+            const sessions = this.app.sessMan.sessions.map((s) => ({
+                containerName: s.containerName || null,
+                containerId: s.shortDockerContainerId || null,
+                fullContainerId: s.fullDockerContainerId || null,
+                accessCode: s.accessCode || null,
+                username: s.user ? s.user.username : null,
+                projectId: s.project ? s.project.id : null,
+                type: s.hsApp || null,
+                useUDS: s.useUDS || false,
+                proxyContainerId: s.proxyContainerId
+                    ? s.proxyContainerId.substring(0, 12)
+                    : null,
+                createdAt: s.createdAt || null,
+            }));
+            res.json(sessions);
         });
 
         this.expressApp.get("/api/session/:session_id/commit", (req, res) => {
