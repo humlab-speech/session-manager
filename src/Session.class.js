@@ -3,6 +3,7 @@ const fs = require("fs");
 const httpProxy = require("http-proxy");
 const { Docker } = require("node-docker-api");
 const fetch = require("node-fetch");
+const SessionApiServer = require("./SessionApiServer.class");
 
 class Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
@@ -35,6 +36,8 @@ class Session {
         this.proxyContainerId = null;
         // Container name (stored after config generation, used by proxy and cleanup)
         this.containerName = null;
+        // Per-session HTTP API server listening on api.sock (for notebook access)
+        this.sessionApiServer = null;
     }
 
     overrideImage(image) {
@@ -478,6 +481,16 @@ class Session {
 
                 // Store the path where session-manager will connect
                 this.sessionSocketPath = smSocketDir + "/ui.sock";
+
+                // Start the per-session API server on api.sock so notebook
+                // code can submit transcription requests without TCP networking.
+                const apiSockPath = smSocketDir + "/api.sock";
+                this.sessionApiServer = new SessionApiServer(
+                    this.app,
+                    this,
+                    apiSockPath,
+                );
+                this.sessionApiServer.start();
 
                 // Replace bridge with none
                 libpodSpec.netns = { nsmode: "none" };
@@ -1172,6 +1185,12 @@ class Session {
                     "warn",
                 );
             }
+        }
+
+        // Stop the per-session API server before cleaning up the socket dir
+        if (this.sessionApiServer) {
+            this.sessionApiServer.stop();
+            this.sessionApiServer = null;
         }
 
         // Clean up UDS socket directory if network-isolated

@@ -1356,6 +1356,120 @@ class WhisperService {
         return strippedContent;
     }
 
+    /**
+     * Transcribe an arbitrary audio file from a notebook session.
+     *
+     * This is the "file-in, text-out" path used by visp_transcribe.py.
+     * It bypasses the EMU-DB queue (no MongoDB, no bundle structure) and
+     * returns the transcript directly to the caller.
+     *
+     * Serialized with UI transcription via this.transcriptionRunning so that
+     * notebook and UI requests never hit WhisperVault concurrently.
+     *
+     * @param {string} hostFilePath  - Absolute path on the host filesystem
+     * @param {object} options
+     * @param {string} options.model      - "whisper" | "kb-whisper"
+     * @param {string} options.language   - Full English name or null (auto-detect)
+     * @param {boolean} options.diarize   - Speaker diarization
+     * @param {string[]} options.formats  - Output formats: ["txt"], ["srt"], ["txt","srt"]
+     * @returns {Promise<{txt?: string, srt?: string}>}
+     */
+    async transcribeFile(hostFilePath, options = {}) {
+        if (!this.whisperReady) {
+            throw new Error("WhisperVault is not available");
+        }
+        if (!fs.existsSync(hostFilePath)) {
+            throw new Error(`File not found: ${hostFilePath}`);
+        }
+
+        const model = options.model || "whisper";
+        const formats = options.formats || ["txt"];
+
+        // Wait for any running transcription to finish (shared mutex with UI queue)
+        while (this.transcriptionRunning) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        this.transcriptionRunning = true;
+
+        try {
+            // Switch model if needed (reuses the same reload logic as UI queue)
+            await this.ensureModelPackage(model, {});
+
+            // ffmpeg: convert to 16kHz mono 16-bit WAV in a temp file
+            const tmpPath = `/tmp/visp-nb-${Date.now()}-${path.basename(hostFilePath, path.extname(hostFilePath))}.wav`;
+            try {
+                execSync(
+                    `ffmpeg -y -i "${hostFilePath}" -acodec pcm_s16le -ac 1 -ar 16000 "${tmpPath}"`,
+                    { stdio: "pipe" },
+                );
+            } catch (err) {
+                throw new Error(`Audio conversion failed: ${err.stderr?.toString() || err.message}`);
+            }
+
+            const audioBuffer = fs.readFileSync(tmpPath);
+            try { fs.unlinkSync(tmpPath); } catch (_) {}
+
+            // Resolve language name → ISO code
+            const langName = (options.language || "").toLowerCase();
+            const langIso = langName && langName !== "automatic detection"
+                ? (this.languageToIso[langName] || langName)
+                : null;
+
+            const whisperParams = {
+                language: langIso,
+                diarize: !!options.diarize,
+                output_format: formats,
+            };
+
+            const result = await this.whisperTranscribe(
+                audioBuffer,
+                path.basename(hostFilePath),
+                whisperParams,
+            );
+
+            const out = {};
+            if (result.outputs?.txt !== undefined) out.txt = result.outputs.txt;
+            if (result.outputs?.srt !== undefined) out.srt = result.outputs.srt;
+            return out;
+
+        } finally {
+            this.transcriptionRunning = false;
+        }
+    }
+
+    /**
+     * Return available model packages from packages.json, with human-friendly
+     * metadata. This is what visp_transcribe.list_models() shows the user.
+     *
+     * @returns {Promise<Array<{id: string, language: string|null, description: string}>>}
+     */
+    async getAvailableModels() {
+        const packagesPath = process.env.WHISPERX_PACKAGES_PATH
+            || "/run/whisperx/packages.json";
+
+        if (!fs.existsSync(packagesPath)) {
+            // Fall back to the two hard-coded package names
+            return [
+                { id: "whisper",    language: null, description: "Multilingual (faster-whisper large-v3)" },
+                { id: "kb-whisper", language: "sv", description: "Swedish (KB Whisper large)" },
+            ];
+        }
+
+        try {
+            const raw = JSON.parse(fs.readFileSync(packagesPath, "utf8"));
+            // Map internal package names to the model IDs the API accepts
+            const packageToModelId = { "sv-standard": "kb-whisper", "multilingual": "whisper" };
+            return Object.entries(raw).map(([name, pkg]) => ({
+                id: packageToModelId[name] || name,
+                language: pkg.language || null,
+                description: pkg.description || name,
+            }));
+        } catch (err) {
+            this.app.addLog(`Failed to read packages.json: ${err.message}`, "warn");
+            return [];
+        }
+    }
+
     async shutdown() {
         await Promise.all(this.preProcessTranscriptionPromises);
         return true;
