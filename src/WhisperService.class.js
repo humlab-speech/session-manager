@@ -1393,7 +1393,7 @@ class WhisperService {
 
         try {
             // Switch model if needed (reuses the same reload logic as UI queue)
-            await this.ensureModelPackage(model, {});
+            await this.ensureModelPackage(model, options.advancedOptions || {});
 
             // ffmpeg: convert to 16kHz mono 16-bit WAV in a temp file
             const tmpPath = `/tmp/visp-nb-${Date.now()}-${path.basename(hostFilePath, path.extname(hostFilePath))}.wav`;

@@ -108,7 +108,7 @@ class SessionApiServer {
             return this._sendJson(res, 400, { error: "Invalid JSON body" });
         }
 
-        const { file, model, language, diarize, formats } = body;
+        const { file, model, language, diarize, formats, advancedOptions } = body;
 
         if (!file) {
             return this._sendJson(res, 400, {
@@ -151,6 +151,7 @@ class SessionApiServer {
                 language: language || "Automatic Detection",
                 diarize: !!diarize,
                 formats: formats || ["txt"],
+                advancedOptions: advancedOptions || {},
             });
             return this._sendJson(res, 200, result);
         } catch (err) {
