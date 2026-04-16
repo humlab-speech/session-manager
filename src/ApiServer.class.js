@@ -1400,12 +1400,17 @@ class ApiServer {
                     "launchContainerSession failed: " + error,
                     "error",
                 );
+                // Sanitize error message before sending to client:
+                // strip host filesystem paths that may leak server internals.
+                const sanitized = (error.message || "Unknown error")
+                    .replace(/\/home\/[^\s:]+/g, "<server-path>")
+                    .replace(/statfs\s+\S+/g, "mount path not found");
                 ws.send(
                     JSON.stringify({
                         type: "cmd-result",
                         cmd: "launchContainerSession",
                         progress: "end",
-                        message: "Failed to launch session: " + error.message,
+                        message: "Failed to launch session: " + sanitized,
                         result: false,
                         requestId: msg.requestId,
                     }),
