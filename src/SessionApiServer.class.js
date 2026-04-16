@@ -118,6 +118,10 @@ class SessionApiServer {
 
         // Resolve and validate the file path
         const hostPath = this._containerPathToHost(file);
+        this.app.addLog(
+            `SessionApiServer: resolved "${file}" → "${hostPath}" (projectId=${this.session.project?.id})`,
+            "debug",
+        );
         if (!hostPath) {
             return this._sendJson(res, 400, {
                 error: `File must be under ${CONTAINER_PROJECT_ROOT}/`,
@@ -174,11 +178,8 @@ class SessionApiServer {
         }
 
         const relative = resolved.slice(CONTAINER_PROJECT_ROOT.length + 1);
-        const hostProjectRoot = path.join(
-            this.app.absRootPath,
-            "mounts/repositories",
-            this.session.project.id,
-        );
+        // session-manager has mounts/repositories mounted at /repositories
+        const hostProjectRoot = path.join("/repositories", this.session.project.id);
         return path.join(hostProjectRoot, relative);
     }
 
