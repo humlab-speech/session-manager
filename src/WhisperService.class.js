@@ -11,6 +11,9 @@ class WhisperService {
         this.preProcessTranscriptionPromises = [];
         this.transcriptionRunning = false;
         this.whisperReady = false;
+        // Number of notebook transcriptions currently waiting or running.
+        // Capped at MAX_NOTEBOOK_PENDING to prevent UI queue starvation.
+        this.notebookPending = 0;
         this.socketPath = process.env.WHISPERX_SOCKET_PATH || "/run/whisperx/whisperx.sock";
         // Track which model package is loaded in WhisperVault.
         // Starts as "multilingual" because the quadlet default is faster-whisper-large-v3.
@@ -1382,6 +1385,18 @@ class WhisperService {
             throw new Error(`File not found: ${hostFilePath}`);
         }
 
+        // Reject if too many notebook transcriptions are already queued or running.
+        // Without this cap a notebook loop could hold transcriptionRunning = true
+        // indefinitely, starving the UI queue which polls every 15 s.
+        const MAX_NOTEBOOK_PENDING = 3;
+        if (this.notebookPending >= MAX_NOTEBOOK_PENDING) {
+            throw new Error(
+                `Too many pending notebook transcriptions (max ${MAX_NOTEBOOK_PENDING}). ` +
+                "Please wait for a current transcription to finish before starting another."
+            );
+        }
+        this.notebookPending++;
+
         const model = options.model || "whisper";
         const formats = options.formats || ["txt"];
 
@@ -1434,6 +1449,7 @@ class WhisperService {
 
         } finally {
             this.transcriptionRunning = false;
+            this.notebookPending = Math.max(0, this.notebookPending - 1);
         }
     }
 
