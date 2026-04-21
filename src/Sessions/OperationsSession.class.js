@@ -16,6 +16,10 @@ class OperationsSession extends Session {
         // Set a minimal env so container-agent can run R + Node scripts.
         config.Env = [];
 
+        // No network access needed — container-agent only runs local R/Node
+        // scripts against bind-mounted project directories via podman exec.
+        config.HostConfig.NetworkMode = "none";
+
         return config;
     }
 }

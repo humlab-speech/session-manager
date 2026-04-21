@@ -5,7 +5,6 @@ const fetch = require('node-fetch');
 const { Docker } = require('node-docker-api');
 const ApiResponse = require('./ApiResponse.class');
 const JupyterSession = require('./Sessions/JupyterSession.class');
-const VscodeSession = require('./Sessions/VscodeSession.class');
 const OperationsSession = require('./Sessions/OperationsSession.class');
 
 class SessionManager {
@@ -166,9 +165,6 @@ class SessionManager {
         break;
         case "operations":
           sess = new OperationsSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
-          break;
-        case "vscode":
-          sess = new VscodeSession(this.app, user, project, this.getAvailableSessionProxyPort(), hsApp, volumes);
           break;
         default:
           this.app.addLog("Unknown hsApp type: "+hsApp, "error");
