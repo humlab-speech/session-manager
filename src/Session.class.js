@@ -428,14 +428,16 @@ class Session {
                 pidsLimit: 512,
             };
 
+            // "none" is a special nsmode, not a named network.
+            const useNoNetwork = networkName === "none";
             const libpodSpec = {
                 image: containerConfig.Image,
                 name: containerConfig.name,
                 env: env,
                 labels: containerConfig.Labels || {},
                 remove: containerConfig.HostConfig.AutoRemove || false,
-                netns: { nsmode: "bridge" },
-                networks: { [networkName]: {} },
+                netns: useNoNetwork ? { nsmode: "none" } : { nsmode: "bridge" },
+                ...(useNoNetwork ? {} : { networks: { [networkName]: {} } }),
                 mounts: libpodMounts,
                 cap_drop: ["ALL"],
                 cap_add: secProfile.capAdd,
