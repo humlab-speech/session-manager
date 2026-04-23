@@ -1,4 +1,5 @@
 const fs = require('fs');
+const { version } = require('../package.json');
 const SessionManager = require('./SessionManager.class.js');
 const SessionProxyServer = require('./SessionProxyServer.class');
 const ApiServer = require('./ApiServer.class');
@@ -16,6 +17,7 @@ class Application {
 
     this.sessMan = new SessionManager(this);
     this.sessProxyServer = new SessionProxyServer(this);
+    this.addLog(`Session Manager v${version} starting up`);
     this.addLog("SessionProxyServer started at port "+this.sessProxyServer.port);
     this.apiServer = new ApiServer(this);
     this.addLog("ApiServer started at port "+this.apiServer.port);
