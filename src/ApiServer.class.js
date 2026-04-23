@@ -4059,38 +4059,6 @@ class ApiServer {
         }
     }
 
-    async setOwnershipRecursive(directoryPath, targetUID, targetGID) {
-        try {
-            // Set ownership for the directory itself
-            await fs.chown(directoryPath, targetUID, targetGID);
-
-            // Get the list of items (files and subdirectories) in the directory
-            const items = await fs.readdir(directoryPath);
-
-            // Iterate through each item
-            for (const item of items) {
-                const itemPath = path.join(directoryPath, item);
-                const stats = await fs.stat(itemPath);
-
-                if (stats.isDirectory()) {
-                    // If the item is a subdirectory, recursively set ownership
-                    await this.setOwnershipRecursive(
-                        itemPath,
-                        targetUID,
-                        targetGID,
-                    );
-                } else {
-                    // Set ownership for individual files
-                    await fs.chown(itemPath, targetUID, targetGID);
-                }
-            }
-
-            //console.log(`Ownership set for ${directoryPath}`);
-        } catch (error) {
-            console.error(`Error setting ownership:`, error);
-        }
-    }
-
     async getProjectById(projectId) {
         const Project = this.mongoose.model("Project");
 
@@ -6041,8 +6009,6 @@ session-manager_1    | }
 
         this.app.addLog("Initializing simpleGit", "debug");
         let git = await simpleGit(repoDir);
-        this.app.addLog("Setting ownership", "debug");
-        await this.setOwnershipRecursive(repoDir, 0, 0);
         this.app.addLog("git config user.name", "debug");
         await git.addConfig("user.name", user.firstName + " " + user.lastName);
         this.app.addLog("git config user.email", "debug");
@@ -6061,8 +6027,6 @@ session-manager_1    | }
 
         this.app.addLog("git commit", "debug");
         await git.commit("System commit");
-        this.app.addLog("Setting ownership", "debug");
-        await this.setOwnershipRecursive(repoDir, 1000, 1000);
 
         if (ws && msg) {
             ws.send(
@@ -6330,7 +6294,6 @@ session-manager_1    | }
         await git.addConfig("user.email", user.email);
         await git.add(".");
         await git.commit("Initial commit");
-        await this.setOwnershipRecursive(repoDir, 1000, 1000);
 
         return true;
     }
