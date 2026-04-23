@@ -146,6 +146,19 @@ class ApiServer {
             finishedAt: Date,
         });
         mongoose.model("ImportQueueItem", this.models.ImportQueueItem, "wsrngimportqueueitems");
+
+        this.models.Notification = new mongoose.Schema({
+            id: String,
+            recipientUsername: String,
+            type: String,
+            message: String,
+            projectId: String,
+            metadata: Object,
+            read: { type: Boolean, default: false },
+            createdAt: { type: Date, default: Date.now },
+            readAt: Date,
+        });
+        mongoose.model("Notification", this.models.Notification);
     }
 
     async fetchMongoUser(eppn) {
@@ -332,6 +345,187 @@ class ApiServer {
             }
         }
         return false;
+    }
+
+    getWsClientsByUsername(username) {
+        return this.wsClients.filter(
+            (client) =>
+                client.userSession &&
+                client.userSession.username &&
+                client.userSession.username === username,
+        );
+    }
+
+    formatNotification(notification) {
+        return {
+            id: notification.id || String(notification._id),
+            type: notification.type || "info",
+            message: notification.message || "",
+            projectId: notification.projectId || null,
+            metadata: notification.metadata || {},
+            read: notification.read === true,
+            createdAt: notification.createdAt || new Date(),
+            readAt: notification.readAt || null,
+        };
+    }
+
+    async createNotification({
+        recipientUsername,
+        type = "info",
+        message = "",
+        projectId = null,
+        metadata = {},
+    }) {
+        if (!recipientUsername || !message) {
+            return null;
+        }
+
+        const Notification = this.mongoose.model("Notification");
+        const notification = new Notification({
+            id: nanoid.nanoid(),
+            recipientUsername: recipientUsername,
+            type: type,
+            message: message,
+            projectId: projectId ? String(projectId) : null,
+            metadata: metadata,
+            read: false,
+            createdAt: new Date(),
+        });
+        await notification.save();
+        return notification;
+    }
+
+    sendLiveNotificationToUser(recipientUsername, notification) {
+        const liveClients = this.getWsClientsByUsername(recipientUsername);
+        const payload = this.formatNotification(notification);
+
+        liveClients.forEach((client) => {
+            try {
+                client.socket.send(
+                    new WebSocketMessage(
+                        "server-notification",
+                        "serverNotification",
+                        { notification: payload },
+                    ).toJSON(),
+                );
+            } catch (error) {
+                this.app.addLog(
+                    "Failed sending live notification to " +
+                        recipientUsername +
+                        ": " +
+                        error.message,
+                    "warn",
+                );
+            }
+        });
+    }
+
+    async notifyUser(recipientUsername, payload) {
+        const notification = await this.createNotification({
+            recipientUsername: recipientUsername,
+            type: payload.type,
+            message: payload.message,
+            projectId: payload.projectId,
+            metadata: payload.metadata || {},
+        });
+
+        if (notification) {
+            this.sendLiveNotificationToUser(recipientUsername, notification);
+        }
+    }
+
+    async notifyUserByEppn(eppn, payload) {
+        if (!eppn) {
+            return;
+        }
+
+        const user = await this.fetchMongoUser(eppn);
+        if (!user || !user.username) {
+            this.app.addLog(
+                "Could not deliver notification. No user found for eppn " +
+                    eppn,
+                "warn",
+            );
+            return;
+        }
+
+        await this.notifyUser(user.username, payload);
+    }
+
+    async notifyProjectMembers(projectId, payload, excludedUsernames = []) {
+        const project = await this.fetchProject(projectId);
+        if (!project || !Array.isArray(project.members)) {
+            return;
+        }
+
+        const exclusions = new Set(
+            excludedUsernames.filter((value) => typeof value === "string"),
+        );
+
+        for (const member of project.members) {
+            if (!member || !member.username || exclusions.has(member.username)) {
+                continue;
+            }
+            await this.notifyUser(member.username, {
+                type: payload.type,
+                message: payload.message,
+                projectId: String(projectId),
+                metadata: payload.metadata || {},
+            });
+        }
+    }
+
+    async fetchNotifications(ws, user, msg) {
+        const Notification = this.mongoose.model("Notification");
+        const limit =
+            msg.data && Number.isInteger(msg.data.limit) ? msg.data.limit : 40;
+        const safeLimit = Math.max(1, Math.min(limit, 100));
+
+        const notifications = await Notification.find({
+            recipientUsername: user.username,
+        })
+            .sort({ createdAt: -1 })
+            .limit(safeLimit);
+
+        ws.send(
+            new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 200,
+                notifications: notifications.map((notification) =>
+                    this.formatNotification(notification),
+                ),
+            }).toJSON(),
+        );
+    }
+
+    async markNotificationsRead(ws, user, msg) {
+        const Notification = this.mongoose.model("Notification");
+        const now = new Date();
+        const notificationIds =
+            msg.data && Array.isArray(msg.data.notificationIds)
+                ? msg.data.notificationIds
+                : [];
+
+        let query = {
+            recipientUsername: user.username,
+            read: false,
+        };
+        if (notificationIds.length > 0) {
+            query.id = { $in: notificationIds };
+        }
+
+        const updateResult = await Notification.updateMany(query, {
+            $set: {
+                read: true,
+                readAt: now,
+            },
+        });
+
+        ws.send(
+            new WebSocketMessage(msg.requestId, msg.cmd, {
+                result: 200,
+                modifiedCount: updateResult.modifiedCount || 0,
+            }).toJSON(),
+        );
     }
 
     handleConnectionClosed(client, event) {
@@ -552,6 +746,16 @@ class ApiServer {
                     msg: "Authorized",
                 }).toJSON(),
             );
+            return;
+        }
+
+        if (msg.cmd == "fetchNotifications") {
+            await this.fetchNotifications(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "markNotificationsRead") {
+            await this.markNotificationsRead(ws, user, msg);
             return;
         }
 
