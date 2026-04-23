@@ -76,11 +76,16 @@ class ApiServer {
             id: String,
             name: String,
             slug: String,
+            archived: { type: Boolean, default: false },
             sessions: Array,
             annotationLevels: Array,
             annotationLinks: Array,
             members: Array,
             docs: Array,
+            description: { type: String, default: "" },
+            financers: { type: String, default: "" },
+            ethicsReviewDnr: { type: String, default: "" },
+            qualityControlMethods: { type: Array, default: [] },
         });
         mongoose.model("Project", this.models.Project);
 
@@ -866,6 +871,14 @@ class ApiServer {
         if (msg.cmd == "deleteProject") {
             try {
                 this.deleteProject(ws, user, msg);
+            } catch (error) {
+                this.app.addLog(error, "error");
+            }
+        }
+
+        if (msg.cmd == "setProjectArchived") {
+            try {
+                this.setProjectArchived(ws, user, msg);
             } catch (error) {
                 this.app.addLog(error, "error");
             }
@@ -2230,6 +2243,21 @@ class ApiServer {
 
         for (let key in projects) {
             let project = projects[key];
+            if (typeof project.archived === "undefined") {
+                project.archived = false;
+            }
+            if (typeof project.description !== "string") {
+                project.description = "";
+            }
+            if (typeof project.financers !== "string") {
+                project.financers = "";
+            }
+            if (typeof project.ethicsReviewDnr !== "string") {
+                project.ethicsReviewDnr = "";
+            }
+            if (!Array.isArray(project.qualityControlMethods)) {
+                project.qualityControlMethods = [];
+            }
             for (let key2 in project.members) {
                 const user = new this.mongoose.model("User");
                 let userInfo = await user.findOne({
@@ -3373,6 +3401,87 @@ class ApiServer {
         );
     }
 
+    async setProjectArchived(ws, user, msg) {
+        const projectId = msg?.data?.projectId;
+        const archived = msg?.data?.archived === true;
+
+        if (!projectId) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "setProjectArchived",
+                    progress: "end",
+                    result: false,
+                    message: "Missing projectId",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+
+        const Project = this.mongoose.model("Project");
+        const project = await Project.findOne({ id: projectId });
+        if (!project) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "setProjectArchived",
+                    progress: "end",
+                    result: false,
+                    message: "Project not found",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+
+        const userIsAdmin = project.members.find(
+            (m) => m.username == user.username && m.role == "admin",
+        );
+        if (!userIsAdmin) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "setProjectArchived",
+                    progress: "end",
+                    result: false,
+                    message: "User is not admin for this project",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+
+        project.archived = archived;
+        project.markModified("archived");
+        await project.save();
+
+        if (archived) {
+            const runningSessions =
+                await this.app.sessMan.getContainerSessionsByProjectId(projectId);
+            for (const runningSession of runningSessions) {
+                await this.app.sessMan.deleteSession(runningSession.accessCode);
+            }
+        }
+
+        ws.send(
+            JSON.stringify({
+                type: "cmd-result",
+                cmd: "setProjectArchived",
+                progress: "end",
+                result: true,
+                data: {
+                    projectId: projectId,
+                    archived: archived,
+                },
+                message: archived
+                    ? "Project archived"
+                    : "Project unarchived",
+                requestId: msg.requestId,
+            }),
+        );
+    }
+
     async deleteProject(ws, user, msg) {
         let totalStepsNum = 3;
         let stepNum = 0;
@@ -3548,6 +3657,7 @@ session-manager_1    | }
             id: projectFormData.id,
             name: projectFormData.projectName,
             slug: this.slugify(projectFormData.projectName),
+            archived: false,
             sessions: [],
             annotationLevels: projectFormData.annotLevels,
             annotationLinks: projectFormData.annotLevelLinks,
@@ -3558,6 +3668,10 @@ session-manager_1    | }
                 },
             ],
             docs: projectFormData.docFiles,
+            description: typeof projectFormData.description === "string" ? projectFormData.description : "",
+            financers: typeof projectFormData.financers === "string" ? projectFormData.financers : "",
+            ethicsReviewDnr: typeof projectFormData.ethicsReviewDnr === "string" ? projectFormData.ethicsReviewDnr : "",
+            qualityControlMethods: Array.isArray(projectFormData.qualityControlMethods) ? projectFormData.qualityControlMethods : [],
         });
 
         mongoProject.save();
@@ -3758,8 +3872,13 @@ session-manager_1    | }
         }
         mongoProject.annotationLevels = projectFormData.annotLevels;
         mongoProject.annotationLinks = projectFormData.annotLevelLinks;
+        mongoProject.description = typeof projectFormData.description === "string" ? projectFormData.description : "";
+        mongoProject.financers = typeof projectFormData.financers === "string" ? projectFormData.financers : "";
+        mongoProject.ethicsReviewDnr = typeof projectFormData.ethicsReviewDnr === "string" ? projectFormData.ethicsReviewDnr : "";
+        mongoProject.qualityControlMethods = Array.isArray(projectFormData.qualityControlMethods) ? projectFormData.qualityControlMethods : [];
         mongoProject.markModified("annotationLevels");
         mongoProject.markModified("annotationLinks");
+        mongoProject.markModified("qualityControlMethods");
         await mongoProject.save();
     }
 
@@ -5197,6 +5316,32 @@ session-manager_1    | }
                 }
             }
             */
+        }
+
+        const allowedQualityControlMethods = [
+            "manual-review",
+            "peer-review",
+            "double-annotation",
+            "automated-validation",
+            "systematic-sampling",
+            "technical-quality-check",
+            "perceptual-evaluation",
+        ];
+        const qcm = projectFormData.qualityControlMethods;
+        if (qcm !== undefined && qcm !== null) {
+            if (!Array.isArray(qcm)) {
+                this.app.addLog("qualityControlMethods must be an array", "warn");
+                return false;
+            }
+            for (const method of qcm) {
+                if (typeof method !== "string" || !allowedQualityControlMethods.includes(method)) {
+                    this.app.addLog(
+                        "qualityControlMethods contains invalid value: " + method,
+                        "warn",
+                    );
+                    return false;
+                }
+            }
         }
 
         return true;
