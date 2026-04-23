@@ -583,6 +583,41 @@ class ApiServer {
             this.fetchProjects(ws, user, msg);
         }
 
+        if (msg.cmd == "adminFetchAllProjects") {
+            await this.adminFetchAllProjects(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "adminSetProjectArchived") {
+            await this.adminSetProjectArchived(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "adminDeleteProject") {
+            await this.adminDeleteProject(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "adminSearchUsers") {
+            await this.adminSearchUsers(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "adminAddProjectMember") {
+            await this.adminAddProjectMember(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "adminRemoveProjectMember") {
+            await this.adminRemoveProjectMember(ws, user, msg);
+            return;
+        }
+
+        if (msg.cmd == "adminUpdateProjectMemberRole") {
+            await this.adminUpdateProjectMemberRole(ws, user, msg);
+            return;
+        }
+
         if (msg.cmd == "cleanupOrphanedSessions") {
             this.cleanupOrphanedSessions(msg.data.projectId).then((result) => {
                 ws.send(
@@ -2326,6 +2361,684 @@ class ApiServer {
                 projects: projects,
             }).toJSON(),
         );
+    }
+
+    isSysAdminUser(user) {
+        return !!(user && user.privileges && user.privileges.sysAdmin === true);
+    }
+
+    sendAdminUnauthorized(ws, msg) {
+        ws.send(
+            new WebSocketMessage(
+                msg.requestId,
+                msg.cmd,
+                {},
+                "Unauthorized",
+                "end",
+                false,
+            ).toJSON(),
+        );
+    }
+
+    sendAdminCommandError(ws, msg, message) {
+        ws.send(
+            new WebSocketMessage(
+                msg.requestId,
+                msg.cmd,
+                {},
+                message,
+                "end",
+                false,
+            ).toJSON(),
+        );
+    }
+
+    countProjectAdmins(project) {
+        if (!project || !Array.isArray(project.members)) {
+            return 0;
+        }
+        return project.members.filter((member) => {
+            return member && member.role === "admin";
+        }).length;
+    }
+
+    getAllowedProjectRoles() {
+        return ["admin", "analyzer", "member"];
+    }
+
+    escapeRegexForSearch(value) {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    formatUserSummary(userInfo) {
+        const username =
+            userInfo && typeof userInfo.username === "string"
+                ? userInfo.username
+                : "";
+        let fullName = "";
+        if (userInfo && typeof userInfo.fullName === "string") {
+            fullName = userInfo.fullName.trim();
+        }
+        if (fullName === "") {
+            const names = [
+                userInfo ? userInfo.firstName : "",
+                userInfo ? userInfo.lastName : "",
+            ].filter((namePart) => {
+                return typeof namePart === "string" && namePart.trim() !== "";
+            });
+            if (names.length > 0) {
+                fullName = names.join(" ");
+            }
+        }
+        if (fullName === "") {
+            fullName = username;
+        }
+        return {
+            username: username,
+            fullName: fullName,
+            email:
+                userInfo && typeof userInfo.email === "string"
+                    ? userInfo.email
+                    : "",
+            eppn:
+                userInfo && typeof userInfo.eppn === "string"
+                    ? userInfo.eppn
+                    : "",
+        };
+    }
+
+    async adminFetchAllProjects(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        try {
+            const Project = this.mongoose.model("Project");
+            const User = this.mongoose.model("User");
+            const projects = await Project.find({}).lean();
+
+            const usernames = new Set();
+            projects.forEach((project) => {
+                if (!Array.isArray(project.members)) {
+                    return;
+                }
+                project.members.forEach((member) => {
+                    if (member && typeof member.username === "string") {
+                        usernames.add(member.username);
+                    }
+                });
+            });
+
+            const usersByUsername = new Map();
+            if (usernames.size > 0) {
+                const users = await User.find({
+                    username: { $in: Array.from(usernames) },
+                })
+                    .select("username fullName firstName lastName email")
+                    .lean();
+                users.forEach((userInfo) => {
+                    usersByUsername.set(userInfo.username, userInfo);
+                });
+            }
+
+            const normalizedProjects = projects.map((project) => {
+                const createdAtValue = project.created_at || project.createdAt;
+                let createdAt = "";
+                if (createdAtValue instanceof Date) {
+                    createdAt = createdAtValue.toISOString();
+                } else if (typeof createdAtValue === "string") {
+                    createdAt = createdAtValue;
+                } else if (
+                    project._id &&
+                    typeof project._id.getTimestamp === "function"
+                ) {
+                    createdAt = project._id.getTimestamp().toISOString();
+                }
+
+                const members = Array.isArray(project.members)
+                    ? project.members.map((member) => {
+                          const username =
+                              member && typeof member.username === "string"
+                                  ? member.username
+                                  : "";
+                          const userInfo = usersByUsername.get(username);
+                          const userSummary = userInfo
+                              ? this.formatUserSummary(userInfo)
+                              : null;
+
+                          return {
+                              username: username,
+                              fullName: userSummary
+                                  ? userSummary.fullName
+                                  : username,
+                              email: userSummary ? userSummary.email : "",
+                              role:
+                                  member && typeof member.role === "string"
+                                      ? member.role
+                                      : "member",
+                          };
+                      })
+                    : [];
+
+                return {
+                    id: project.id,
+                    name: project.name,
+                    archived: project.archived === true,
+                    created_at: createdAt,
+                    members: members,
+                };
+            });
+
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { projects: normalizedProjects },
+                    "",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminFetchAllProjects failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(ws, msg, "Failed to fetch projects");
+        }
+    }
+
+    async adminSetProjectArchived(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const projectIdRaw = msg && msg.data ? msg.data.projectId : null;
+        const projectId =
+            typeof projectIdRaw === "string"
+                ? projectIdRaw
+                : projectIdRaw != null
+                  ? String(projectIdRaw)
+                  : "";
+        const archived = msg && msg.data ? msg.data.archived : null;
+
+        if (projectId.trim() === "") {
+            this.sendAdminCommandError(ws, msg, "Missing projectId");
+            return;
+        }
+        if (typeof archived !== "boolean") {
+            this.sendAdminCommandError(ws, msg, "Invalid archived value");
+            return;
+        }
+
+        try {
+            const Project = this.mongoose.model("Project");
+            const project = await Project.findOne({ id: projectId });
+            if (!project) {
+                this.sendAdminCommandError(ws, msg, "Project not found");
+                return;
+            }
+
+            project.archived = archived;
+            project.markModified("archived");
+            await project.save();
+
+            if (archived) {
+                const runningSessions =
+                    await this.app.sessMan.getContainerSessionsByProjectId(
+                        projectId,
+                    );
+                for (const runningSession of runningSessions) {
+                    await this.app.sessMan.deleteSession(
+                        runningSession.accessCode,
+                    );
+                }
+            }
+
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { projectId: projectId, archived: archived },
+                    archived ? "Project archived" : "Project unarchived",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminSetProjectArchived failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(ws, msg, "Failed to update project");
+        }
+    }
+
+    async adminDeleteProject(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const projectIdRaw = msg && msg.data ? msg.data.projectId : null;
+        const projectId =
+            typeof projectIdRaw === "string"
+                ? projectIdRaw
+                : projectIdRaw != null
+                  ? String(projectIdRaw)
+                  : "";
+        if (projectId.trim() === "") {
+            this.sendAdminCommandError(ws, msg, "Missing projectId");
+            return;
+        }
+
+        try {
+            const Project = this.mongoose.model("Project");
+            const project = await Project.findOne({ id: projectId });
+            if (!project) {
+                this.sendAdminCommandError(ws, msg, "Project not found");
+                return;
+            }
+
+            const sessions =
+                await this.app.sessMan.getContainerSessionsByProjectId(
+                    projectId,
+                );
+            for (const session of sessions) {
+                await this.app.sessMan.deleteSession(session.accessCode);
+            }
+
+            await Project.deleteOne({ id: projectId });
+
+            safePathComponent(projectId, "projectId");
+            const repoPath = safeJoinedPath("/repositories", projectId);
+            if (fs.existsSync(repoPath) && !nativeSync(repoPath)) {
+                throw new Error("Could not delete project files");
+            }
+
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { projectId: projectId },
+                    "Project deleted",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminDeleteProject failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(ws, msg, "Failed to delete project");
+        }
+    }
+
+    async adminSearchUsers(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const searchValueRaw =
+            msg && msg.data && typeof msg.data.searchValue === "string"
+                ? msg.data.searchValue.trim()
+                : "";
+        const limitRaw = msg && msg.data ? msg.data.limit : null;
+        let limit = Number.parseInt(limitRaw, 10);
+        if (Number.isNaN(limit)) {
+            limit = 25;
+        }
+        limit = Math.max(1, Math.min(limit, 100));
+
+        try {
+            const User = this.mongoose.model("User");
+            let query = {};
+            if (searchValueRaw !== "") {
+                const escapedSearch =
+                    this.escapeRegexForSearch(searchValueRaw);
+                query = {
+                    $or: [
+                        { username: { $regex: escapedSearch, $options: "i" } },
+                        { fullName: { $regex: escapedSearch, $options: "i" } },
+                        { firstName: { $regex: escapedSearch, $options: "i" } },
+                        { lastName: { $regex: escapedSearch, $options: "i" } },
+                        { email: { $regex: escapedSearch, $options: "i" } },
+                        { eppn: { $regex: escapedSearch, $options: "i" } },
+                    ],
+                };
+            }
+
+            const users = await User.find(query)
+                .select("username fullName firstName lastName email eppn")
+                .limit(limit)
+                .lean();
+            const resultUsers = users.map((userInfo) => {
+                return this.formatUserSummary(userInfo);
+            });
+
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { users: resultUsers },
+                    "",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminSearchUsers failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(ws, msg, "Failed to search users");
+        }
+    }
+
+    async adminAddProjectMember(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const projectIdRaw = msg && msg.data ? msg.data.projectId : null;
+        const projectId =
+            typeof projectIdRaw === "string"
+                ? projectIdRaw
+                : projectIdRaw != null
+                  ? String(projectIdRaw)
+                  : "";
+        const username =
+            msg &&
+            msg.data &&
+            typeof msg.data.username === "string" &&
+            msg.data.username.trim() !== ""
+                ? msg.data.username.trim()
+                : "";
+
+        if (projectId.trim() === "") {
+            this.sendAdminCommandError(ws, msg, "Missing projectId");
+            return;
+        }
+        if (username === "") {
+            this.sendAdminCommandError(ws, msg, "Missing username");
+            return;
+        }
+
+        try {
+            const Project = this.mongoose.model("Project");
+            const User = this.mongoose.model("User");
+            const project = await Project.findOne({ id: projectId });
+            if (!project) {
+                this.sendAdminCommandError(ws, msg, "Project not found");
+                return;
+            }
+
+            const userInfo = await User.findOne({ username: username })
+                .select("username fullName firstName lastName email eppn")
+                .lean();
+            if (!userInfo) {
+                this.sendAdminCommandError(ws, msg, "User not found");
+                return;
+            }
+
+            if (!Array.isArray(project.members)) {
+                project.members = [];
+            }
+
+            const existingMember = project.members.find((member) => {
+                return member && member.username === username;
+            });
+            if (existingMember) {
+                this.sendAdminCommandError(
+                    ws,
+                    msg,
+                    "User is already a member of this project",
+                );
+                return;
+            }
+
+            project.members.push({
+                username: username,
+                role: "member",
+            });
+            project.markModified("members");
+            await project.save();
+
+            const userSummary = this.formatUserSummary(userInfo);
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {
+                        projectId: projectId,
+                        member: {
+                            username: userSummary.username,
+                            fullName: userSummary.fullName,
+                            email: userSummary.email,
+                            eppn: userSummary.eppn,
+                            role: "member",
+                        },
+                    },
+                    "User added to project",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminAddProjectMember failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(ws, msg, "Failed to add project member");
+        }
+    }
+
+    async adminRemoveProjectMember(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const projectIdRaw = msg && msg.data ? msg.data.projectId : null;
+        const projectId =
+            typeof projectIdRaw === "string"
+                ? projectIdRaw
+                : projectIdRaw != null
+                  ? String(projectIdRaw)
+                  : "";
+        const username =
+            msg &&
+            msg.data &&
+            typeof msg.data.username === "string" &&
+            msg.data.username.trim() !== ""
+                ? msg.data.username.trim()
+                : "";
+
+        if (projectId.trim() === "") {
+            this.sendAdminCommandError(ws, msg, "Missing projectId");
+            return;
+        }
+        if (username === "") {
+            this.sendAdminCommandError(ws, msg, "Missing username");
+            return;
+        }
+
+        try {
+            const Project = this.mongoose.model("Project");
+            const project = await Project.findOne({ id: projectId });
+            if (!project) {
+                this.sendAdminCommandError(ws, msg, "Project not found");
+                return;
+            }
+
+            if (!Array.isArray(project.members)) {
+                project.members = [];
+            }
+
+            const memberToRemove = project.members.find((member) => {
+                return member && member.username === username;
+            });
+            if (!memberToRemove) {
+                this.sendAdminCommandError(
+                    ws,
+                    msg,
+                    "User is not a member of this project",
+                );
+                return;
+            }
+
+            const adminCount = this.countProjectAdmins(project);
+            if (memberToRemove.role === "admin" && adminCount <= 1) {
+                this.sendAdminCommandError(
+                    ws,
+                    msg,
+                    "Cannot remove the last admin from a project",
+                );
+                return;
+            }
+
+            project.members = project.members.filter((member) => {
+                return !(member && member.username === username);
+            });
+            project.markModified("members");
+            await project.save();
+
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { projectId: projectId, username: username },
+                    "User removed from project",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminRemoveProjectMember failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "Failed to remove project member",
+            );
+        }
+    }
+
+    async adminUpdateProjectMemberRole(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const projectIdRaw = msg && msg.data ? msg.data.projectId : null;
+        const projectId =
+            typeof projectIdRaw === "string"
+                ? projectIdRaw
+                : projectIdRaw != null
+                  ? String(projectIdRaw)
+                  : "";
+        const username =
+            msg &&
+            msg.data &&
+            typeof msg.data.username === "string" &&
+            msg.data.username.trim() !== ""
+                ? msg.data.username.trim()
+                : "";
+        const roleRaw =
+            msg &&
+            msg.data &&
+            typeof msg.data.role === "string" &&
+            msg.data.role.trim() !== ""
+                ? msg.data.role.trim().toLowerCase()
+                : "";
+
+        if (projectId.trim() === "") {
+            this.sendAdminCommandError(ws, msg, "Missing projectId");
+            return;
+        }
+        if (username === "") {
+            this.sendAdminCommandError(ws, msg, "Missing username");
+            return;
+        }
+        if (!this.getAllowedProjectRoles().includes(roleRaw)) {
+            this.sendAdminCommandError(ws, msg, "Invalid role value");
+            return;
+        }
+
+        try {
+            const Project = this.mongoose.model("Project");
+            const project = await Project.findOne({ id: projectId });
+            if (!project) {
+                this.sendAdminCommandError(ws, msg, "Project not found");
+                return;
+            }
+
+            if (!Array.isArray(project.members)) {
+                project.members = [];
+            }
+
+            const memberToUpdate = project.members.find((member) => {
+                return member && member.username === username;
+            });
+            if (!memberToUpdate) {
+                this.sendAdminCommandError(
+                    ws,
+                    msg,
+                    "User is not a member of this project",
+                );
+                return;
+            }
+
+            const adminCount = this.countProjectAdmins(project);
+            if (
+                memberToUpdate.role === "admin" &&
+                roleRaw !== "admin" &&
+                adminCount <= 1
+            ) {
+                this.sendAdminCommandError(
+                    ws,
+                    msg,
+                    "Cannot remove the last admin from a project",
+                );
+                return;
+            }
+
+            memberToUpdate.role = roleRaw;
+            project.markModified("members");
+            await project.save();
+
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {
+                        projectId: projectId,
+                        username: username,
+                        role: roleRaw,
+                    },
+                    "Project member role updated",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminUpdateProjectMemberRole failed: " + error.message,
+                "error",
+            );
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "Failed to update project member role",
+            );
+        }
     }
 
     async fetchProject(projectId) {
