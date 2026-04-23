@@ -144,6 +144,8 @@ class WhisperService {
             // The socket only appears once the container and model are ready.
             let backoff = 10 * 1000; // start at 10s
             const maxBackoff = 300 * 1000; // cap at 5min
+            const maxAttempts = 10;
+            let attempts = 0;
             while (!this.whisperReady) {
                 try {
                     const health = await this.whisperRequest("GET", "/health");
@@ -161,6 +163,7 @@ class WhisperService {
                         this.whisperReady = true;
                         this.currentPackage = "multilingual";
                         this.app.addLog(
+                            
                             "WhisperVault connected (model idle-unloaded, will auto-reload on first transcription).",
                             "info",
                         );
@@ -168,9 +171,17 @@ class WhisperService {
                         throw new Error("Health check returned unexpected status: " + JSON.stringify(health));
                     }
                 } catch (err) {
+                    attempts++;
+                    if (attempts >= maxAttempts) {
+                        this.app.addLog(
+                            `WhisperVault not available after ${attempts} attempts. Giving up. Transcription will be unavailable.`,
+                            "error",
+                        );
+                        break;
+                    }
                     const briefErr = (err?.message || String(err)).split("\n")[0];
                     this.app.addLog(
-                        `WhisperVault not ready: ${briefErr}. Retrying in ${Math.round(backoff / 1000)}s.`,
+                        `WhisperVault not ready (attempt ${attempts}/${maxAttempts}): ${briefErr}. Retrying in ${Math.round(backoff / 1000)}s.`,
                         "warn",
                     );
                     await new Promise((resolve) => setTimeout(resolve, backoff));
