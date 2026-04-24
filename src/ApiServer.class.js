@@ -27,7 +27,6 @@ const {
     QUALITY_CONTROL_METHOD_IDS,
     formatVispMetadataJson,
     normalizeProjectMetadata,
-    parseLegacyVispMetadataMarkdown,
     parseVispMetadataJson,
 } = require("./vispMetadata");
 const { safePathComponent, safeJoinedPath, safeMountSource } = require("./pathSecurity");
@@ -320,16 +319,6 @@ class ApiServer {
         return safeJoinedPath(projectRepoDir, "VISP.json");
     }
 
-    getLegacyProjectMetadataFilePath(projectId) {
-        const normalizedProjectId =
-            this.normalizeProjectIdForFilesystem(projectId);
-        const projectRepoDir = safeJoinedPath(
-            "/repositories",
-            normalizedProjectId,
-        );
-        return safeJoinedPath(projectRepoDir, "VISP.md");
-    }
-
     getProjectEmuDbMetadataFilePath(projectId) {
         const normalizedProjectId =
             this.normalizeProjectIdForFilesystem(projectId);
@@ -357,23 +346,13 @@ class ApiServer {
     async writeProjectMetadataFile(projectId, metadata = {}, overwrite = true) {
         try {
             const vispMetadataPath = this.getProjectMetadataFilePath(projectId);
-            const legacyVispMetadataPath =
-                this.getLegacyProjectMetadataFilePath(projectId);
-            if (
-                !overwrite &&
-                (fs.existsSync(vispMetadataPath) ||
-                    fs.existsSync(legacyVispMetadataPath))
-            ) {
+            if (!overwrite && fs.existsSync(vispMetadataPath)) {
                 return true;
             }
             const metadataJson = formatVispMetadataJson(
                 this.getProjectMetadataFromPayload(metadata),
             );
             await fs.outputFile(vispMetadataPath, metadataJson, "utf8");
-
-            if (fs.existsSync(legacyVispMetadataPath)) {
-                await fs.remove(legacyVispMetadataPath);
-            }
             return true;
         } catch (error) {
             this.app.addLog(
@@ -429,12 +408,8 @@ class ApiServer {
         let metadataPathForRecovery = null;
         try {
             const vispMetadataPath = this.getProjectMetadataFilePath(projectId);
-            const legacyVispMetadataPath =
-                this.getLegacyProjectMetadataFilePath(projectId);
-            const hasVispJson = fs.existsSync(vispMetadataPath);
-            const hasLegacyVispMarkdown = fs.existsSync(legacyVispMetadataPath);
 
-            if (!hasVispJson && !hasLegacyVispMarkdown) {
+            if (!fs.existsSync(vispMetadataPath)) {
                 await this.writeProjectMetadataFile(
                     projectId,
                     normalizedFallback,
@@ -443,96 +418,23 @@ class ApiServer {
                 return normalizedFallback;
             }
 
-            if (hasVispJson) {
-                metadataPathForRecovery = vispMetadataPath;
-                const jsonContent = await fs.readFile(vispMetadataPath, "utf8");
-                const jsonParseResult = parseVispMetadataJson(jsonContent);
-                if (jsonParseResult.ok) {
-                    return jsonParseResult.metadata;
-                }
-
-                const legacyParseFromJsonFile =
-                    parseLegacyVispMetadataMarkdown(jsonContent);
-                if (legacyParseFromJsonFile.ok) {
-                    await this.writeProjectMetadataFile(
-                        projectId,
-                        legacyParseFromJsonFile.metadata,
-                        true,
-                    );
-                    this.app.addLog(
-                        `Recovered VISP.json from legacy markdown content for project ${projectId}`,
-                        "warn",
-                    );
-                    return legacyParseFromJsonFile.metadata;
-                }
-
-                if (hasLegacyVispMarkdown) {
-                    const legacyMarkdown = await fs.readFile(
-                        legacyVispMetadataPath,
-                        "utf8",
-                    );
-                    const legacyParseResult =
-                        parseLegacyVispMetadataMarkdown(legacyMarkdown);
-                    if (legacyParseResult.ok) {
-                        await this.writeProjectMetadataFile(
-                            projectId,
-                            legacyParseResult.metadata,
-                            true,
-                        );
-                        this.app.addLog(
-                            `Recovered VISP.json from VISP.md for project ${projectId}`,
-                            "warn",
-                        );
-                        return legacyParseResult.metadata;
-                    }
-                }
-
-                this.app.addLog(
-                    `VISP metadata unreadable for project ${projectId} (${jsonParseResult.reason}), archiving and regenerating`,
-                    "warn",
-                );
-                const unreadablePath =
-                    await this.moveUnreadableProjectMetadataFile(
-                        vispMetadataPath,
-                    );
-                this.app.addLog(
-                    `Unreadable VISP metadata moved to ${unreadablePath}`,
-                    "warn",
-                );
-                await this.writeProjectMetadataFile(
-                    projectId,
-                    normalizedFallback,
-                    true,
-                );
-                return normalizedFallback;
-            }
-
-            metadataPathForRecovery = legacyVispMetadataPath;
-            const legacyMarkdown = await fs.readFile(legacyVispMetadataPath, "utf8");
-            const legacyParseResult =
-                parseLegacyVispMetadataMarkdown(legacyMarkdown);
-            if (legacyParseResult.ok) {
-                await this.writeProjectMetadataFile(
-                    projectId,
-                    legacyParseResult.metadata,
-                    true,
-                );
-                this.app.addLog(
-                    `Migrated VISP.md to VISP.json for project ${projectId}`,
-                    "info",
-                );
-                return legacyParseResult.metadata;
+            metadataPathForRecovery = vispMetadataPath;
+            const jsonContent = await fs.readFile(vispMetadataPath, "utf8");
+            const jsonParseResult = parseVispMetadataJson(jsonContent);
+            if (jsonParseResult.ok) {
+                return jsonParseResult.metadata;
             }
 
             this.app.addLog(
-                `Legacy VISP.md unreadable for project ${projectId} (${legacyParseResult.reason}), archiving and regenerating`,
+                `VISP metadata unreadable for project ${projectId} (${jsonParseResult.reason}), archiving and regenerating`,
                 "warn",
             );
-            const unreadablePath = await this.moveUnreadableProjectMetadataFile(
-                legacyVispMetadataPath,
-            );
+            const unreadablePath =
+                await this.moveUnreadableProjectMetadataFile(
+                    vispMetadataPath,
+                );
             this.app.addLog(
-                `Unreadable legacy VISP metadata moved to ${unreadablePath}`,
+                `Unreadable VISP metadata moved to ${unreadablePath}`,
                 "warn",
             );
             await this.writeProjectMetadataFile(
