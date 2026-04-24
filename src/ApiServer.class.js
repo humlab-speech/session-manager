@@ -23,6 +23,13 @@ const { execSync } = require("child_process");
 const WhisperService = require("./WhisperService.class");
 const AdmZip = require("adm-zip");
 const { parseFile } = require("music-metadata");
+const {
+    QUALITY_CONTROL_METHOD_IDS,
+    formatVispMetadataJson,
+    normalizeProjectMetadata,
+    parseLegacyVispMetadataMarkdown,
+    parseVispMetadataJson,
+} = require("./vispMetadata");
 const { safePathComponent, safeJoinedPath, safeMountSource } = require("./pathSecurity");
 
 class ApiServer {
@@ -86,6 +93,8 @@ class ApiServer {
             financers: { type: String, default: "" },
             ethicsReviewDnr: { type: String, default: "" },
             qualityControlMethods: { type: Array, default: [] },
+            spokenLanguage: { type: String, default: "" },
+            recordingDevice: { type: String, default: "" },
         });
         mongoose.model("Project", this.models.Project);
 
@@ -159,6 +168,438 @@ class ApiServer {
             readAt: Date,
         });
         mongoose.model("Notification", this.models.Notification);
+    }
+
+    getProjectMetadataFromPayload(projectData = {}) {
+        return normalizeProjectMetadata({
+            description: projectData.description,
+            financers: projectData.financers,
+            ethicsReviewDnr: projectData.ethicsReviewDnr,
+            qualityControlMethods: projectData.qualityControlMethods,
+        });
+    }
+
+    normalizeOptionalShortText(value, maxLength = 200) {
+        if (value === null || typeof value === "undefined") {
+            return "";
+        }
+        const normalizedValue = String(value).trim();
+        if (normalizedValue.length === 0) {
+            return "";
+        }
+        return normalizedValue.substring(0, maxLength);
+    }
+
+    getProjectWideMetadataFromPayload(projectData = {}) {
+        return {
+            spokenLanguage: this.normalizeOptionalShortText(
+                projectData.spokenLanguage,
+            ),
+            recordingDevice: this.normalizeOptionalShortText(
+                projectData.recordingDevice,
+            ),
+        };
+    }
+
+    parseWgs84Coordinates(rawValue) {
+        if (rawValue === null || typeof rawValue === "undefined") {
+            return null;
+        }
+
+        let latitude = null;
+        let longitude = null;
+
+        if (typeof rawValue === "string") {
+            const trimmed = rawValue.trim();
+            if (!trimmed) {
+                return null;
+            }
+            const match = trimmed.match(
+                /^\s*(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)\s*$/,
+            );
+            if (!match) {
+                return null;
+            }
+            latitude = Number(match[1]);
+            longitude = Number(match[2]);
+        } else if (Array.isArray(rawValue) && rawValue.length >= 2) {
+            latitude = Number(rawValue[0]);
+            longitude = Number(rawValue[1]);
+        } else if (typeof rawValue === "object") {
+            latitude = Number(
+                rawValue.lat ?? rawValue.latitude ?? rawValue.Latitude,
+            );
+            longitude = Number(
+                rawValue.lng ??
+                    rawValue.lon ??
+                    rawValue.longitude ??
+                    rawValue.Longitude,
+            );
+        }
+
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+            return null;
+        }
+        if (latitude < -90 || latitude > 90) {
+            return null;
+        }
+        if (longitude < -180 || longitude > 180) {
+            return null;
+        }
+
+        return {
+            latitude: Number(latitude.toFixed(6)),
+            longitude: Number(longitude.toFixed(6)),
+        };
+    }
+
+    normalizeSessionMetadataFromPayload(session = {}) {
+        const normalized = {
+            timeOfRecording: null,
+            placeOfRecording: null,
+        };
+
+        const rawTimeOfRecording =
+            session.timeOfRecording ?? session.TimeOfRecording;
+        if (
+            rawTimeOfRecording !== null &&
+            typeof rawTimeOfRecording !== "undefined" &&
+            String(rawTimeOfRecording).trim() !== ""
+        ) {
+            const parsedDate = new Date(String(rawTimeOfRecording).trim());
+            if (Number.isNaN(parsedDate.getTime())) {
+                return {
+                    ok: false,
+                    reason:
+                        "TimeOfRecording must be a valid date/time value.",
+                };
+            }
+            normalized.timeOfRecording = parsedDate.toISOString();
+        }
+
+        const rawPlaceOfRecording =
+            session.placeOfRecording ?? session.PlaceOfRecording;
+        if (
+            rawPlaceOfRecording !== null &&
+            typeof rawPlaceOfRecording !== "undefined" &&
+            String(rawPlaceOfRecording).trim() !== ""
+        ) {
+            const coords = this.parseWgs84Coordinates(rawPlaceOfRecording);
+            if (!coords) {
+                return {
+                    ok: false,
+                    reason:
+                        "PlaceOfRecording must be valid WGS84 coordinates (lat, lon).",
+                };
+            }
+            normalized.placeOfRecording = `${coords.latitude}, ${coords.longitude}`;
+        }
+
+        return {
+            ok: true,
+            value: normalized,
+        };
+    }
+
+    normalizeProjectIdForFilesystem(projectId) {
+        if (projectId === null || typeof projectId === "undefined") {
+            throw new Error("projectId is missing");
+        }
+        const normalizedProjectId = String(projectId).trim();
+        safePathComponent(normalizedProjectId, "projectId");
+        return normalizedProjectId;
+    }
+
+    getProjectMetadataFilePath(projectId) {
+        const normalizedProjectId =
+            this.normalizeProjectIdForFilesystem(projectId);
+        const projectRepoDir = safeJoinedPath(
+            "/repositories",
+            normalizedProjectId,
+        );
+        return safeJoinedPath(projectRepoDir, "VISP.json");
+    }
+
+    getLegacyProjectMetadataFilePath(projectId) {
+        const normalizedProjectId =
+            this.normalizeProjectIdForFilesystem(projectId);
+        const projectRepoDir = safeJoinedPath(
+            "/repositories",
+            normalizedProjectId,
+        );
+        return safeJoinedPath(projectRepoDir, "VISP.md");
+    }
+
+    getProjectEmuDbMetadataFilePath(projectId) {
+        const normalizedProjectId =
+            this.normalizeProjectIdForFilesystem(projectId);
+        const emuDbDir = safeJoinedPath(
+            "/repositories",
+            normalizedProjectId,
+            "Data",
+            "VISP_emuDB",
+        );
+        return safeJoinedPath(emuDbDir, "VISP.json");
+    }
+
+    projectMetadataChanged(currentMetadata = {}, nextMetadata = {}) {
+        const current = this.getProjectMetadataFromPayload(currentMetadata);
+        const next = this.getProjectMetadataFromPayload(nextMetadata);
+        return (
+            current.description !== next.description ||
+            current.financers !== next.financers ||
+            current.ethicsReviewDnr !== next.ethicsReviewDnr ||
+            JSON.stringify(current.qualityControlMethods) !==
+                JSON.stringify(next.qualityControlMethods)
+        );
+    }
+
+    async writeProjectMetadataFile(projectId, metadata = {}, overwrite = true) {
+        try {
+            const vispMetadataPath = this.getProjectMetadataFilePath(projectId);
+            const legacyVispMetadataPath =
+                this.getLegacyProjectMetadataFilePath(projectId);
+            if (
+                !overwrite &&
+                (fs.existsSync(vispMetadataPath) ||
+                    fs.existsSync(legacyVispMetadataPath))
+            ) {
+                return true;
+            }
+            const metadataJson = formatVispMetadataJson(
+                this.getProjectMetadataFromPayload(metadata),
+            );
+            await fs.outputFile(vispMetadataPath, metadataJson, "utf8");
+
+            if (fs.existsSync(legacyVispMetadataPath)) {
+                await fs.remove(legacyVispMetadataPath);
+            }
+            return true;
+        } catch (error) {
+            this.app.addLog(
+                `Failed writing VISP metadata for project ${projectId}: ${error.message}`,
+                "error",
+            );
+            return false;
+        }
+    }
+
+    async writeProjectEmuDbMetadataFile(projectId, metadata = {}) {
+        try {
+            const emuDbMetadataPath =
+                this.getProjectEmuDbMetadataFilePath(projectId);
+            await fs.ensureDir(path.dirname(emuDbMetadataPath));
+
+            const projectMetadata =
+                this.getProjectWideMetadataFromPayload(metadata);
+            const payload = {
+                SpokenLanguage: projectMetadata.spokenLanguage,
+                RecordingDevice: projectMetadata.recordingDevice,
+            };
+            await fs.outputFile(
+                emuDbMetadataPath,
+                `${JSON.stringify(payload, null, 2)}\n`,
+                "utf8",
+            );
+            return true;
+        } catch (error) {
+            this.app.addLog(
+                `Failed writing VISP.json for project ${projectId}: ${error.message}`,
+                "error",
+            );
+            return false;
+        }
+    }
+
+    async moveUnreadableProjectMetadataFile(vispMetadataPath) {
+        let unreadablePath = `${vispMetadataPath}.unreadable`;
+        let counter = 1;
+        while (fs.existsSync(unreadablePath)) {
+            unreadablePath = `${vispMetadataPath}.unreadable.${counter}`;
+            counter += 1;
+        }
+        await fs.move(vispMetadataPath, unreadablePath);
+        return unreadablePath;
+    }
+
+    async readProjectMetadataFromFile(projectId, fallbackMetadata = {}) {
+        const normalizedFallback = this.getProjectMetadataFromPayload(
+            fallbackMetadata,
+        );
+        let metadataPathForRecovery = null;
+        try {
+            const vispMetadataPath = this.getProjectMetadataFilePath(projectId);
+            const legacyVispMetadataPath =
+                this.getLegacyProjectMetadataFilePath(projectId);
+            const hasVispJson = fs.existsSync(vispMetadataPath);
+            const hasLegacyVispMarkdown = fs.existsSync(legacyVispMetadataPath);
+
+            if (!hasVispJson && !hasLegacyVispMarkdown) {
+                await this.writeProjectMetadataFile(
+                    projectId,
+                    normalizedFallback,
+                    true,
+                );
+                return normalizedFallback;
+            }
+
+            if (hasVispJson) {
+                metadataPathForRecovery = vispMetadataPath;
+                const jsonContent = await fs.readFile(vispMetadataPath, "utf8");
+                const jsonParseResult = parseVispMetadataJson(jsonContent);
+                if (jsonParseResult.ok) {
+                    return jsonParseResult.metadata;
+                }
+
+                const legacyParseFromJsonFile =
+                    parseLegacyVispMetadataMarkdown(jsonContent);
+                if (legacyParseFromJsonFile.ok) {
+                    await this.writeProjectMetadataFile(
+                        projectId,
+                        legacyParseFromJsonFile.metadata,
+                        true,
+                    );
+                    this.app.addLog(
+                        `Recovered VISP.json from legacy markdown content for project ${projectId}`,
+                        "warn",
+                    );
+                    return legacyParseFromJsonFile.metadata;
+                }
+
+                if (hasLegacyVispMarkdown) {
+                    const legacyMarkdown = await fs.readFile(
+                        legacyVispMetadataPath,
+                        "utf8",
+                    );
+                    const legacyParseResult =
+                        parseLegacyVispMetadataMarkdown(legacyMarkdown);
+                    if (legacyParseResult.ok) {
+                        await this.writeProjectMetadataFile(
+                            projectId,
+                            legacyParseResult.metadata,
+                            true,
+                        );
+                        this.app.addLog(
+                            `Recovered VISP.json from VISP.md for project ${projectId}`,
+                            "warn",
+                        );
+                        return legacyParseResult.metadata;
+                    }
+                }
+
+                this.app.addLog(
+                    `VISP metadata unreadable for project ${projectId} (${jsonParseResult.reason}), archiving and regenerating`,
+                    "warn",
+                );
+                const unreadablePath =
+                    await this.moveUnreadableProjectMetadataFile(
+                        vispMetadataPath,
+                    );
+                this.app.addLog(
+                    `Unreadable VISP metadata moved to ${unreadablePath}`,
+                    "warn",
+                );
+                await this.writeProjectMetadataFile(
+                    projectId,
+                    normalizedFallback,
+                    true,
+                );
+                return normalizedFallback;
+            }
+
+            metadataPathForRecovery = legacyVispMetadataPath;
+            const legacyMarkdown = await fs.readFile(legacyVispMetadataPath, "utf8");
+            const legacyParseResult =
+                parseLegacyVispMetadataMarkdown(legacyMarkdown);
+            if (legacyParseResult.ok) {
+                await this.writeProjectMetadataFile(
+                    projectId,
+                    legacyParseResult.metadata,
+                    true,
+                );
+                this.app.addLog(
+                    `Migrated VISP.md to VISP.json for project ${projectId}`,
+                    "info",
+                );
+                return legacyParseResult.metadata;
+            }
+
+            this.app.addLog(
+                `Legacy VISP.md unreadable for project ${projectId} (${legacyParseResult.reason}), archiving and regenerating`,
+                "warn",
+            );
+            const unreadablePath = await this.moveUnreadableProjectMetadataFile(
+                legacyVispMetadataPath,
+            );
+            this.app.addLog(
+                `Unreadable legacy VISP metadata moved to ${unreadablePath}`,
+                "warn",
+            );
+            await this.writeProjectMetadataFile(
+                projectId,
+                normalizedFallback,
+                true,
+            );
+            return normalizedFallback;
+        } catch (error) {
+            this.app.addLog(
+                `Failed reading VISP metadata for project ${projectId}: ${error.message}`,
+                "error",
+            );
+            if (
+                metadataPathForRecovery &&
+                fs.existsSync(metadataPathForRecovery)
+            ) {
+                try {
+                    const unreadablePath =
+                        await this.moveUnreadableProjectMetadataFile(
+                            metadataPathForRecovery,
+                        );
+                    this.app.addLog(
+                        `Moved unreadable VISP metadata to ${unreadablePath}`,
+                        "warn",
+                    );
+                } catch (moveError) {
+                    this.app.addLog(
+                        `Failed moving unreadable VISP metadata for project ${projectId}: ${moveError.message}`,
+                        "error",
+                    );
+                }
+            }
+            await this.writeProjectMetadataFile(
+                projectId,
+                normalizedFallback,
+                true,
+            );
+            return normalizedFallback;
+        }
+    }
+
+    async syncProjectMetadataWithFile(project) {
+        const fallbackMetadata = this.getProjectMetadataFromPayload(project);
+        const fileMetadata = await this.readProjectMetadataFromFile(
+            project.id,
+            fallbackMetadata,
+        );
+
+        project.description = fileMetadata.description;
+        project.financers = fileMetadata.financers;
+        project.ethicsReviewDnr = fileMetadata.ethicsReviewDnr;
+        project.qualityControlMethods = fileMetadata.qualityControlMethods;
+
+        if (this.projectMetadataChanged(fallbackMetadata, fileMetadata)) {
+            await this.mongoose.model("Project").updateOne(
+                { id: project.id },
+                {
+                    $set: {
+                        description: fileMetadata.description,
+                        financers: fileMetadata.financers,
+                        ethicsReviewDnr: fileMetadata.ethicsReviewDnr,
+                        qualityControlMethods: fileMetadata.qualityControlMethods,
+                    },
+                },
+            );
+        }
     }
 
     async fetchMongoUser(eppn) {
@@ -2485,18 +2926,20 @@ class ApiServer {
             if (typeof project.archived === "undefined") {
                 project.archived = false;
             }
-            if (typeof project.description !== "string") {
-                project.description = "";
+            try {
+                await this.syncProjectMetadataWithFile(project);
+            } catch (metadataError) {
+                this.app.addLog(
+                    `Failed syncing VISP metadata for project ${project.id}: ${metadataError.message}`,
+                    "error",
+                );
+                const fallback = this.getProjectMetadataFromPayload(project);
+                project.description = fallback.description;
+                project.financers = fallback.financers;
+                project.ethicsReviewDnr = fallback.ethicsReviewDnr;
+                project.qualityControlMethods = fallback.qualityControlMethods;
             }
-            if (typeof project.financers !== "string") {
-                project.financers = "";
-            }
-            if (typeof project.ethicsReviewDnr !== "string") {
-                project.ethicsReviewDnr = "";
-            }
-            if (!Array.isArray(project.qualityControlMethods)) {
-                project.qualityControlMethods = [];
-            }
+
             for (let key2 in project.members) {
                 const user = new this.mongoose.model("User");
                 let userInfo = await user.findOne({
@@ -4433,6 +4876,12 @@ class ApiServer {
         let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
+        const projectMetadata = this.getProjectMetadataFromPayload(
+            projectFormData,
+        );
+        const projectWideMetadata = this.getProjectWideMetadataFromPayload(
+            projectFormData,
+        );
         //projectFormData.id = nanoid.customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
         projectFormData.id = nanoid.nanoid(21);
         /*
@@ -4553,13 +5002,21 @@ session-manager_1    | }
                 },
             ],
             docs: projectFormData.docFiles,
-            description: typeof projectFormData.description === "string" ? projectFormData.description : "",
-            financers: typeof projectFormData.financers === "string" ? projectFormData.financers : "",
-            ethicsReviewDnr: typeof projectFormData.ethicsReviewDnr === "string" ? projectFormData.ethicsReviewDnr : "",
-            qualityControlMethods: Array.isArray(projectFormData.qualityControlMethods) ? projectFormData.qualityControlMethods : [],
+            description: projectMetadata.description,
+            financers: projectMetadata.financers,
+            ethicsReviewDnr: projectMetadata.ethicsReviewDnr,
+            qualityControlMethods: projectMetadata.qualityControlMethods,
+            spokenLanguage: projectWideMetadata.spokenLanguage,
+            recordingDevice: projectWideMetadata.recordingDevice,
         });
 
         mongoProject.save();
+
+        await this.writeProjectMetadataFile(
+            projectFormData.id,
+            projectMetadata,
+            true,
+        );
 
         await this.saveSessionsMongo(projectFormData);
 
@@ -4675,6 +5132,9 @@ session-manager_1    | }
         let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
+        const projectMetadata = this.getProjectMetadataFromPayload(
+            projectFormData,
+        );
 
         this.app.addLog("Updating project");
         if (!this.validateProjectForm(projectFormData)) {
@@ -4692,6 +5152,11 @@ session-manager_1    | }
             }),
         );
         await this.saveAnnotationLevelsMongo(projectFormData);
+        await this.writeProjectMetadataFile(
+            projectFormData.id,
+            projectMetadata,
+            true,
+        );
         await this.saveSessionsMongo(projectFormData);
         //await this.saveSprSession(projectFormData);
 
@@ -4755,12 +5220,21 @@ session-manager_1    | }
             this.app.addLog("Could not find project in MongoDB", "error");
             return;
         }
+        const projectMetadata = this.getProjectMetadataFromPayload(
+            projectFormData,
+        );
+        const projectWideMetadata = this.getProjectWideMetadataFromPayload(
+            projectFormData,
+        );
         mongoProject.annotationLevels = projectFormData.annotLevels;
         mongoProject.annotationLinks = projectFormData.annotLevelLinks;
-        mongoProject.description = typeof projectFormData.description === "string" ? projectFormData.description : "";
-        mongoProject.financers = typeof projectFormData.financers === "string" ? projectFormData.financers : "";
-        mongoProject.ethicsReviewDnr = typeof projectFormData.ethicsReviewDnr === "string" ? projectFormData.ethicsReviewDnr : "";
-        mongoProject.qualityControlMethods = Array.isArray(projectFormData.qualityControlMethods) ? projectFormData.qualityControlMethods : [];
+        mongoProject.description = projectMetadata.description;
+        mongoProject.financers = projectMetadata.financers;
+        mongoProject.ethicsReviewDnr = projectMetadata.ethicsReviewDnr;
+        mongoProject.qualityControlMethods =
+            projectMetadata.qualityControlMethods;
+        mongoProject.spokenLanguage = projectWideMetadata.spokenLanguage;
+        mongoProject.recordingDevice = projectWideMetadata.recordingDevice;
         mongoProject.markModified("annotationLevels");
         mongoProject.markModified("annotationLinks");
         mongoProject.markModified("qualityControlMethods");
@@ -4803,6 +5277,8 @@ session-manager_1    | }
                     name: formSession.name,
                     speakerGender: formSession.speakerGender,
                     speakerAge: formSession.speakerAge,
+                    timeOfRecording: formSession.timeOfRecording,
+                    placeOfRecording: formSession.placeOfRecording,
                     dataSource: formSession.dataSource,
                     sessionScript: formSession.sessionScript,
                     sessionId: formSession.sessionId,
@@ -4827,6 +5303,8 @@ session-manager_1    | }
             );
             mongoSession.speakerGender = formSession.speakerGender;
             mongoSession.speakerAge = formSession.speakerAge;
+            mongoSession.timeOfRecording = formSession.timeOfRecording;
+            mongoSession.placeOfRecording = formSession.placeOfRecording;
             mongoSession.dataSource = formSession.dataSource;
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
@@ -5350,6 +5828,33 @@ session-manager_1    | }
                     }),
                 );
             }
+        }
+
+        if (
+            !(await this.writeProjectEmuDbMetadataFile(
+                projectFormData.id,
+                projectFormData,
+            ))
+        ) {
+            this.app.addLog(
+                "Failed to write Data/VISP_emuDB/VISP.json",
+                "error",
+            );
+            if (ws && msg) {
+                ws.send(
+                    JSON.stringify({
+                        requestId: msg.requestId,
+                        type: "cmd-result",
+                        cmd: msg.cmd,
+                        progress: "end",
+                        result: false,
+                        message:
+                            "Failed to write VISP project metadata file (VISP.json).",
+                    }),
+                );
+            }
+            await this.app.sessMan.deleteSession(session.accessCode);
+            return false;
         }
 
         //emudb-create-sessions
@@ -6137,6 +6642,12 @@ session-manager_1    | }
             }
         });
 
+        const projectWideMetadata = this.getProjectWideMetadataFromPayload(
+            projectFormData,
+        );
+        projectFormData.spokenLanguage = projectWideMetadata.spokenLanguage;
+        projectFormData.recordingDevice = projectWideMetadata.recordingDevice;
+
         //Check that each session name is ok
         for (let key in projectFormData.sessions) {
             let session = projectFormData.sessions[key];
@@ -6174,6 +6685,23 @@ session-manager_1    | }
                 return false;
             }
 
+            const normalizedSessionMetadata =
+                this.normalizeSessionMetadataFromPayload(session);
+            if (!normalizedSessionMetadata.ok) {
+                this.app.addLog(
+                    "Session " +
+                        sessionName +
+                        " has invalid metadata: " +
+                        normalizedSessionMetadata.reason,
+                    "warn",
+                );
+                return false;
+            }
+            session.timeOfRecording =
+                normalizedSessionMetadata.value.timeOfRecording;
+            session.placeOfRecording =
+                normalizedSessionMetadata.value.placeOfRecording;
+
             //Check that dataSource is set to a valid option
             let validDataSourceOptions = ["upload", "record"];
             if (!validDataSourceOptions.includes(session.dataSource)) {
@@ -6199,15 +6727,7 @@ session-manager_1    | }
             */
         }
 
-        const allowedQualityControlMethods = [
-            "manual-review",
-            "peer-review",
-            "double-annotation",
-            "automated-validation",
-            "systematic-sampling",
-            "technical-quality-check",
-            "perceptual-evaluation",
-        ];
+        const allowedQualityControlMethods = QUALITY_CONTROL_METHOD_IDS;
         const qcm = projectFormData.qualityControlMethods;
         if (qcm !== undefined && qcm !== null) {
             if (!Array.isArray(qcm)) {
@@ -6286,6 +6806,8 @@ session-manager_1    | }
             );
             fs.mkdirSync(userApplicationsDir); //WHY DOES THIS NOT WORK??? - FIGURE IT OUT ON MONDAY
         }
+
+        await this.writeProjectMetadataFile(projectFormData.id, {}, false);
 
         //initialize git repo
         let git = await simpleGit(repoDir);
