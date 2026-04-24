@@ -5639,6 +5639,25 @@ session-manager_1    | }
             }
         }
 
+        // Ensure the user's upload base directory is world-writable so that PHP (www-data)
+        // can create subdirectories in it when handling file upload POSTs.
+        // Without this, if the session-manager creates this dir first (as a different uid),
+        // PHP cannot write into it and uploads silently fail.
+        const userUploadBase = path.join("/tmp/uploads", user.username);
+        try {
+            if (fs.existsSync(userUploadBase)) {
+                fs.chmodSync(userUploadBase, 0o777);
+            }
+            if (fs.existsSync(uploadsSrcDirLocal)) {
+                fs.chmodSync(uploadsSrcDirLocal, 0o777);
+            }
+        } catch (chmodErr) {
+            this.app.addLog(
+                "Warning: could not set permissions on upload directory: " + chmodErr.toString(),
+                "warn",
+            );
+        }
+
         if (ws && msg) {
             ws.send(
                 JSON.stringify({
