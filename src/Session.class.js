@@ -730,6 +730,12 @@ class Session {
                               process.env.PROXY_BLOCKED_NETWORKS,
                       }
                     : {}),
+                ...(process.env.PROXY_BLOCKED_CIDRS
+                    ? {
+                          PROXY_BLOCKED_CIDRS:
+                              process.env.PROXY_BLOCKED_CIDRS,
+                      }
+                    : {}),
             },
             labels: {
                 "visp.proxyFor": sessionContainerName,
@@ -748,7 +754,14 @@ class Session {
                 },
             ],
             cap_drop: ["ALL"],
-            cap_add: [],
+            // CAP_NET_ADMIN is required so that entrypoint.sh can install iptables
+            // OUTPUT rules that block traffic to private/university subnets by IP.
+            // Tinyproxy's Filter only matches hostnames (never resolved IPs), so
+            // without this a client connecting by IP (or via a non-.umu.se hostname
+            // that still resolves to 130.239.x.x) would bypass the blocklist.
+            // The capability is scoped to this container's own network namespace
+            // only — it cannot affect the host or other containers.
+            cap_add: ["NET_ADMIN"],
             no_new_privileges: true,
             resource_limits: {
                 memory: {
