@@ -4,7 +4,7 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM node:20-bookworm-slim AS dependencies
+FROM node:20.20.2-bookworm-slim AS dependencies
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ RUN npm ci
 # ============================================================================
 # Stage 2: Build (if there were a build step, but session-manager doesn't have one)
 # ============================================================================
-FROM node:20-bookworm-slim AS builder
+FROM node:20.20.2-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -36,7 +36,7 @@ COPY . .
 # ============================================================================
 # Stage 3: Runtime
 # ============================================================================
-FROM debian:bullseye-slim
+FROM debian:bookworm-20260505-slim
 
 # Set timezone
 RUN rm -f /etc/localtime && ln -s /usr/share/zoneinfo/Europe/Stockholm /etc/localtime
@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     nano \
     r-cran-git2r \
-    libgit2-1.1 \
+    libgit2-1.5 \
     libgit2-dev \
     && rm -rf /var/lib/apt/lists/*
 
