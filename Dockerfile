@@ -77,7 +77,7 @@ ENV GIT_DISCOVERY_ACROSS_FILESYSTEM=true
 # Install whisper-script dependencies
 WORKDIR /whisper-script
 RUN git clone https://github.com/humlab-speech/whisper-script /whisper-script && \
-    pip3 install -r requirements.txt
+    pip3 install --break-system-packages -r requirements.txt
 
 # Set up application
 WORKDIR /session-manager
