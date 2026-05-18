@@ -230,7 +230,6 @@ class Session {
                 MemorySwap: 16 * 1024 * 1024 * 1024,
                 CpuShares: 512,
             },
-            //User: `1000:1000`
         };
         config.Labels = {
             "visp.hsApp": this.hsApp.toString(),
@@ -439,6 +438,10 @@ class Session {
                 netns: useNoNetwork ? { nsmode: "none" } : { nsmode: "bridge" },
                 ...(useNoNetwork ? {} : { networks: { [networkName]: {} } }),
                 mounts: libpodMounts,
+                // Enforce non-root explicitly at spawn time, regardless of what USER
+                // the image was built with. jovyan = UID 1000 / GID 100 (users) in the
+                // upstream quay.io/jupyter/datascience-notebook base image.
+                user: "1000:100",
                 cap_drop: ["ALL"],
                 cap_add: secProfile.capAdd,
                 no_new_privileges: true,
