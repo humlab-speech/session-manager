@@ -413,11 +413,11 @@ class Session {
             // - Jupyter: runs as jovyan (non-root), also used for operations tasks
             // - VSCode: runs as non-root, caps mainly for entrypoint setup
             const securityProfiles = {
-                "visp-jupyter-session": {
+                "localhost/visp-jupyter-session": {
                     capAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
                     pidsLimit: 512,
                 },
-                "visp-vscode-session": {
+                "localhost/visp-vscode-session": {
                     capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
                     pidsLimit: 512,
                 },
@@ -718,7 +718,7 @@ class Session {
     async createProxySidecar(sessionContainerName, hostSocketDir) {
         const proxyContainerName = sessionContainerName + "-proxy";
         const proxyImage =
-            process.env.SESSION_PROXY_IMAGE || "visp-session-proxy";
+            process.env.SESSION_PROXY_IMAGE || "localhost/visp-session-proxy";
         const keepContainers =
             process.env.SESSION_MANAGER_KEEP_CONTAINERS === "true";
 

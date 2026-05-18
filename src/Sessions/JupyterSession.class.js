@@ -3,7 +3,7 @@ const Session = require("../Session.class");
 class JupyterSession extends Session {
     constructor(app, user, project, port, hsApp, volumes = []) {
         super(app, user, project, port, hsApp, volumes);
-        this.imageName = "visp-jupyter-session";
+        this.imageName = "localhost/visp-jupyter-session";
         this.port = 8888;
         this.localProjectPath = "/home/jovyan/project";
         this.containerUser = "jovyan";
