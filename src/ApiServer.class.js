@@ -7057,54 +7057,60 @@ session-manager_1    | }
         });
         await queueItem.save();
         this.app.addLog("Import queue item registered: " + queueItem._id, "info");
+        // wsrng-server only registers an item once the session is genuinely
+        // complete (all expected files uploaded), so process it right away rather
+        // than waiting for the next poll. Fire-and-forget; the importQueueRunning
+        // guard inside prevents overlap with the periodic processor.
+        this.processNextImportItem();
         return queueItem;
     }
 
     startImportQueueProcessor() {
         this.app.addLog("Starting import queue processor", "info");
-        setInterval(async () => {
-            if (this.importQueueRunning) {
+        // Periodic safety net that retries any item left pending (e.g. registered
+        // while a previous import was still running, or after a restart).
+        setInterval(() => this.processNextImportItem(), 15000);
+    }
+
+    async processNextImportItem() {
+        if (this.importQueueRunning) {
+            return;
+        }
+        try {
+            this.importQueueRunning = true;
+            const ImportQueueItem = this.mongoose.model("ImportQueueItem");
+            const item = await ImportQueueItem.findOne({
+                status: "pending",
+            }).sort({ createdAt: 1 });
+
+            if (!item) {
                 return;
             }
+
+            this.app.addLog("Processing import queue item: " + item._id + " (project: " + item.projectId + ", session: " + item.sessionId + ")", "info");
+            item.status = "processing";
+            item.updatedAt = new Date();
+            await item.save();
+
             try {
-                this.importQueueRunning = true;
-                const ImportQueueItem = this.mongoose.model("ImportQueueItem");
-                const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
-                const item = await ImportQueueItem.findOne({
-                    status: "pending",
-                    createdAt: { $lte: oneMinuteAgo },
-                }).sort({ createdAt: 1 });
-
-                if (!item) {
-                    this.importQueueRunning = false;
-                    return;
-                }
-
-                this.app.addLog("Processing import queue item: " + item._id + " (project: " + item.projectId + ", session: " + item.sessionId + ")", "info");
-                item.status = "processing";
+                const result = await this.importAudioFiles(item.projectId, item.sessionId);
+                item.status = "completed";
+                item.finishedAt = new Date();
                 item.updatedAt = new Date();
                 await item.save();
-
-                try {
-                    const result = await this.importAudioFiles(item.projectId, item.sessionId);
-                    item.status = "completed";
-                    item.finishedAt = new Date();
-                    item.updatedAt = new Date();
-                    await item.save();
-                    this.app.addLog("Import queue item completed: " + item._id, "info");
-                } catch (err) {
-                    this.app.addLog("Import queue item failed: " + item._id + " - " + err.message, "error");
-                    item.status = "failed";
-                    item.error = err.message;
-                    item.updatedAt = new Date();
-                    await item.save();
-                }
+                this.app.addLog("Import queue item completed: " + item._id, "info");
             } catch (err) {
-                this.app.addLog("Import queue processor error: " + err.message, "error");
-            } finally {
-                this.importQueueRunning = false;
+                this.app.addLog("Import queue item failed: " + item._id + " - " + err.message, "error");
+                item.status = "failed";
+                item.error = err.message;
+                item.updatedAt = new Date();
+                await item.save();
             }
-        }, 15000);
+        } catch (err) {
+            this.app.addLog("Import queue processor error: " + err.message, "error");
+        } finally {
+            this.importQueueRunning = false;
+        }
     }
 
     async importAudioFiles(projectId, sessionId) {
@@ -7267,6 +7273,28 @@ session-manager_1    | }
         */
 
         this.app.addLog("SPR audio files imported", "info");
+
+        // Push a dashboard notification to project members that the recording
+        // session's audio is now imported and available. This persists + live-
+        // pushes via websocket (serverNotification); the webclient adds it to the
+        // notification list without refreshing the user's active view.
+        const sessionName = projectSession ? projectSession.name : sessionId;
+        const fileCount = files.length;
+        try {
+            await this.notifyProjectMembers(projectId, {
+                type: "success",
+                message:
+                    'Recording session "' + sessionName + '" was imported (' +
+                    fileCount + (fileCount === 1 ? " file" : " files") + ").",
+                metadata: {
+                    sessionId: sessionId,
+                    fileCount: fileCount,
+                    kind: "spr-import",
+                },
+            });
+        } catch (err) {
+            this.app.addLog("Could not notify project members of import: " + err.message, "warn");
+        }
 
         return new ApiResponse(200, "Audio files imported");
 
