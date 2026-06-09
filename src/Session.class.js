@@ -22,6 +22,13 @@ class Session {
         this.localProjectPath = "/home/project";
         this.containerUser = "";
         this.container = null;
+        // In-container service identity (uid:gid). Used both to enforce the
+        // spawn user and to anchor the rootless --userns=keep-id mapping so this
+        // UID maps to the host repository owner (johan, 1000:1000). Every write
+        // to a bind mount is then owned by that single repository identity,
+        // regardless of which UID the in-container service runs as.
+        // jovyan = 1000:100 in the jupyter/datascience base image.
+        this.containerUidGid = "1000:100";
         this.docker = new Docker({ socketPath: this.app.dockerSocketPath });
 
         // UDS-based network isolation: when true, the container runs with
@@ -441,7 +448,18 @@ class Session {
                 // Enforce non-root explicitly at spawn time, regardless of what USER
                 // the image was built with. jovyan = UID 1000 / GID 100 (users) in the
                 // upstream quay.io/jupyter/datascience-notebook base image.
-                user: "1000:100",
+                user: this.containerUidGid,
+                // Rootless userns mapping: pin this container's service UID/GID to
+                // the host user that owns the bind-mounted repositories (johan,
+                // 1000:1000). Files the container writes to a mount are then owned
+                // by that single repository identity — no exec-as-root needed and
+                // no foreign-owned (subuid) emuDB files. As a bonus this remaps
+                // container UID 0 away from the host repo owner onto a subuid, so a
+                // container-root escape lands on an unprivileged host id.
+                userns: {
+                    nsmode: "keep-id",
+                    value: `uid=${this.containerUidGid.split(":")[0]},gid=${this.containerUidGid.split(":")[1]}`,
+                },
                 cap_drop: ["ALL"],
                 cap_add: secProfile.capAdd,
                 no_new_privileges: true,
