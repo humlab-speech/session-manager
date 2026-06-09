@@ -962,6 +962,10 @@ class ApiServer {
 
         if (msg.cmd == "getSession") {
             this.getUserByPhpSessionId(msg.data.phpSessId).then((user) => {
+                if (user) {
+                    client.phpSessionId = msg.data.phpSessId;
+                    client.userSession = user;
+                }
                 ws.send(
                     new WebSocketMessage(msg.requestId, msg.cmd, user).toJSON(),
                 );
@@ -972,6 +976,7 @@ class ApiServer {
         //FROM THIS POINT ON, ALL COMMANDS REQUIRE AUTHENTICATION
         let authResult = await this.authenticateWebSocketUser(
             client.originalRequest,
+            client.phpSessionId || msg.data?.phpSessionId,
         );
         if (!authResult.authenticated) {
             this.app.addLog(
@@ -6927,9 +6932,16 @@ session-manager_1    | }
         return false;
     }
 
-    async authenticateWebSocketUser(request) {
+    async authenticateWebSocketUser(request, fallbackPhpSessionId = null) {
         let cookies = this.parseCookies(request);
-        let phpSessionId = cookies.PHPSESSID;
+        let phpSessionId = cookies.PHPSESSID || fallbackPhpSessionId;
+
+        if (!phpSessionId) {
+            return {
+                authenticated: false,
+                reason: "Missing PHP session cookie",
+            };
+        }
 
         let options = {
             headers: {
