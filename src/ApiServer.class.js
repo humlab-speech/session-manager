@@ -29,7 +29,11 @@ const {
     normalizeProjectMetadata,
     parseVispMetadataJson,
 } = require("./vispMetadata");
-const { safePathComponent, safeJoinedPath, safeMountSource } = require("./pathSecurity");
+const {
+    safePathComponent,
+    safeJoinedPath,
+    safeMountSource,
+} = require("./pathSecurity");
 
 class ApiServer {
     constructor(app) {
@@ -53,9 +57,12 @@ class ApiServer {
         this.startServer();
         this.startWsServer();
         this.importQueueRunning = false;
-        this.talkToMeGoose().then((mongoose) => {
+        this.systemRolesCache = {};
+        this.projectRolesCache = {};
+        this.talkToMeGoose().then(async (mongoose) => {
             this.mongoose = mongoose;
             this.defineModels();
+            await this.seedRoles();
             this.whisperService.init();
             this.startImportQueueProcessor();
         });
@@ -74,9 +81,29 @@ class ApiServer {
             slug: String,
             phpSessionId: String,
             loginAllowed: Boolean,
-            privileges: Object,
+            system_role: String,
         });
         mongoose.model("User", this.models.User);
+
+        // Two parallel role systems. System roles gate what a user may do to the
+        // installation as a whole (currently: reach the admin panel, create projects);
+        // project roles gate what they may do *inside* one project they belong to.
+        // Both collections hold role *definitions* - the assignments live on
+        // users.system_role and projects.members[].role respectively.
+        this.models.SystemRole = new mongoose.Schema({
+            name: String,
+            label: String,
+            permissions: Object,
+        });
+        mongoose.model("SystemRole", this.models.SystemRole, "system_roles");
+
+        this.models.ProjectRole = new mongoose.Schema({
+            name: String,
+            label: String,
+            grantableViaInviteCode: Boolean,
+            permissions: Object,
+        });
+        mongoose.model("ProjectRole", this.models.ProjectRole, "project_roles");
 
         this.models.Project = new mongoose.Schema({
             id: String,
@@ -153,7 +180,11 @@ class ApiServer {
             updatedAt: Date,
             finishedAt: Date,
         });
-        mongoose.model("ImportQueueItem", this.models.ImportQueueItem, "wsrngimportqueueitems");
+        mongoose.model(
+            "ImportQueueItem",
+            this.models.ImportQueueItem,
+            "wsrngimportqueueitems",
+        );
 
         this.models.Notification = new mongoose.Schema({
             id: String,
@@ -269,8 +300,7 @@ class ApiServer {
             if (Number.isNaN(parsedDate.getTime())) {
                 return {
                     ok: false,
-                    reason:
-                        "TimeOfRecording must be a valid date/time value.",
+                    reason: "TimeOfRecording must be a valid date/time value.",
                 };
             }
             normalized.timeOfRecording = parsedDate.toISOString();
@@ -287,8 +317,7 @@ class ApiServer {
             if (!coords) {
                 return {
                     ok: false,
-                    reason:
-                        "PlaceOfRecording must be valid WGS84 coordinates (lat, lon).",
+                    reason: "PlaceOfRecording must be valid WGS84 coordinates (lat, lon).",
                 };
             }
             normalized.placeOfRecording = `${coords.latitude}, ${coords.longitude}`;
@@ -402,9 +431,8 @@ class ApiServer {
     }
 
     async readProjectMetadataFromFile(projectId, fallbackMetadata = {}) {
-        const normalizedFallback = this.getProjectMetadataFromPayload(
-            fallbackMetadata,
-        );
+        const normalizedFallback =
+            this.getProjectMetadataFromPayload(fallbackMetadata);
         let metadataPathForRecovery = null;
         try {
             const vispMetadataPath = this.getProjectMetadataFilePath(projectId);
@@ -430,9 +458,7 @@ class ApiServer {
                 "warn",
             );
             const unreadablePath =
-                await this.moveUnreadableProjectMetadataFile(
-                    vispMetadataPath,
-                );
+                await this.moveUnreadableProjectMetadataFile(vispMetadataPath);
             this.app.addLog(
                 `Unreadable VISP metadata moved to ${unreadablePath}`,
                 "warn",
@@ -497,7 +523,8 @@ class ApiServer {
                         description: fileMetadata.description,
                         financers: fileMetadata.financers,
                         ethicsReviewDnr: fileMetadata.ethicsReviewDnr,
-                        qualityControlMethods: fileMetadata.qualityControlMethods,
+                        qualityControlMethods:
+                            fileMetadata.qualityControlMethods,
                     },
                 },
             );
@@ -806,7 +833,11 @@ class ApiServer {
         );
 
         for (const member of project.members) {
-            if (!member || !member.username || exclusions.has(member.username)) {
+            if (
+                !member ||
+                !member.username ||
+                exclusions.has(member.username)
+            ) {
                 continue;
             }
             await this.notifyUser(member.username, {
@@ -1140,6 +1171,11 @@ class ApiServer {
             return;
         }
 
+        if (msg.cmd == "adminFetchProjectStorageStats") {
+            await this.adminFetchProjectStorageStats(ws, user, msg);
+            return;
+        }
+
         if (msg.cmd == "adminSetProjectArchived") {
             await this.adminSetProjectArchived(ws, user, msg);
             return;
@@ -1423,17 +1459,17 @@ class ApiServer {
             }
         }
 
-        if (msg.cmd == "updateProjectMemberRole") {
+        if (msg.cmd == "removeProjectMember") {
             try {
-                this.updateProjectMemberRole(ws, user, msg);
+                this.removeProjectMember(ws, user, msg);
             } catch (error) {
                 this.app.addLog(error, "error");
             }
         }
 
-        if (msg.cmd == "removeProjectMember") {
+        if (msg.cmd == "setProjectMemberRole") {
             try {
-                this.removeProjectMember(ws, user, msg);
+                this.setProjectMemberRole(ws, user, msg);
             } catch (error) {
                 this.app.addLog(error, "error");
             }
@@ -1539,13 +1575,21 @@ class ApiServer {
             this.app.addLog("updateInviteCodes", "debug");
             this.updateInviteCodes(ws, msg);
         }
-        if (msg.cmd == "getInviteCodesByUser") {
-            this.app.addLog("getInviteCodesByUser", "debug");
-            this.getInviteCodesByUser(ws, msg);
+        if (msg.cmd == "getInviteCodesByProject") {
+            this.app.addLog("getInviteCodesByProject", "debug");
+            this.getInviteCodesByProject(ws, msg);
         }
         if (msg.cmd == "deleteInviteCode") {
             this.app.addLog("deleteInviteCode", "debug");
             this.deleteInviteCode(ws, msg);
+        }
+        if (msg.cmd == "getProjectRoles") {
+            this.app.addLog("getProjectRoles", "debug");
+            this.getProjectRoles(ws, msg);
+        }
+        if (msg.cmd == "getSystemRoles") {
+            this.app.addLog("getSystemRoles", "debug");
+            this.getSystemRoles(ws, msg);
         }
         /*
         if(msg.cmd == "importEmuDbSessions") {
@@ -1589,8 +1633,12 @@ class ApiServer {
         safePathComponent(session.name, "sessionName");
         let bundlePathName = bundleBaseName + "_bndl";
         let projectBundlePath = safeJoinedPath(
-            "/repositories", msg.projectId, "Data", "VISP_emuDB",
-            session.name + "_ses", bundlePathName,
+            "/repositories",
+            msg.projectId,
+            "Data",
+            "VISP_emuDB",
+            session.name + "_ses",
+            bundlePathName,
         );
         let annotationFilePath =
             projectBundlePath + "/" + bundleBaseName + "_annot.json";
@@ -1684,7 +1732,12 @@ class ApiServer {
             );
             // Compute next unique item ID across all existing levels
             let maxItemId = annotationData.levels.reduce((max, level) => {
-                return level.items ? level.items.reduce((m, item) => Math.max(m, item.id || 0), max) : max;
+                return level.items
+                    ? level.items.reduce(
+                          (m, item) => Math.max(m, item.id || 0),
+                          max,
+                      )
+                    : max;
             }, 0);
             octraLevel = {
                 name: "OCTRA_1",
@@ -1711,7 +1764,12 @@ class ApiServer {
                     );
                     // Compute next unique item ID across all levels (including those already processed)
                     let maxItemId = annotationData.levels.reduce((max, lvl) => {
-                        return lvl.items ? lvl.items.reduce((m, item) => Math.max(m, item.id || 0), max) : max;
+                        return lvl.items
+                            ? lvl.items.reduce(
+                                  (m, item) => Math.max(m, item.id || 0),
+                                  max,
+                              )
+                            : max;
                     }, 0);
                     level.items = [
                         {
@@ -1795,8 +1853,12 @@ class ApiServer {
 
         //now save the annotation data as a file to disk in the project bundle directory
         let projectBundlePath = safeJoinedPath(
-            "/repositories", task.projectId, "Data", "VISP_emuDB",
-            session.name + "_ses", bundlePathName,
+            "/repositories",
+            task.projectId,
+            "Data",
+            "VISP_emuDB",
+            session.name + "_ses",
+            bundlePathName,
         );
         let annotationFilePath =
             projectBundlePath + "/" + bundleBaseName + "_annot.json";
@@ -1885,18 +1947,17 @@ class ApiServer {
             return;
         }
 
-        let userIsAuthorized = project.members.find(
-            (m) =>
-                m.username == user.username &&
-                (m.role == "admin" || m.role == "analyzer"),
-        );
+        let userIsAuthorized = this.getProjectPermissions(
+            project,
+            user,
+        ).editProjectFiles;
         if (!userIsAuthorized) {
             this.app.addLog(
                 "User " +
                     user.username +
                     " tried to launch a session in project " +
                     msg.projectId +
-                    ", but is not of an authorized role",
+                    ", but is not a member of the project",
                 "warning",
             );
             ws.send(
@@ -1959,7 +2020,10 @@ class ApiServer {
 
         safePathComponent(project.id, "projectId");
         volumes.push({
-            source: safeMountSource(this.app.absRootPath, "mounts/repositories/" + project.id),
+            source: safeMountSource(
+                this.app.absRootPath,
+                "mounts/repositories/" + project.id,
+            ),
             target: "/home/" + containerUser + "/project",
         });
 
@@ -2019,88 +2083,6 @@ class ApiServer {
         );
     }
 
-    async updateProjectMemberRole(ws, user, msg) {
-        const Project = this.mongoose.model("Project");
-        let project = await Project.findOne({ id: msg.projectId });
-
-        if (!project) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    requestId: msg.requestId,
-                    progress: "end",
-                    cmd: msg.cmd,
-                    result: false,
-                    message: "Project not found",
-                }),
-            );
-            return;
-        }
-
-        //check that this user has the authority to update members in this project, project.members should contain this user with the role 'admin'
-        let userIsAdmin = project.members.find(
-            (m) => m.username == user.username && m.role == "admin",
-        );
-        if (!userIsAdmin) {
-            this.app.addLog(
-                "User " +
-                    user.username +
-                    " tried to update a member in project " +
-                    msg.projectId +
-                    ", but is not an admin of this project",
-                "warning",
-            );
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    requestId: msg.requestId,
-                    progress: "end",
-                    cmd: msg.cmd,
-                    result: false,
-                    message: "User is not an admin of this project",
-                }),
-            );
-            return;
-        }
-
-        //check if user to update is a member
-        let existingMember = project.members.find(
-            (m) => m.username == msg.username,
-        );
-        if (!existingMember) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    requestId: msg.requestId,
-                    progress: "end",
-                    cmd: msg.cmd,
-                    result: false,
-                    message: "User is not a member of this project",
-                }),
-            );
-            return;
-        }
-
-        project.members.forEach((m) => {
-            if (m.username == msg.username) {
-                m.role = msg.role;
-            }
-        });
-
-        project.markModified("members");
-        project.save();
-
-        ws.send(
-            JSON.stringify({
-                type: "cmd-result",
-                requestId: msg.requestId,
-                progress: "end",
-                cmd: msg.cmd,
-                result: true,
-            }),
-        );
-    }
-
     async addProjectMember(ws, user, msg) {
         const Project = this.mongoose.model("Project");
         let project = await Project.findOne({ id: msg.projectId });
@@ -2145,17 +2127,18 @@ class ApiServer {
             project.members = [];
         }
 
-        //check that this user has the authority to add members to this project, project.members should contain this user with the role 'admin'
-        let userIsAdmin = project.members.find(
-            (m) => m.username == user.username && m.role == "admin",
-        );
-        if (!userIsAdmin) {
+        //check that this user is allowed to manage this project's membership
+        let userCanManageMembers = this.getProjectPermissions(
+            project,
+            user,
+        ).manageProjectMembers;
+        if (!userCanManageMembers) {
             this.app.addLog(
                 "User " +
                     user.username +
                     " tried to add a member to project " +
                     msg.projectId +
-                    ", but is not an admin of this project",
+                    ", but is not authorized to manage this project's members",
                 "warning",
             );
             ws.send(
@@ -2163,12 +2146,11 @@ class ApiServer {
                     msg.requestId,
                     msg.cmd,
                     {},
-                    "User is not an admin of this project",
+                    "User is not authorized to manage this project's members",
                     "end",
                     false,
                 ).toJSON(),
             );
-            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is not an admin of this project" }));
             return;
         }
 
@@ -2192,9 +2174,12 @@ class ApiServer {
         }
 
         //add user to project
+        const newMemberRole = this.isValidProjectRole(msg.role)
+            ? msg.role
+            : ApiServer.PROJECT_ROLE_RESEARCHER;
         project.members.push({
             username: msg.username,
-            role: "member",
+            role: newMemberRole,
         });
         project.save();
 
@@ -2202,13 +2187,102 @@ class ApiServer {
             new WebSocketMessage(
                 msg.requestId,
                 msg.cmd,
-                { user: userInfo },
+                { user: userInfo, role: newMemberRole },
                 "User added to project",
                 "end",
                 true,
             ).toJSON(),
         );
         //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: true, user: userInfo }));
+    }
+
+    /**
+     * Change an existing member's role within a project.
+     *
+     * Guards against a project being left with no administrator: demoting the last
+     * ProjectAdmin is refused. SysAdmins are exempt from that check only in the
+     * sense that they can always administer the project from the admin panel, but
+     * the rule is kept unconditional so the project stays self-sufficient.
+     */
+    async setProjectMemberRole(ws, user, msg) {
+        const fail = (message) => {
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {},
+                    message,
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+        };
+
+        const Project = this.mongoose.model("Project");
+        let project = await Project.findOne({ id: msg.projectId });
+
+        if (!project) {
+            fail("Project not found");
+            return;
+        }
+
+        if (!this.getProjectPermissions(project, user).manageProjectMembers) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " tried to change a member role in project " +
+                    msg.projectId +
+                    ", but is not authorized to manage this project's members",
+                "warning",
+            );
+            fail("User is not authorized to manage this project's members");
+            return;
+        }
+
+        if (!this.isValidProjectRole(msg.role)) {
+            fail("Unknown project role: " + msg.role);
+            return;
+        }
+
+        const member = this.getProjectMember(project, msg.username);
+        if (!member) {
+            fail("User is not a member of this project");
+            return;
+        }
+
+        const currentRole = this.resolveProjectRole(project, msg.username);
+        if (
+            currentRole === ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
+            msg.role !== ApiServer.PROJECT_ROLE_PROJECT_ADMIN
+        ) {
+            const remainingAdmins = project.members.filter(
+                (candidate) =>
+                    candidate.username !== msg.username &&
+                    this.resolveProjectRole(project, candidate.username) ===
+                        ApiServer.PROJECT_ROLE_PROJECT_ADMIN,
+            );
+            if (remainingAdmins.length === 0) {
+                fail(
+                    "This is the last project admin - promote another member first",
+                );
+                return;
+            }
+        }
+
+        member.role = msg.role;
+        project.markModified("members");
+        await project.save();
+
+        ws.send(
+            new WebSocketMessage(
+                msg.requestId,
+                msg.cmd,
+                { username: msg.username, role: msg.role },
+                "Member role updated",
+                "end",
+                true,
+            ).toJSON(),
+        );
     }
 
     async removeProjectMember(ws, user, msg) {
@@ -2233,17 +2307,18 @@ class ApiServer {
             project.members = [];
         }
 
-        //check that this user has the authority to remove members from this project, project.members should contain this user with the role 'admin'
-        let userIsAdmin = project.members.find(
-            (m) => m.username == user.username && m.role == "admin",
-        );
-        if (!userIsAdmin) {
+        //check that this user is allowed to manage this project's membership
+        let userCanManageMembers = this.getProjectPermissions(
+            project,
+            user,
+        ).manageProjectMembers;
+        if (!userCanManageMembers) {
             this.app.addLog(
                 "User " +
                     user.username +
                     " tried to remove a member from project " +
                     msg.projectId +
-                    ", but is not an admin of this project",
+                    ", but is not authorized to manage this project's members",
                 "warning",
             );
             ws.send(
@@ -2253,7 +2328,8 @@ class ApiServer {
                     progress: "end",
                     cmd: msg.cmd,
                     result: false,
-                    message: "User is not an admin of this project",
+                    message:
+                        "User is not authorized to manage this project's members",
                 }),
             );
             return;
@@ -2272,6 +2348,32 @@ class ApiServer {
                     cmd: msg.cmd,
                     result: false,
                     message: "User is not a member of this project",
+                }),
+            );
+            return;
+        }
+
+        //don't let a project be left with nobody who can administer it
+        const remainingAdmins = project.members.filter(
+            (candidate) =>
+                candidate.username !== msg.username &&
+                this.resolveProjectRole(project, candidate.username) ===
+                    ApiServer.PROJECT_ROLE_PROJECT_ADMIN,
+        );
+        if (
+            this.resolveProjectRole(project, msg.username) ===
+                ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
+            remainingAdmins.length === 0
+        ) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    requestId: msg.requestId,
+                    progress: "end",
+                    cmd: msg.cmd,
+                    result: false,
+                    message:
+                        "This is the last project admin - promote another member first",
                 }),
             );
             return;
@@ -2605,11 +2707,15 @@ class ApiServer {
 
             // Get MongoDB session data for this project
             const Project = this.mongoose.model("Project");
-            const mongoProject = await Project.findOne({ id: projectId }).lean();
+            const mongoProject = await Project.findOne({
+                id: projectId,
+            }).lean();
 
             if (mongoProject && mongoProject.sessions) {
                 // Only count active (non-deleted) sessions
-                const activeSessions = mongoProject.sessions.filter((s) => !s.deleted);
+                const activeSessions = mongoProject.sessions.filter(
+                    (s) => !s.deleted,
+                );
                 health.mongoSessionCount = activeSessions.length;
                 const mongoSessionNames = new Set(
                     activeSessions.map((s) => s.name),
@@ -2629,7 +2735,9 @@ class ApiServer {
                     const emuDbSessionDirs = emuDbEntries.filter(
                         (entry) =>
                             entry.endsWith("_ses") &&
-                            fs.statSync(path.join(emuDbPath, entry)).isDirectory(),
+                            fs
+                                .statSync(path.join(emuDbPath, entry))
+                                .isDirectory(),
                     );
                     health.emuDbSessionCount = emuDbSessionDirs.length;
 
@@ -2660,14 +2768,32 @@ class ApiServer {
                     // Check for orphaned bundles within each session
                     // (bundle dirs on disk that have no matching file in MongoDB)
                     for (const session of activeSessions) {
-                        if (!session.name || !emuDbSessionNames.has(session.name)) continue;
-                        const sessionDirPath = path.join(emuDbPath, session.name + "_ses");
+                        if (
+                            !session.name ||
+                            !emuDbSessionNames.has(session.name)
+                        )
+                            continue;
+                        const sessionDirPath = path.join(
+                            emuDbPath,
+                            session.name + "_ses",
+                        );
                         try {
-                            const sessionEntries = fs.readdirSync(sessionDirPath);
+                            const sessionEntries =
+                                fs.readdirSync(sessionDirPath);
                             const diskBundleNames = new Set(
                                 sessionEntries
-                                    .filter((e) => e.endsWith("_bndl") &&
-                                        fs.statSync(path.join(sessionDirPath, e)).isDirectory())
+                                    .filter(
+                                        (e) =>
+                                            e.endsWith("_bndl") &&
+                                            fs
+                                                .statSync(
+                                                    path.join(
+                                                        sessionDirPath,
+                                                        e,
+                                                    ),
+                                                )
+                                                .isDirectory(),
+                                    )
                                     .map((e) => e.replace(/_bndl$/, "")),
                             );
                             // Build set of bundle names from MongoDB files
@@ -2692,7 +2818,9 @@ class ApiServer {
                     if (health.orphanedBundles.length > 0) {
                         health.issues.push(
                             `${health.orphanedBundles.length} orphaned bundle(s) on disk: ` +
-                            health.orphanedBundles.map((b) => `${b.session}/${b.bundle}`).join(", "),
+                                health.orphanedBundles
+                                    .map((b) => `${b.session}/${b.bundle}`)
+                                    .join(", "),
                         );
                     }
 
@@ -2730,8 +2858,8 @@ class ApiServer {
         const Project = this.mongoose.model("Project");
         const result = {
             success: false,
-            removed: [],   // disk dirs removed
-            purged: [],    // DB sessions marked deleted
+            removed: [], // disk dirs removed
+            purged: [], // DB sessions marked deleted
             errors: [],
         };
 
@@ -2780,7 +2908,9 @@ class ApiServer {
                             "info",
                         );
                     } catch (err) {
-                        result.errors.push(`Failed to remove ${sessionName}_ses: ${err.message}`);
+                        result.errors.push(
+                            `Failed to remove ${sessionName}_ses: ${err.message}`,
+                        );
                         this.app.addLog(
                             `Failed to remove orphaned session ${sessionName}_ses: ${err.message}`,
                             "warn",
@@ -2833,6 +2963,16 @@ class ApiServer {
             if (typeof project.archived === "undefined") {
                 project.archived = false;
             }
+            // What *this* user may do in *this* project, so the frontend can gate
+            // its UI on the same rules the backend enforces.
+            project.userProjectRole = this.resolveProjectRole(
+                project,
+                user.username,
+            );
+            project.userProjectPermissions = this.getProjectPermissions(
+                project,
+                user,
+            );
             try {
                 await this.syncProjectMetadataWithFile(project);
             } catch (metadataError) {
@@ -2918,7 +3058,183 @@ class ApiServer {
     }
 
     isSysAdminUser(user) {
-        return !!(user && user.privileges && user.privileges.sysAdmin === true);
+        return this.resolveSystemRole(user) === ApiServer.SYSTEM_ROLE_SYS_ADMIN;
+    }
+
+    async seedRoles() {
+        await this.seedSystemRoles();
+        await this.seedProjectRoles();
+    }
+
+    async seedSystemRoles() {
+        const SystemRole = this.mongoose.model("SystemRole");
+        for (const roleDef of ApiServer.DEFAULT_SYSTEM_ROLES) {
+            await SystemRole.updateOne(
+                { name: roleDef.name },
+                { $set: roleDef },
+                { upsert: true },
+            );
+        }
+        // Drop stray/renamed role docs so the collection never disagrees with the
+        // current canonical role names.
+        await SystemRole.deleteMany({
+            name: {
+                $nin: ApiServer.DEFAULT_SYSTEM_ROLES.map((role) => role.name),
+            },
+        });
+
+        const roleDocs = await SystemRole.find({}).lean();
+        this.systemRolesCache = {};
+        roleDocs.forEach((roleDoc) => {
+            this.systemRolesCache[roleDoc.name] = roleDoc;
+        });
+        this.app.addLog("system_roles collection seeded/refreshed", "debug");
+    }
+
+    async seedProjectRoles() {
+        const ProjectRole = this.mongoose.model("ProjectRole");
+        for (const roleDef of ApiServer.DEFAULT_PROJECT_ROLES) {
+            await ProjectRole.updateOne(
+                { name: roleDef.name },
+                { $set: roleDef },
+                { upsert: true },
+            );
+        }
+        await ProjectRole.deleteMany({
+            name: {
+                $nin: ApiServer.DEFAULT_PROJECT_ROLES.map((role) => role.name),
+            },
+        });
+
+        const roleDocs = await ProjectRole.find({}).lean();
+        this.projectRolesCache = {};
+        roleDocs.forEach((roleDoc) => {
+            this.projectRolesCache[roleDoc.name] = roleDoc;
+        });
+        this.app.addLog("project_roles collection seeded/refreshed", "debug");
+    }
+
+    // ── System-level roles ────────────────────────────────────────────────────
+
+    getSystemRoleDoc(roleName) {
+        return (
+            this.systemRolesCache[roleName] ||
+            this.systemRolesCache[ApiServer.SYSTEM_ROLE_USER] ||
+            ApiServer.DEFAULT_SYSTEM_ROLES.find(
+                (role) => role.name === ApiServer.SYSTEM_ROLE_USER,
+            )
+        );
+    }
+
+    isValidSystemRole(roleName) {
+        // Validity is checked against the static definitions, not the cache, so a
+        // request arriving before seedRoles() has finished still resolves roles
+        // correctly instead of silently demoting every sysadmin to a plain user.
+        return ApiServer.DEFAULT_SYSTEM_ROLES.some(
+            (role) => role.name === roleName,
+        );
+    }
+
+    resolveSystemRole(user) {
+        const roleName = user?.system_role;
+        if (this.isValidSystemRole(roleName)) {
+            return roleName;
+        }
+        // Anything unrecognised (including accounts a migration has not reached yet)
+        // falls back to the least-privileged role rather than to whatever the old
+        // `role`/`privileges` fields happened to say - failing closed is the only
+        // safe default for a field that gates the admin panel.
+        return ApiServer.SYSTEM_ROLE_USER;
+    }
+
+    getSystemPermissions(user) {
+        return this.getSystemRoleDoc(this.resolveSystemRole(user)).permissions;
+    }
+
+    listSystemRoles() {
+        const cached = Object.values(this.systemRolesCache);
+        return cached.length > 0 ? cached : ApiServer.DEFAULT_SYSTEM_ROLES;
+    }
+
+    // ── Project-level roles ───────────────────────────────────────────────────
+
+    getProjectRoleDoc(roleName) {
+        return (
+            this.projectRolesCache[roleName] ||
+            this.projectRolesCache[ApiServer.PROJECT_ROLE_RESEARCHER] ||
+            ApiServer.DEFAULT_PROJECT_ROLES.find(
+                (role) => role.name === ApiServer.PROJECT_ROLE_RESEARCHER,
+            )
+        );
+    }
+
+    listProjectRoles() {
+        const cached = Object.values(this.projectRolesCache);
+        return cached.length > 0 ? cached : ApiServer.DEFAULT_PROJECT_ROLES;
+    }
+
+    listGrantableProjectRoles() {
+        return this.listProjectRoles().filter(
+            (roleDoc) => roleDoc.grantableViaInviteCode === true,
+        );
+    }
+
+    isValidProjectRole(roleName) {
+        // As with system roles: validated against the static definitions so this
+        // does not depend on seeding having completed.
+        return ApiServer.DEFAULT_PROJECT_ROLES.some(
+            (role) => role.name === roleName,
+        );
+    }
+
+    getProjectMember(project, username) {
+        if (!project || !Array.isArray(project.members)) {
+            return null;
+        }
+        return (
+            project.members.find(
+                (member) => member && member.username === username,
+            ) || null
+        );
+    }
+
+    isProjectMember(project, username) {
+        return this.getProjectMember(project, username) !== null;
+    }
+
+    /**
+     * The role `username` holds *within* `project`, or null if not a member.
+     * Members stored before project roles existed have no `role` field; they are
+     * treated as researchers (the lower of the two roles).
+     */
+    resolveProjectRole(project, username) {
+        const member = this.getProjectMember(project, username);
+        if (!member) {
+            return null;
+        }
+        return this.isValidProjectRole(member.role)
+            ? member.role
+            : ApiServer.PROJECT_ROLE_RESEARCHER;
+    }
+
+    /**
+     * Effective permissions `user` has inside `project`.
+     *
+     * SysAdmins get every project permission without being a member - they are the
+     * system super users and administer all projects from the admin panel. Everyone
+     * else gets exactly what their project role grants, and non-members get nothing.
+     */
+    getProjectPermissions(project, user) {
+        if (this.isSysAdminUser(user)) {
+            return { ...ApiServer.ALL_PROJECT_PERMISSIONS };
+        }
+
+        const roleName = this.resolveProjectRole(project, user?.username);
+        if (roleName === null) {
+            return { ...ApiServer.NO_PROJECT_PERMISSIONS };
+        }
+
+        return this.getProjectRoleDoc(roleName).permissions;
     }
 
     sendAdminUnauthorized(ws, msg) {
@@ -2945,19 +3261,6 @@ class ApiServer {
                 false,
             ).toJSON(),
         );
-    }
-
-    countProjectAdmins(project) {
-        if (!project || !Array.isArray(project.members)) {
-            return 0;
-        }
-        return project.members.filter((member) => {
-            return member && member.role === "admin";
-        }).length;
-    }
-
-    getAllowedProjectRoles() {
-        return ["admin", "analyzer", "member"];
     }
 
     escapeRegexForSearch(value) {
@@ -3067,10 +3370,7 @@ class ApiServer {
                                   ? userSummary.fullName
                                   : username,
                               email: userSummary ? userSummary.email : "",
-                              role:
-                                  member && typeof member.role === "string"
-                                      ? member.role
-                                      : "member",
+                              role: this.resolveProjectRole(project, username),
                           };
                       })
                     : [];
@@ -3101,6 +3401,151 @@ class ApiServer {
             );
             this.sendAdminCommandError(ws, msg, "Failed to fetch projects");
         }
+    }
+
+    async adminFetchProjectStorageStats(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.sendAdminUnauthorized(ws, msg);
+            return;
+        }
+
+        const projectId = msg.data && msg.data.projectId;
+        if (!projectId) {
+            this.sendAdminCommandError(ws, msg, "Missing projectId");
+            return;
+        }
+
+        try {
+            const stats = await this.getProjectStorageStats(projectId);
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    Object.assign({ projectId: projectId }, stats),
+                    "",
+                    "end",
+                    true,
+                ).toJSON(),
+            );
+        } catch (error) {
+            this.app.addLog(
+                "adminFetchProjectStorageStats failed for " +
+                    projectId +
+                    ": " +
+                    error.message,
+                "error",
+            );
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "Failed to fetch project storage stats",
+            );
+        }
+    }
+
+    /**
+     * Derives session/bundle counts and sizes directly from the EmuDB
+     * directory tree on disk (VISP_emuDB/<session>_ses/<bundle>_bndl/),
+     * rather than from the (duplicated, potentially stale) Project.sessions
+     * data in MongoDB.
+     */
+    async getProjectStorageStats(projectId) {
+        safePathComponent(projectId, "projectId");
+        const emuDbPath = safeJoinedPath(
+            "/repositories",
+            projectId,
+            "Data",
+            "VISP_emuDB",
+        );
+
+        const stats = {
+            sessionCount: 0,
+            bundleCount: 0,
+            totalSize: 0,
+            sessions: [],
+        };
+
+        if (!(await fs.pathExists(emuDbPath))) {
+            return stats;
+        }
+
+        const emuDbEntries = await fs.readdir(emuDbPath);
+        const sessionDirs = [];
+        for (const entry of emuDbEntries) {
+            if (!entry.endsWith("_ses")) continue;
+            const fullPath = path.join(emuDbPath, entry);
+            const entryStat = await fs.stat(fullPath);
+            if (entryStat.isDirectory()) {
+                sessionDirs.push(entry);
+            }
+        }
+
+        stats.sessions = await Promise.all(
+            sessionDirs.map((sessionDir) =>
+                this.getSessionStorageStats(emuDbPath, sessionDir),
+            ),
+        );
+        stats.sessionCount = stats.sessions.length;
+        stats.bundleCount = stats.sessions.reduce(
+            (sum, session) => sum + session.bundleCount,
+            0,
+        );
+        stats.totalSize = stats.sessions.reduce(
+            (sum, session) => sum + session.totalSize,
+            0,
+        );
+
+        return stats;
+    }
+
+    async getSessionStorageStats(emuDbPath, sessionDir) {
+        const sessionPath = path.join(emuDbPath, sessionDir);
+        const sessionEntries = await fs.readdir(sessionPath);
+
+        const bundleDirs = [];
+        for (const entry of sessionEntries) {
+            if (!entry.endsWith("_bndl")) continue;
+            const fullPath = path.join(sessionPath, entry);
+            const entryStat = await fs.stat(fullPath);
+            if (entryStat.isDirectory()) {
+                bundleDirs.push(entry);
+            }
+        }
+
+        const bundles = await Promise.all(
+            bundleDirs.map((bundleDir) =>
+                this.getBundleStorageStats(sessionPath, bundleDir),
+            ),
+        );
+
+        return {
+            name: sessionDir.replace(/_ses$/, ""),
+            bundleCount: bundles.length,
+            totalSize: bundles.reduce((sum, bundle) => sum + bundle.size, 0),
+            bundles: bundles,
+        };
+    }
+
+    async getBundleStorageStats(sessionPath, bundleDir) {
+        const bundlePath = path.join(sessionPath, bundleDir);
+        const files = await fs.readdir(bundlePath);
+
+        let size = 0;
+        for (const file of files) {
+            try {
+                const fileStat = await fs.stat(path.join(bundlePath, file));
+                if (fileStat.isFile()) {
+                    size += fileStat.size;
+                }
+            } catch (err) {
+                // Skip files that vanish mid-scan or are inaccessible
+            }
+        }
+
+        return {
+            name: bundleDir.replace(/_bndl$/, ""),
+            size: size,
+        };
     }
 
     async adminSetProjectArchived(ws, user, msg) {
@@ -3252,8 +3697,7 @@ class ApiServer {
             const User = this.mongoose.model("User");
             let query = {};
             if (searchValueRaw !== "") {
-                const escapedSearch =
-                    this.escapeRegexForSearch(searchValueRaw);
+                const escapedSearch = this.escapeRegexForSearch(searchValueRaw);
                 query = {
                     $or: [
                         { username: { $regex: escapedSearch, $options: "i" } },
@@ -3314,12 +3758,27 @@ class ApiServer {
                 ? msg.data.username.trim()
                 : "";
 
+        // Optional; omitting it keeps the previous behaviour of adding a researcher.
+        const roleRaw = msg && msg.data ? msg.data.role : null;
+        const role =
+            typeof roleRaw === "string" && roleRaw !== ""
+                ? roleRaw
+                : ApiServer.PROJECT_ROLE_RESEARCHER;
+
         if (projectId.trim() === "") {
             this.sendAdminCommandError(ws, msg, "Missing projectId");
             return;
         }
         if (username === "") {
             this.sendAdminCommandError(ws, msg, "Missing username");
+            return;
+        }
+        if (!this.isValidProjectRole(role)) {
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "Unknown project role: " + role,
+            );
             return;
         }
 
@@ -3358,7 +3817,7 @@ class ApiServer {
 
             project.members.push({
                 username: username,
-                role: "member",
+                role: role,
             });
             project.markModified("members");
             await project.save();
@@ -3375,7 +3834,7 @@ class ApiServer {
                             fullName: userSummary.fullName,
                             email: userSummary.email,
                             eppn: userSummary.eppn,
-                            role: "member",
+                            role: role,
                         },
                     },
                     "User added to project",
@@ -3446,16 +3905,6 @@ class ApiServer {
                 return;
             }
 
-            const adminCount = this.countProjectAdmins(project);
-            if (memberToRemove.role === "admin" && adminCount <= 1) {
-                this.sendAdminCommandError(
-                    ws,
-                    msg,
-                    "Cannot remove the last admin from a project",
-                );
-                return;
-            }
-
             project.members = project.members.filter((member) => {
                 return !(member && member.username === username);
             });
@@ -3485,6 +3934,14 @@ class ApiServer {
         }
     }
 
+    /**
+     * Change an existing member's project role from the admin panel.
+     *
+     * Unlike the project-scoped setProjectMemberRole, this deliberately does NOT
+     * refuse to demote a project's last ProjectAdmin: sysadmins hold every project
+     * permission everywhere, so an admin-less project is still administrable, and
+     * this panel is the tool for repairing one.
+     */
     async adminUpdateProjectMemberRole(ws, user, msg) {
         if (!this.isSysAdminUser(user)) {
             this.sendAdminUnauthorized(ws, msg);
@@ -3505,13 +3962,7 @@ class ApiServer {
             msg.data.username.trim() !== ""
                 ? msg.data.username.trim()
                 : "";
-        const roleRaw =
-            msg &&
-            msg.data &&
-            typeof msg.data.role === "string" &&
-            msg.data.role.trim() !== ""
-                ? msg.data.role.trim().toLowerCase()
-                : "";
+        const role = msg && msg.data ? msg.data.role : null;
 
         if (projectId.trim() === "") {
             this.sendAdminCommandError(ws, msg, "Missing projectId");
@@ -3521,8 +3972,12 @@ class ApiServer {
             this.sendAdminCommandError(ws, msg, "Missing username");
             return;
         }
-        if (!this.getAllowedProjectRoles().includes(roleRaw)) {
-            this.sendAdminCommandError(ws, msg, "Invalid role value");
+        if (!this.isValidProjectRole(role)) {
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "Unknown project role: " + role,
+            );
             return;
         }
 
@@ -3534,14 +3989,8 @@ class ApiServer {
                 return;
             }
 
-            if (!Array.isArray(project.members)) {
-                project.members = [];
-            }
-
-            const memberToUpdate = project.members.find((member) => {
-                return member && member.username === username;
-            });
-            if (!memberToUpdate) {
+            const member = this.getProjectMember(project, username);
+            if (!member) {
                 this.sendAdminCommandError(
                     ws,
                     msg,
@@ -3550,21 +3999,7 @@ class ApiServer {
                 return;
             }
 
-            const adminCount = this.countProjectAdmins(project);
-            if (
-                memberToUpdate.role === "admin" &&
-                roleRaw !== "admin" &&
-                adminCount <= 1
-            ) {
-                this.sendAdminCommandError(
-                    ws,
-                    msg,
-                    "Cannot remove the last admin from a project",
-                );
-                return;
-            }
-
-            memberToUpdate.role = roleRaw;
+            member.role = role;
             project.markModified("members");
             await project.save();
 
@@ -3572,12 +4007,8 @@ class ApiServer {
                 new WebSocketMessage(
                     msg.requestId,
                     msg.cmd,
-                    {
-                        projectId: projectId,
-                        username: username,
-                        role: roleRaw,
-                    },
-                    "Project member role updated",
+                    { projectId: projectId, username: username, role: role },
+                    "Member role updated",
                     "end",
                     true,
                 ).toJSON(),
@@ -4078,7 +4509,25 @@ class ApiServer {
             });
     }
 
+    /**
+     * Redeem an invite code: authorize the account and add it to the code's project.
+     *
+     * Every code carries exactly one projectId and one project role, so redeeming a
+     * code is always "join this project as this role". Codes may additionally be
+     * locked to a single eppn, in which case only that identity can redeem them.
+     */
     async validateInviteCode(ws, msg, userInfo) {
+        const respond = (result) => {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "validateInviteCode",
+                    result: result,
+                    requestId: msg.requestId,
+                }),
+            );
+        };
+
         let db = await this.connectToMongo("visp");
         let inviteCodesCollection = db.collection("invite_codes");
         let inviteCodeObject = await inviteCodesCollection.findOne({
@@ -4086,107 +4535,197 @@ class ApiServer {
             used: false,
         });
 
-        if (inviteCodeObject) {
-            let userCollection = db.collection("users");
-
-            if (userInfo == null) {
-                this.app.addLog(
-                    "Session data was null when trying to validate invite code.",
-                    "error",
-                );
-                ws.send(
-                    JSON.stringify({
-                        type: "cmd-result",
-                        cmd: "validateInviteCode",
-                        result: false,
-                        requestId: msg.requestId,
-                    }),
-                );
-                return;
-            }
-            //check that the user is not already in the database
-            let user = await userCollection.findOne({
-                username: userInfo.username,
-                loginAllowed: true,
-            });
-            if (user) {
-                this.app.addLog(
-                    "User " +
-                        user.username +
-                        " tried to use an invite code, but user is already in the database and authorized.",
-                    "warning",
-                );
-                ws.send(
-                    JSON.stringify({
-                        type: "cmd-result",
-                        cmd: "validateInviteCode",
-                        result: false,
-                        requestId: msg.requestId,
-                    }),
-                );
-                return;
-            }
-            userCollection.updateOne(
-                { username: userInfo.username },
-                { $set: { loginAllowed: true } },
-            );
-
-            inviteCodeObject.projectIds.forEach((projectId) => {
-                let projectCollection = db.collection("projects");
-                projectCollection.updateOne(
-                    { id: projectId },
-                    {
-                        $push: {
-                            members: {
-                                username: userInfo.username,
-                                role: "member",
-                            },
-                        },
-                    },
-                );
-            });
-
-            //mark the code as used
-            inviteCodesCollection.updateOne(
-                { code: msg.data.code },
-                { $set: { used: true, usedDate: new Date() } },
-            );
-
-            this.app.addLog(
-                "User " +
-                    userInfo.username +
-                    " entered a valid invite code and was added to database",
-                "info",
-            );
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "validateInviteCode",
-                    result: true,
-                    requestId: msg.requestId,
-                }),
-            );
-        } else {
+        if (!inviteCodeObject) {
             this.app.addLog(
                 "Invalid invite code " +
                     msg.data.code +
                     ", user eppn: " +
-                    userInfo.eppn,
+                    userInfo?.eppn,
                 "info",
             );
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "validateInviteCode",
-                    result: false,
-                    requestId: msg.requestId,
-                }),
+            respond(false);
+            return;
+        }
+
+        if (userInfo == null) {
+            this.app.addLog(
+                "Session data was null when trying to validate invite code.",
+                "error",
+            );
+            respond(false);
+            return;
+        }
+
+        // A code restricted to an eppn is a personal invitation - refuse it for
+        // anyone else, and log it, since a mismatch means the code leaked.
+        if (inviteCodeObject.eppn && inviteCodeObject.eppn !== userInfo.eppn) {
+            this.app.addLog(
+                "User " +
+                    userInfo.eppn +
+                    " tried to use an invite code restricted to " +
+                    inviteCodeObject.eppn,
+                "warning",
+            );
+            respond(false);
+            return;
+        }
+
+        let userCollection = db.collection("users");
+
+        //check that the user is not already in the database
+        let user = await userCollection.findOne({
+            username: userInfo.username,
+            loginAllowed: true,
+        });
+        if (user) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " tried to use an invite code, but user is already in the database and authorized.",
+                "warning",
+            );
+            respond(false);
+            return;
+        }
+
+        const grantedProjectRole = this.isValidProjectRole(
+            inviteCodeObject.role,
+        )
+            ? inviteCodeObject.role
+            : ApiServer.PROJECT_ROLE_RESEARCHER;
+
+        // Invite codes never confer a system role - they let someone into one
+        // project. SysAdmin is granted out of band (vispctl / the admin panel).
+        await userCollection.updateOne(
+            { username: userInfo.username },
+            {
+                $set: {
+                    loginAllowed: true,
+                    system_role: ApiServer.SYSTEM_ROLE_USER,
+                },
+            },
+        );
+
+        if (inviteCodeObject.projectId) {
+            await db.collection("projects").updateOne(
+                {
+                    id: inviteCodeObject.projectId,
+                    "members.username": { $ne: userInfo.username },
+                },
+                {
+                    $push: {
+                        members: {
+                            username: userInfo.username,
+                            role: grantedProjectRole,
+                        },
+                    },
+                },
+            );
+        } else {
+            // Pre-migration codes had no project. Redeeming one still authorizes
+            // the account, it just does not put them in a project.
+            this.app.addLog(
+                "Invite code " +
+                    msg.data.code +
+                    " has no projectId - authorizing " +
+                    userInfo.username +
+                    " without project membership",
+                "warning",
             );
         }
+
+        //mark the code as used
+        await inviteCodesCollection.updateOne(
+            { code: msg.data.code },
+            { $set: { used: true, usedDate: new Date() } },
+        );
+
+        this.app.addLog(
+            "User " +
+                userInfo.username +
+                " entered a valid invite code and was added to database",
+            "info",
+        );
+        respond(true);
+    }
+
+    /**
+     * Load a project and check that `user` may issue/manage invite codes for it.
+     * Returns the project on success, or null after having answered `ws` with the
+     * appropriate error.
+     */
+    async authorizeInviteCodeAccess(ws, msg, user, projectId) {
+        const deny = (message) => {
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {},
+                    message,
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+        };
+
+        if (!projectId) {
+            deny("An invite code must be assigned to a project");
+            return null;
+        }
+
+        const project = await this.mongoose
+            .model("Project")
+            .findOne({ id: projectId })
+            .lean();
+        if (!project) {
+            deny("Project not found");
+            return null;
+        }
+
+        if (!this.getProjectPermissions(project, user).createInviteCodes) {
+            this.app.addLog(
+                "User " +
+                    user?.username +
+                    " tried to manage invite codes for project " +
+                    projectId +
+                    " without being a project admin of it",
+                "warning",
+            );
+            deny(
+                "User is not authorized to create invite codes for this project",
+            );
+            return null;
+        }
+
+        return project;
     }
 
     async generateInviteCode(ws, msg) {
         let user = this.getUserSessionBySocket(ws);
+        const projectId = msg.data?.projectId ?? null;
+
+        const project = await this.authorizeInviteCodeAccess(
+            ws,
+            msg,
+            user,
+            projectId,
+        );
+        if (!project) {
+            return;
+        }
+
+        const grantableRoleNames = this.listGrantableProjectRoles().map(
+            (role) => role.name,
+        );
+        const requestedRole = grantableRoleNames.includes(msg.data?.role)
+            ? msg.data.role
+            : ApiServer.PROJECT_ROLE_RESEARCHER;
+
+        // Optional: lock the code to one SWAMID identity.
+        const restrictedEppn =
+            typeof msg.data?.eppn === "string" && msg.data.eppn.trim() !== ""
+                ? msg.data.eppn.trim()
+                : null;
 
         let inviteCode = nanoid.nanoid();
         //insert the invite code into the mongodb collection "invite_codes"
@@ -4194,9 +4733,10 @@ class ApiServer {
         let collection = db.collection("invite_codes");
         await collection.insertOne({
             code: inviteCode,
-            projectIds: msg.projectIds,
+            projectId: projectId,
+            role: requestedRole,
+            eppn: restrictedEppn,
             used: false,
-            role: "transcriber",
             createdBy: user.eppn,
             created: new Date(),
         });
@@ -4210,26 +4750,109 @@ class ApiServer {
         );
     }
 
-    async updateInviteCodes(ws, msg) {
-        for (let key in msg.data.inviteCodes) {
-            /*
-            if you're thinking it's stupid to re-connect to the db for each iteration here, i am completely with you, but it doesn't work if I don't - hear me out
-            I can't explain it, but if I put the connection on top of the loop it will fail on the second iteration, no idea why
-            */
-            let db = await this.connectToMongo("visp");
-            let collection = db.collection("invite_codes");
+    async getProjectRoles(ws, msg) {
+        const roles = this.listProjectRoles().map((roleDoc) => ({
+            name: roleDoc.name,
+            label: roleDoc.label,
+            grantableViaInviteCode: roleDoc.grantableViaInviteCode,
+        }));
+        ws.send(
+            new WebSocketMessage(
+                msg.requestId,
+                msg.cmd,
+                roles,
+                null,
+                "end",
+                true,
+            ).toJSON(),
+        );
+    }
 
+    async getSystemRoles(ws, msg) {
+        const roles = this.listSystemRoles().map((roleDoc) => ({
+            name: roleDoc.name,
+            label: roleDoc.label,
+        }));
+        ws.send(
+            new WebSocketMessage(
+                msg.requestId,
+                msg.cmd,
+                roles,
+                null,
+                "end",
+                true,
+            ).toJSON(),
+        );
+    }
+
+    /**
+     * Update the role and eppn restriction of existing codes. The project a code
+     * belongs to is fixed at creation and cannot be reassigned - moving a code
+     * between projects would let a project admin invite people into a project they
+     * do not administer.
+     */
+    async updateInviteCodes(ws, msg) {
+        let user = this.getUserSessionBySocket(ws);
+        let db = await this.connectToMongo("visp");
+        let collection = db.collection("invite_codes");
+
+        const grantableRoleNames = this.listGrantableProjectRoles().map(
+            (role) => role.name,
+        );
+
+        // Authorize every code *before* writing any of them, so a request that
+        // touches a project the user does not administer is rejected whole rather
+        // than leaving the earlier codes in the batch already updated.
+        const pendingUpdates = [];
+        for (let key in msg.data.inviteCodes) {
             let inviteCode = msg.data.inviteCodes[key];
+
+            const existing = await collection.findOne({
+                code: inviteCode.code,
+            });
+            if (!existing) {
+                continue;
+            }
+
+            // Re-authorize per code against the project the code already belongs to.
+            const project = await this.authorizeInviteCodeAccess(
+                ws,
+                msg,
+                user,
+                existing.projectId,
+            );
+            if (!project) {
+                return;
+            }
+
+            const role = grantableRoleNames.includes(inviteCode.role)
+                ? inviteCode.role
+                : ApiServer.PROJECT_ROLE_RESEARCHER;
+            const restrictedEppn =
+                typeof inviteCode.eppn === "string" &&
+                inviteCode.eppn.trim() !== ""
+                    ? inviteCode.eppn.trim()
+                    : null;
+
+            pendingUpdates.push({
+                code: inviteCode.code,
+                role: role,
+                eppn: restrictedEppn,
+            });
+        }
+
+        for (const update of pendingUpdates) {
             await collection.updateOne(
-                { code: inviteCode.code },
+                { code: update.code },
                 {
                     $set: {
-                        projectIds: inviteCode.projectIds,
-                        role: inviteCode.role,
+                        role: update.role,
+                        eppn: update.eppn,
                     },
                 },
             );
         }
+
         ws.send(
             JSON.stringify({
                 type: "cmd-result",
@@ -4240,18 +4863,29 @@ class ApiServer {
         );
     }
 
-    async getInviteCodesByUser(ws, msg) {
+    async getInviteCodesByProject(ws, msg) {
         let user = this.getUserSessionBySocket(ws);
+        const projectId = msg.data?.projectId ?? null;
+
+        const project = await this.authorizeInviteCodeAccess(
+            ws,
+            msg,
+            user,
+            projectId,
+        );
+        if (!project) {
+            return;
+        }
 
         let db = await this.connectToMongo("visp");
         let collection = db.collection("invite_codes");
         let inviteCodes = await collection
-            .find({ createdBy: user.eppn, used: false })
+            .find({ projectId: projectId, used: false })
             .toArray();
         ws.send(
             JSON.stringify({
                 type: "cmd-result",
-                cmd: "getInviteCodesByUser",
+                cmd: "getInviteCodesByProject",
                 result: inviteCodes,
                 requestId: msg.requestId,
             }),
@@ -4259,8 +4893,34 @@ class ApiServer {
     }
 
     async deleteInviteCode(ws, msg) {
+        let user = this.getUserSessionBySocket(ws);
+
         let db = await this.connectToMongo("visp");
         let collection = db.collection("invite_codes");
+
+        const existing = await collection.findOne({ code: msg.data.code });
+        if (!existing) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "deleteInviteCode",
+                    result: "OK",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+
+        const project = await this.authorizeInviteCodeAccess(
+            ws,
+            msg,
+            user,
+            existing.projectId,
+        );
+        if (!project) {
+            return;
+        }
+
         await collection.deleteOne({ code: msg.data.code });
         ws.send(
             JSON.stringify({
@@ -4488,8 +5148,12 @@ class ApiServer {
         safePathComponent(session.name, "sessionName");
         safePathComponent(fileBaseName, "fileName");
         let repoBundlePath = safeJoinedPath(
-            "/repositories", project.id, "Data", "VISP_emuDB",
-            session.name + "_ses", fileBaseName + "_bndl",
+            "/repositories",
+            project.id,
+            "Data",
+            "VISP_emuDB",
+            session.name + "_ses",
+            fileBaseName + "_bndl",
         );
         this.app.addLog(
             "Downloading bundle directory " + repoBundlePath,
@@ -4565,18 +5229,20 @@ class ApiServer {
             return;
         }
 
-        //check that this user is a project member and has the role 'admin'
-        let userIsAdmin = project.members.find(
-            (m) => m.username == user.username && m.role == "admin",
-        );
-        if (!userIsAdmin) {
+        //check that this user is a project member allowed to edit files
+        let userCanEditFiles = this.getProjectPermissions(
+            project,
+            user,
+        ).editProjectFiles;
+        if (!userCanEditFiles) {
             ws.send(
                 JSON.stringify({
                     type: "cmd-result",
                     cmd: "deleteBundle",
                     progress: "end",
                     result: false,
-                    message: "User is not admin for this project",
+                    message:
+                        "User is not authorized to edit files in this project",
                     requestId: msg.requestId,
                 }),
             );
@@ -4589,8 +5255,12 @@ class ApiServer {
         safePathComponent(session.name, "sessionName");
         safePathComponent(fileBaseName, "fileName");
         let repoBundlePath = safeJoinedPath(
-            "/repositories", project.id, "Data", "VISP_emuDB",
-            session.name + "_ses", fileBaseName + "_bndl",
+            "/repositories",
+            project.id,
+            "Data",
+            "VISP_emuDB",
+            session.name + "_ses",
+            fileBaseName + "_bndl",
         );
         this.app.addLog("Deleting bundle directory " + repoBundlePath, "debug");
 
@@ -4670,17 +5340,18 @@ class ApiServer {
             return;
         }
 
-        const userIsAdmin = project.members.find(
-            (m) => m.username == user.username && m.role == "admin",
-        );
-        if (!userIsAdmin) {
+        const userCanManageMembers = this.getProjectPermissions(
+            project,
+            user,
+        ).manageProjectMembers;
+        if (!userCanManageMembers) {
             ws.send(
                 JSON.stringify({
                     type: "cmd-result",
                     cmd: "setProjectArchived",
                     progress: "end",
                     result: false,
-                    message: "User is not admin for this project",
+                    message: "User is not authorized to manage this project",
                     requestId: msg.requestId,
                 }),
             );
@@ -4693,7 +5364,9 @@ class ApiServer {
 
         if (archived) {
             const runningSessions =
-                await this.app.sessMan.getContainerSessionsByProjectId(projectId);
+                await this.app.sessMan.getContainerSessionsByProjectId(
+                    projectId,
+                );
             for (const runningSession of runningSessions) {
                 await this.app.sessMan.deleteSession(runningSession.accessCode);
             }
@@ -4709,9 +5382,7 @@ class ApiServer {
                     projectId: projectId,
                     archived: archived,
                 },
-                message: archived
-                    ? "Project archived"
-                    : "Project unarchived",
+                message: archived ? "Project archived" : "Project unarchived",
                 requestId: msg.requestId,
             }),
         );
@@ -4783,12 +5454,10 @@ class ApiServer {
         let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
-        const projectMetadata = this.getProjectMetadataFromPayload(
-            projectFormData,
-        );
-        const projectWideMetadata = this.getProjectWideMetadataFromPayload(
-            projectFormData,
-        );
+        const projectMetadata =
+            this.getProjectMetadataFromPayload(projectFormData);
+        const projectWideMetadata =
+            this.getProjectWideMetadataFromPayload(projectFormData);
         //projectFormData.id = nanoid.customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 21); //this is just to avoid the possibility of getting a "-" as the first character, which is annoying when you wish to work with the directory in the terminal
         projectFormData.id = nanoid.nanoid(21);
         /*
@@ -4902,10 +5571,12 @@ session-manager_1    | }
             sessions: [],
             annotationLevels: projectFormData.annotLevels,
             annotationLinks: projectFormData.annotLevelLinks,
+            // The creator administers the project they just made. Everyone added
+            // later defaults to researcher (see addProjectMember).
             members: [
                 {
                     username: String(user.username),
-                    role: "admin",
+                    role: ApiServer.PROJECT_ROLE_PROJECT_ADMIN,
                 },
             ],
             docs: projectFormData.docFiles,
@@ -4957,7 +5628,13 @@ session-manager_1    | }
                 message: "Building project directory",
             }),
         );
-        const emuDbOk = await this.saveProjectEmuDb(user, projectFormData, true, ws, msg);
+        const emuDbOk = await this.saveProjectEmuDb(
+            user,
+            projectFormData,
+            true,
+            ws,
+            msg,
+        );
         if (emuDbOk === false) {
             // saveProjectEmuDb already sent the error progress=end message, nothing more to do
             return;
@@ -4998,11 +5675,7 @@ session-manager_1    | }
     }
 
     async saveProject(ws, user, msg) {
-        if (
-            !user ||
-            !user.privileges ||
-            user.privileges.createProjects != true
-        ) {
+        if (!user || !this.getSystemPermissions(user).createProjects) {
             this.app.addLog(
                 "User " +
                     user.username +
@@ -5039,9 +5712,8 @@ session-manager_1    | }
         let totalStepsNum = 14;
         let stepNum = 0;
         let projectFormData = msg.project;
-        const projectMetadata = this.getProjectMetadataFromPayload(
-            projectFormData,
-        );
+        const projectMetadata =
+            this.getProjectMetadataFromPayload(projectFormData);
 
         this.app.addLog("Updating project");
         if (!this.validateProjectForm(projectFormData)) {
@@ -5076,7 +5748,13 @@ session-manager_1    | }
                 result: "Building project directory",
             }),
         );
-        const emuDbOk = await this.saveProjectEmuDb(user, projectFormData, false, ws, msg);
+        const emuDbOk = await this.saveProjectEmuDb(
+            user,
+            projectFormData,
+            false,
+            ws,
+            msg,
+        );
         if (emuDbOk === false) {
             return;
         }
@@ -5127,12 +5805,10 @@ session-manager_1    | }
             this.app.addLog("Could not find project in MongoDB", "error");
             return;
         }
-        const projectMetadata = this.getProjectMetadataFromPayload(
-            projectFormData,
-        );
-        const projectWideMetadata = this.getProjectWideMetadataFromPayload(
-            projectFormData,
-        );
+        const projectMetadata =
+            this.getProjectMetadataFromPayload(projectFormData);
+        const projectWideMetadata =
+            this.getProjectWideMetadataFromPayload(projectFormData);
         mongoProject.annotationLevels = projectFormData.annotLevels;
         mongoProject.annotationLinks = projectFormData.annotLevelLinks;
         mongoProject.description = projectMetadata.description;
@@ -5279,9 +5955,11 @@ session-manager_1    | }
         //does the directory exist?
         if (!fs.existsSync(dir)) {
             this.app.addLog(
-                "Upload directory " + dir + " does not exist — no audio files were uploaded. " +
-                "This usually means the file upload POST failed (check webapi logs for permission errors). " +
-                "The project will be created without audio files.",
+                "Upload directory " +
+                    dir +
+                    " does not exist — no audio files were uploaded. " +
+                    "This usually means the file upload POST failed (check webapi logs for permission errors). " +
+                    "The project will be created without audio files.",
                 "warning",
             );
             return processedFiles;
@@ -5475,7 +6153,9 @@ session-manager_1    | }
         const userUploadDirLocal = "/tmp/uploads/" + user.username;
         try {
             if (fs.existsSync(userUploadDirLocal)) {
-                const entries = fs.readdirSync(userUploadDirLocal, { withFileTypes: true });
+                const entries = fs.readdirSync(userUploadDirLocal, {
+                    withFileTypes: true,
+                });
                 const now = Date.now();
                 const maxAgeMs = 24 * 60 * 60 * 1000; // 24 hours
                 for (const entry of entries) {
@@ -5487,14 +6167,20 @@ session-manager_1    | }
                         const ageMs = now - stat.mtimeMs;
                         if (ageMs > maxAgeMs) {
                             this.app.addLog(
-                                "Cleaning up stale upload directory: " + dirPath +
-                                " (age: " + Math.round(ageMs / 3600000) + "h)",
+                                "Cleaning up stale upload directory: " +
+                                    dirPath +
+                                    " (age: " +
+                                    Math.round(ageMs / 3600000) +
+                                    "h)",
                             );
                             fs.removeSync(dirPath);
                         }
                     } catch (cleanupErr) {
                         this.app.addLog(
-                            "Failed to clean up stale upload directory " + dirPath + ": " + cleanupErr.toString(),
+                            "Failed to clean up stale upload directory " +
+                                dirPath +
+                                ": " +
+                                cleanupErr.toString(),
                             "warn",
                         );
                     }
@@ -5502,7 +6188,8 @@ session-manager_1    | }
             }
         } catch (scanErr) {
             this.app.addLog(
-                "Failed to scan for stale upload directories: " + scanErr.toString(),
+                "Failed to scan for stale upload directories: " +
+                    scanErr.toString(),
                 "warn",
             );
         }
@@ -5560,7 +6247,8 @@ session-manager_1    | }
             }
         } catch (chmodErr) {
             this.app.addLog(
-                "Warning: could not set permissions on upload directory: " + chmodErr.toString(),
+                "Warning: could not set permissions on upload directory: " +
+                    chmodErr.toString(),
                 "warn",
             );
         }
@@ -5700,7 +6388,12 @@ session-manager_1    | }
                     "Raw output: " +
                     String(resultJson).substring(0, 500);
                 this.app.addLog(errMsg, "error");
-                console.error("[saveProjectEmuDb] emudb-create parse error:", parseErr, "raw:", resultJson);
+                console.error(
+                    "[saveProjectEmuDb] emudb-create parse error:",
+                    parseErr,
+                    "raw:",
+                    resultJson,
+                );
                 if (ws && msg) {
                     ws.send(
                         JSON.stringify({
@@ -5709,7 +6402,8 @@ session-manager_1    | }
                             cmd: msg.cmd,
                             progress: "end",
                             result: false,
-                            message: "Failed to create EMU-DB: container-agent output could not be parsed. Check server logs.",
+                            message:
+                                "Failed to create EMU-DB: container-agent output could not be parsed. Check server logs.",
                         }),
                     );
                 }
@@ -5725,7 +6419,10 @@ session-manager_1    | }
                     ". stderr: " +
                     result.body.stderr;
                 this.app.addLog(errMsg, "error");
-                console.error("[saveProjectEmuDb] emudb-create failed:", errMsg);
+                console.error(
+                    "[saveProjectEmuDb] emudb-create failed:",
+                    errMsg,
+                );
                 if (ws && msg) {
                     ws.send(
                         JSON.stringify({
@@ -5734,7 +6431,11 @@ session-manager_1    | }
                             cmd: msg.cmd,
                             progress: "end",
                             result: false,
-                            message: "Failed to create EMU-DB (code " + result.code + "): " + result.body.stderr,
+                            message:
+                                "Failed to create EMU-DB (code " +
+                                result.code +
+                                "): " +
+                                result.body.stderr,
                         }),
                     );
                 }
@@ -6481,14 +7182,18 @@ session-manager_1    | }
         try {
             if (fs.existsSync(uploadsSrcDirLocal)) {
                 this.app.addLog(
-                    "Cleaning up upload directory after successful save: " + uploadsSrcDirLocal,
+                    "Cleaning up upload directory after successful save: " +
+                        uploadsSrcDirLocal,
                 );
                 fs.removeSync(uploadsSrcDirLocal);
             }
         } catch (cleanupErr) {
             // Non-fatal — log and continue. The files are already in the repo.
             this.app.addLog(
-                "Failed to clean up upload directory " + uploadsSrcDirLocal + ": " + cleanupErr.toString(),
+                "Failed to clean up upload directory " +
+                    uploadsSrcDirLocal +
+                    ": " +
+                    cleanupErr.toString(),
                 "warn",
             );
         }
@@ -6568,9 +7273,8 @@ session-manager_1    | }
             }
         });
 
-        const projectWideMetadata = this.getProjectWideMetadataFromPayload(
-            projectFormData,
-        );
+        const projectWideMetadata =
+            this.getProjectWideMetadataFromPayload(projectFormData);
         projectFormData.spokenLanguage = projectWideMetadata.spokenLanguage;
         projectFormData.recordingDevice = projectWideMetadata.recordingDevice;
 
@@ -6657,13 +7361,20 @@ session-manager_1    | }
         const qcm = projectFormData.qualityControlMethods;
         if (qcm !== undefined && qcm !== null) {
             if (!Array.isArray(qcm)) {
-                this.app.addLog("qualityControlMethods must be an array", "warn");
+                this.app.addLog(
+                    "qualityControlMethods must be an array",
+                    "warn",
+                );
                 return false;
             }
             for (const method of qcm) {
-                if (typeof method !== "string" || !allowedQualityControlMethods.includes(method)) {
+                if (
+                    typeof method !== "string" ||
+                    !allowedQualityControlMethods.includes(method)
+                ) {
                     this.app.addLog(
-                        "qualityControlMethods contains invalid value: " + method,
+                        "qualityControlMethods contains invalid value: " +
+                            method,
                         "warn",
                     );
                     return false;
@@ -6719,12 +7430,15 @@ session-manager_1    | }
         }
 
         //create personal directory user Applications for this user
-        const userDirName = (user.firstName + " " + user.lastName + " (" + user.eppn + ")")
-            .replace(/[/\\\0]/g, "_"); // Sanitize path separators from IdP-provided names
-        let userApplicationsDir =
-            repoDir +
-            "/Applications/" +
-            userDirName;
+        const userDirName = (
+            user.firstName +
+            " " +
+            user.lastName +
+            " (" +
+            user.eppn +
+            ")"
+        ).replace(/[/\\\0]/g, "_"); // Sanitize path separators from IdP-provided names
+        let userApplicationsDir = repoDir + "/Applications/" + userDirName;
         if (!fs.existsSync(userApplicationsDir)) {
             this.app.addLog(
                 "Creating user applications directory " + userApplicationsDir,
@@ -7047,7 +7761,13 @@ session-manager_1    | }
     }
 
     async registerAudioFilesForImport(projectId, sessionId) {
-        this.app.addLog("Registering audio files for import: project " + projectId + ", session " + sessionId, "info");
+        this.app.addLog(
+            "Registering audio files for import: project " +
+                projectId +
+                ", session " +
+                sessionId,
+            "info",
+        );
         const ImportQueueItem = this.mongoose.model("ImportQueueItem");
         const queueItem = new ImportQueueItem({
             projectId: projectId,
@@ -7056,7 +7776,10 @@ session-manager_1    | }
             createdAt: new Date(),
         });
         await queueItem.save();
-        this.app.addLog("Import queue item registered: " + queueItem._id, "info");
+        this.app.addLog(
+            "Import queue item registered: " + queueItem._id,
+            "info",
+        );
         // wsrng-server only registers an item once the session is genuinely
         // complete (all expected files uploaded), so process it right away rather
         // than waiting for the next poll. Fire-and-forget; the importQueueRunning
@@ -7087,27 +7810,51 @@ session-manager_1    | }
                 return;
             }
 
-            this.app.addLog("Processing import queue item: " + item._id + " (project: " + item.projectId + ", session: " + item.sessionId + ")", "info");
+            this.app.addLog(
+                "Processing import queue item: " +
+                    item._id +
+                    " (project: " +
+                    item.projectId +
+                    ", session: " +
+                    item.sessionId +
+                    ")",
+                "info",
+            );
             item.status = "processing";
             item.updatedAt = new Date();
             await item.save();
 
             try {
-                const result = await this.importAudioFiles(item.projectId, item.sessionId);
+                const result = await this.importAudioFiles(
+                    item.projectId,
+                    item.sessionId,
+                );
                 item.status = "completed";
                 item.finishedAt = new Date();
                 item.updatedAt = new Date();
                 await item.save();
-                this.app.addLog("Import queue item completed: " + item._id, "info");
+                this.app.addLog(
+                    "Import queue item completed: " + item._id,
+                    "info",
+                );
             } catch (err) {
-                this.app.addLog("Import queue item failed: " + item._id + " - " + err.message, "error");
+                this.app.addLog(
+                    "Import queue item failed: " +
+                        item._id +
+                        " - " +
+                        err.message,
+                    "error",
+                );
                 item.status = "failed";
                 item.error = err.message;
                 item.updatedAt = new Date();
                 await item.save();
             }
         } catch (err) {
-            this.app.addLog("Import queue processor error: " + err.message, "error");
+            this.app.addLog(
+                "Import queue processor error: " + err.message,
+                "error",
+            );
         } finally {
             this.importQueueRunning = false;
         }
@@ -7126,7 +7873,8 @@ session-manager_1    | }
         let volumes = [
             {
                 source: safeMountSource(
-                    this.app.absRootPath, "mounts/repositories/" + projectId,
+                    this.app.absRootPath,
+                    "mounts/repositories/" + projectId,
                 ),
                 target: "/home/jovyan/project",
             },
@@ -7212,8 +7960,12 @@ session-manager_1    | }
         await this.app.sessMan.deleteSession(containerSession.accessCode);
 
         const fileLocation = safeJoinedPath(
-            "/repositories", projectId, "Data", "speech_recorder_uploads",
-            "emudb-sessions", sessionId,
+            "/repositories",
+            projectId,
+            "Data",
+            "speech_recorder_uploads",
+            "emudb-sessions",
+            sessionId,
         );
         let files = fs
             .readdirSync(fileLocation)
@@ -7284,8 +8036,12 @@ session-manager_1    | }
             await this.notifyProjectMembers(projectId, {
                 type: "success",
                 message:
-                    'Recording session "' + sessionName + '" was imported (' +
-                    fileCount + (fileCount === 1 ? " file" : " files") + ").",
+                    'Recording session "' +
+                    sessionName +
+                    '" was imported (' +
+                    fileCount +
+                    (fileCount === 1 ? " file" : " files") +
+                    ").",
                 metadata: {
                     sessionId: sessionId,
                     fileCount: fileCount,
@@ -7293,7 +8049,10 @@ session-manager_1    | }
                 },
             });
         } catch (err) {
-            this.app.addLog("Could not notify project members of import: " + err.message, "warn");
+            this.app.addLog(
+                "Could not notify project members of import: " + err.message,
+                "warn",
+            );
         }
 
         return new ApiResponse(200, "Audio files imported");
@@ -7455,14 +8214,29 @@ session-manager_1    | }
 
     setupEndpoints() {
         this.expressApp.post("/api/importaudiofiles", async (req, res) => {
-            this.app.addLog("importAudioFiles - registering for import", "debug");
+            this.app.addLog(
+                "importAudioFiles - registering for import",
+                "debug",
+            );
             try {
-                const queueItem = await this.registerAudioFilesForImport(req.body.projectId, req.body.sessionId);
-                let ar = new ApiResponse(200, "Audio files registered for import");
+                const queueItem = await this.registerAudioFilesForImport(
+                    req.body.projectId,
+                    req.body.sessionId,
+                );
+                let ar = new ApiResponse(
+                    200,
+                    "Audio files registered for import",
+                );
                 res.status(ar.code).end(ar.toJSON());
             } catch (err) {
-                this.app.addLog("Error registering audio files for import: " + err.message, "error");
-                let ar = new ApiResponse(500, "Error registering audio files for import");
+                this.app.addLog(
+                    "Error registering audio files for import: " + err.message,
+                    "error",
+                );
+                let ar = new ApiResponse(
+                    500,
+                    "Error registering audio files for import",
+                );
                 res.status(ar.code).end(ar.toJSON());
             }
         });
@@ -7758,5 +8532,81 @@ session-manager_1    | }
         this.whisperService.shutdown();
     }
 }
+
+// ── Role definitions ──────────────────────────────────────────────────────────
+//
+// VISP has two parallel role systems.
+//
+//   System roles (users.system_role, defined in the `system_roles` collection)
+//     govern the installation as a whole. SysAdmins are the super users: they
+//     reach the system-wide admin panel and create projects. Everyone else is a
+//     plain User and can only act inside projects they belong to.
+//
+//   Project roles (projects.members[].role, defined in the `project_roles`
+//     collection) govern what a member may do inside one specific project. A
+//     ProjectAdmin can do everything in their project, including issuing invite
+//     codes for it; a Researcher can do everything except issue invite codes.
+//
+// Both collections are re-seeded from these definitions on every boot, so this
+// file - not the database - is the source of truth for what each role may do.
+
+ApiServer.SYSTEM_ROLE_SYS_ADMIN = "sys_admin";
+ApiServer.SYSTEM_ROLE_USER = "user";
+
+ApiServer.PROJECT_ROLE_PROJECT_ADMIN = "project_admin";
+ApiServer.PROJECT_ROLE_RESEARCHER = "researcher";
+
+ApiServer.DEFAULT_SYSTEM_ROLES = [
+    {
+        name: ApiServer.SYSTEM_ROLE_SYS_ADMIN,
+        label: "System admin",
+        permissions: {
+            sysAdminPanel: true,
+            createProjects: true,
+        },
+    },
+    {
+        name: ApiServer.SYSTEM_ROLE_USER,
+        label: "User",
+        permissions: {
+            sysAdminPanel: false,
+            createProjects: false,
+        },
+    },
+];
+
+ApiServer.DEFAULT_PROJECT_ROLES = [
+    {
+        name: ApiServer.PROJECT_ROLE_PROJECT_ADMIN,
+        label: "Project admin",
+        grantableViaInviteCode: true,
+        permissions: {
+            createInviteCodes: true,
+            manageProjectMembers: true,
+            editProjectFiles: true,
+        },
+    },
+    {
+        name: ApiServer.PROJECT_ROLE_RESEARCHER,
+        label: "Researcher",
+        grantableViaInviteCode: true,
+        permissions: {
+            createInviteCodes: false,
+            manageProjectMembers: true,
+            editProjectFiles: true,
+        },
+    },
+];
+
+// Derived from the role definitions so a newly added project permission is
+// automatically granted to sysadmins and denied to non-members.
+ApiServer.ALL_PROJECT_PERMISSIONS = {};
+ApiServer.NO_PROJECT_PERMISSIONS = {};
+ApiServer.DEFAULT_PROJECT_ROLES.forEach((roleDef) => {
+    Object.keys(roleDef.permissions).forEach((permission) => {
+        ApiServer.ALL_PROJECT_PERMISSIONS[permission] = true;
+        ApiServer.NO_PROJECT_PERMISSIONS[permission] = false;
+    });
+});
 
 module.exports = ApiServer;

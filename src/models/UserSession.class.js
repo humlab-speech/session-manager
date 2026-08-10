@@ -20,7 +20,7 @@ class UserSession {
         this.eppn = userSession.eppn;
         this.accessListValidationPass = false;
         this.warnings = [];
-        this.privileges = userSession.privileges;
+        this.system_role = userSession.system_role;
 
         if (typeof this.id == "undefined") {
             this.warnings.push(

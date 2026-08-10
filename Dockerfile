@@ -4,7 +4,7 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM node:20.20.2-bookworm-slim AS dependencies
+FROM node:24.19.0-bookworm-slim AS dependencies
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ RUN npm ci
 # ============================================================================
 # Stage 2: Build (if there were a build step, but session-manager doesn't have one)
 # ============================================================================
-FROM node:20.20.2-bookworm-slim AS builder
+FROM node:24.19.0-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -49,10 +49,13 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     && mkdir -p /etc/apt/keyrings
 
-# Install Node.js 20
+# Install Node.js 24 (Active LTS; Node 20 reached end-of-life 2026-04-30).
+# Keep this major in sync with the build stages above — the runtime must match the
+# Node that built node_modules, and in dev mode the bind-mounted host node_modules
+# is installed through this image (see ./visp.py npm).
 RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
     gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
     tee /etc/apt/sources.list.d/nodesource.list
 
 # Install all runtime requirements

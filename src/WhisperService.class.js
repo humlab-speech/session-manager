@@ -14,7 +14,8 @@ class WhisperService {
         // Number of notebook transcriptions currently waiting or running.
         // Capped at MAX_NOTEBOOK_PENDING to prevent UI queue starvation.
         this.notebookPending = 0;
-        this.socketPath = process.env.WHISPERX_SOCKET_PATH || "/run/whisperx/whisperx.sock";
+        this.socketPath =
+            process.env.WHISPERX_SOCKET_PATH || "/run/whisperx/whisperx.sock";
         // Track which model package is loaded in WhisperVault.
         // Starts as "multilingual" because the quadlet default is faster-whisper-large-v3.
         // Switched to "sv-standard" when Swedish is explicitly requested.
@@ -23,106 +24,106 @@ class WhisperService {
         // Language name → ISO 639-1 code mapping (matches whisperx LANGUAGES dict).
         // WhisperVault expects ISO codes; the webclient sends full English names.
         this.languageToIso = {
-            "afrikaans": "af",
-            "albanian": "sq",
-            "amharic": "am",
-            "arabic": "ar",
-            "armenian": "hy",
-            "assamese": "as",
-            "azerbaijani": "az",
-            "bashkir": "ba",
-            "basque": "eu",
-            "belarusian": "be",
-            "bengali": "bn",
-            "bosnian": "bs",
-            "breton": "br",
-            "bulgarian": "bg",
-            "cantonese": "yue",
-            "catalan": "ca",
-            "chinese": "zh",
-            "croatian": "hr",
-            "czech": "cs",
-            "danish": "da",
-            "dutch": "nl",
-            "english": "en",
-            "estonian": "et",
-            "faroese": "fo",
-            "finnish": "fi",
-            "french": "fr",
-            "galician": "gl",
-            "georgian": "ka",
-            "german": "de",
-            "greek": "el",
-            "gujarati": "gu",
+            afrikaans: "af",
+            albanian: "sq",
+            amharic: "am",
+            arabic: "ar",
+            armenian: "hy",
+            assamese: "as",
+            azerbaijani: "az",
+            bashkir: "ba",
+            basque: "eu",
+            belarusian: "be",
+            bengali: "bn",
+            bosnian: "bs",
+            breton: "br",
+            bulgarian: "bg",
+            cantonese: "yue",
+            catalan: "ca",
+            chinese: "zh",
+            croatian: "hr",
+            czech: "cs",
+            danish: "da",
+            dutch: "nl",
+            english: "en",
+            estonian: "et",
+            faroese: "fo",
+            finnish: "fi",
+            french: "fr",
+            galician: "gl",
+            georgian: "ka",
+            german: "de",
+            greek: "el",
+            gujarati: "gu",
             "haitian creole": "ht",
-            "hausa": "ha",
-            "hawaiian": "haw",
-            "hebrew": "he",
-            "hindi": "hi",
-            "hungarian": "hu",
-            "icelandic": "is",
-            "indonesian": "id",
-            "italian": "it",
-            "japanese": "ja",
-            "javanese": "jw",
-            "kannada": "kn",
-            "kazakh": "kk",
-            "khmer": "km",
-            "korean": "ko",
-            "lao": "lo",
-            "latin": "la",
-            "latvian": "lv",
-            "lingala": "ln",
-            "lithuanian": "lt",
-            "luxembourgish": "lb",
-            "macedonian": "mk",
-            "malagasy": "mg",
-            "malay": "ms",
-            "malayalam": "ml",
-            "maltese": "mt",
-            "maori": "mi",
-            "marathi": "mr",
-            "mongolian": "mn",
-            "myanmar": "my",
-            "nepali": "ne",
-            "norwegian": "no",
-            "nynorsk": "nn",
-            "occitan": "oc",
-            "pashto": "ps",
-            "persian": "fa",
-            "polish": "pl",
-            "portuguese": "pt",
-            "punjabi": "pa",
-            "romanian": "ro",
-            "russian": "ru",
-            "sanskrit": "sa",
-            "serbian": "sr",
-            "shona": "sn",
-            "sindhi": "sd",
-            "sinhala": "si",
-            "slovak": "sk",
-            "slovenian": "sl",
-            "somali": "so",
-            "spanish": "es",
-            "sundanese": "su",
-            "swahili": "sw",
-            "swedish": "sv",
-            "tagalog": "tl",
-            "tajik": "tg",
-            "tamil": "ta",
-            "tatar": "tt",
-            "telugu": "te",
-            "thai": "th",
-            "tibetan": "bo",
-            "turkish": "tr",
-            "turkmen": "tk",
-            "ukrainian": "uk",
-            "urdu": "ur",
-            "uzbek": "uz",
-            "vietnamese": "vi",
-            "welsh": "cy",
-            "yiddish": "yi",
-            "yoruba": "yo",
+            hausa: "ha",
+            hawaiian: "haw",
+            hebrew: "he",
+            hindi: "hi",
+            hungarian: "hu",
+            icelandic: "is",
+            indonesian: "id",
+            italian: "it",
+            japanese: "ja",
+            javanese: "jw",
+            kannada: "kn",
+            kazakh: "kk",
+            khmer: "km",
+            korean: "ko",
+            lao: "lo",
+            latin: "la",
+            latvian: "lv",
+            lingala: "ln",
+            lithuanian: "lt",
+            luxembourgish: "lb",
+            macedonian: "mk",
+            malagasy: "mg",
+            malay: "ms",
+            malayalam: "ml",
+            maltese: "mt",
+            maori: "mi",
+            marathi: "mr",
+            mongolian: "mn",
+            myanmar: "my",
+            nepali: "ne",
+            norwegian: "no",
+            nynorsk: "nn",
+            occitan: "oc",
+            pashto: "ps",
+            persian: "fa",
+            polish: "pl",
+            portuguese: "pt",
+            punjabi: "pa",
+            romanian: "ro",
+            russian: "ru",
+            sanskrit: "sa",
+            serbian: "sr",
+            shona: "sn",
+            sindhi: "sd",
+            sinhala: "si",
+            slovak: "sk",
+            slovenian: "sl",
+            somali: "so",
+            spanish: "es",
+            sundanese: "su",
+            swahili: "sw",
+            swedish: "sv",
+            tagalog: "tl",
+            tajik: "tg",
+            tamil: "ta",
+            tatar: "tt",
+            telugu: "te",
+            thai: "th",
+            tibetan: "bo",
+            turkish: "tr",
+            turkmen: "tk",
+            ukrainian: "uk",
+            urdu: "ur",
+            uzbek: "uz",
+            vietnamese: "vi",
+            welsh: "cy",
+            yiddish: "yi",
+            yoruba: "yo",
         };
         this.availableLanguages = [
             "Automatic Detection",
@@ -163,12 +164,14 @@ class WhisperService {
                         this.whisperReady = true;
                         this.currentPackage = "multilingual";
                         this.app.addLog(
-                            
                             "WhisperVault connected (model idle-unloaded, will auto-reload on first transcription).",
                             "info",
                         );
                     } else {
-                        throw new Error("Health check returned unexpected status: " + JSON.stringify(health));
+                        throw new Error(
+                            "Health check returned unexpected status: " +
+                                JSON.stringify(health),
+                        );
                     }
                 } catch (err) {
                     attempts++;
@@ -179,12 +182,16 @@ class WhisperService {
                         );
                         break;
                     }
-                    const briefErr = (err?.message || String(err)).split("\n")[0];
+                    const briefErr = (err?.message || String(err)).split(
+                        "\n",
+                    )[0];
                     this.app.addLog(
                         `WhisperVault not ready (attempt ${attempts}/${maxAttempts}): ${briefErr}. Retrying in ${Math.round(backoff / 1000)}s.`,
                         "warn",
                     );
-                    await new Promise((resolve) => setTimeout(resolve, backoff));
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, backoff),
+                    );
                     backoff = Math.min(maxBackoff, backoff * 1.5);
                 }
             }
@@ -232,12 +239,18 @@ class WhisperService {
 
             const req = http.request(reqOptions, (res) => {
                 let data = "";
-                res.on("data", (chunk) => { data += chunk; });
+                res.on("data", (chunk) => {
+                    data += chunk;
+                });
                 res.on("end", () => {
                     try {
                         resolve(JSON.parse(data));
                     } catch (e) {
-                        reject(new Error(`Failed to parse WhisperVault response: ${data.substring(0, 200)}`));
+                        reject(
+                            new Error(
+                                `Failed to parse WhisperVault response: ${data.substring(0, 200)}`,
+                            ),
+                        );
                     }
                 });
             });
@@ -270,20 +283,25 @@ class WhisperService {
             // Build multipart body
             const parts = [];
             // audio file part
-            parts.push(Buffer.from(
-                `--${boundary}\r\n` +
-                `Content-Disposition: form-data; name="audio"; filename="${filename}"\r\n` +
-                `Content-Type: audio/wav\r\n\r\n`
-            ));
+            parts.push(
+                Buffer.from(
+                    `--${boundary}\r\n` +
+                        `Content-Disposition: form-data; name="audio"; filename="${filename}"\r\n` +
+                        `Content-Type: audio/wav\r\n\r\n`,
+                ),
+            );
             parts.push(audioBuffer);
             parts.push(Buffer.from("\r\n"));
             // params JSON part
-            parts.push(Buffer.from(
-                `--${boundary}\r\n` +
-                `Content-Disposition: form-data; name="params"\r\n` +
-                `Content-Type: application/json\r\n\r\n` +
-                paramsJson + "\r\n"
-            ));
+            parts.push(
+                Buffer.from(
+                    `--${boundary}\r\n` +
+                        `Content-Disposition: form-data; name="params"\r\n` +
+                        `Content-Type: application/json\r\n\r\n` +
+                        paramsJson +
+                        "\r\n",
+                ),
+            );
             // closing boundary
             parts.push(Buffer.from(`--${boundary}--\r\n`));
 
@@ -303,16 +321,26 @@ class WhisperService {
 
             const req = http.request(reqOptions, (res) => {
                 let data = "";
-                res.on("data", (chunk) => { data += chunk; });
+                res.on("data", (chunk) => {
+                    data += chunk;
+                });
                 res.on("end", () => {
                     if (res.statusCode !== 200) {
-                        reject(new Error(`WhisperVault transcription failed (HTTP ${res.statusCode}): ${data.substring(0, 500)}`));
+                        reject(
+                            new Error(
+                                `WhisperVault transcription failed (HTTP ${res.statusCode}): ${data.substring(0, 500)}`,
+                            ),
+                        );
                         return;
                     }
                     try {
                         resolve(JSON.parse(data));
                     } catch (e) {
-                        reject(new Error(`Failed to parse WhisperVault transcription response: ${data.substring(0, 200)}`));
+                        reject(
+                            new Error(
+                                `Failed to parse WhisperVault transcription response: ${data.substring(0, 200)}`,
+                            ),
+                        );
                     }
                 });
             });
@@ -343,21 +371,30 @@ class WhisperService {
      * @returns {Promise<void>}
      */
     async ensureModelPackage(modelId, advancedOptions = {}) {
-        const neededPackage = modelId === "kb-whisper" ? "sv-standard" : "multilingual";
+        const neededPackage =
+            modelId === "kb-whisper" ? "sv-standard" : "multilingual";
 
         // Build reload-time overrides from advanced options
         const reloadOverrides = {};
         if (advancedOptions.beamSize !== undefined) {
-            reloadOverrides.beam_size = Math.max(5, Math.min(10, Number(advancedOptions.beamSize) || 5));
+            reloadOverrides.beam_size = Math.max(
+                5,
+                Math.min(10, Number(advancedOptions.beamSize) || 5),
+            );
         }
         if (advancedOptions.repetitionPenalty !== undefined) {
-            reloadOverrides.repetition_penalty = Number(advancedOptions.repetitionPenalty);
+            reloadOverrides.repetition_penalty = Number(
+                advancedOptions.repetitionPenalty,
+            );
         }
         if (advancedOptions.conditionOnPreviousText !== undefined) {
-            reloadOverrides.condition_on_previous_text = !!advancedOptions.conditionOnPreviousText;
+            reloadOverrides.condition_on_previous_text =
+                !!advancedOptions.conditionOnPreviousText;
         }
         if (advancedOptions.vad !== undefined) {
-            reloadOverrides.vad_method = advancedOptions.vad ? "pyannote" : "none";
+            reloadOverrides.vad_method = advancedOptions.vad
+                ? "pyannote"
+                : "none";
         }
         if (advancedOptions.vadOnset !== undefined && advancedOptions.vad) {
             reloadOverrides.vad_onset = Number(advancedOptions.vadOnset);
@@ -365,7 +402,10 @@ class WhisperService {
 
         // Check if we need a reload: different package OR different ASR options
         const overridesKey = JSON.stringify(reloadOverrides);
-        if (this.currentPackage === neededPackage && this.currentOverridesKey === overridesKey) {
+        if (
+            this.currentPackage === neededPackage &&
+            this.currentOverridesKey === overridesKey
+        ) {
             return;
         }
 
@@ -375,7 +415,10 @@ class WhisperService {
         );
 
         const result = await this.whisperRequest("POST", "/reload", {
-            body: JSON.stringify({ package: neededPackage, ...reloadOverrides }),
+            body: JSON.stringify({
+                package: neededPackage,
+                ...reloadOverrides,
+            }),
             headers: { "Content-Type": "application/json" },
             timeout: 120000, // model loading can take up to 2 min
         });
@@ -524,15 +567,10 @@ class WhisperService {
             );
             return;
         }
-        let hasAccess = false;
-        project.members.forEach((member) => {
-            if (
-                member.username == user.username &&
-                (member.role == "admin" || member.role == "analyzer")
-            ) {
-                hasAccess = true;
-            }
-        });
+        let hasAccess = this.app.apiServer.getProjectPermissions(
+            project,
+            user,
+        ).editProjectFiles;
 
         if (!hasAccess) {
             ws.send(
@@ -599,15 +637,10 @@ class WhisperService {
             return;
         }
 
-        let hasAccess = false;
-        project.members.forEach((member) => {
-            if (
-                member.username == user.username &&
-                (member.role == "admin" || member.role == "analyzer")
-            ) {
-                hasAccess = true;
-            }
-        });
+        let hasAccess = this.app.apiServer.getProjectPermissions(
+            project,
+            user,
+        ).editProjectFiles;
 
         if (!hasAccess) {
             this.app.addLog(
@@ -651,9 +684,10 @@ class WhisperService {
                 existingItem.model = msg.data.model
                     ? msg.data.model
                     : existingItem.model;
-                existingItem.diarize = msg.data.diarize !== undefined
-                    ? msg.data.diarize
-                    : existingItem.diarize;
+                existingItem.diarize =
+                    msg.data.diarize !== undefined
+                        ? msg.data.diarize
+                        : existingItem.diarize;
                 if (msg.data.advancedOptions) {
                     existingItem.advancedOptions = msg.data.advancedOptions;
                 }
@@ -1239,7 +1273,9 @@ class WhisperService {
         try {
             fileBuffer = fs.readFileSync(audioFilePath);
         } catch (err) {
-            throw new Error(`Failed to read audio file ${audioFilePath}: ${err.message}`);
+            throw new Error(
+                `Failed to read audio file ${audioFilePath}: ${err.message}`,
+            );
         }
 
         // Build WhisperVault transcription parameters
@@ -1265,13 +1301,15 @@ class WhisperService {
                 queueItem.advancedOptions || {},
             );
         } catch (err) {
-            throw new Error(`Failed to switch WhisperVault model package: ${err.message}`);
+            throw new Error(
+                `Failed to switch WhisperVault model package: ${err.message}`,
+            );
         }
 
         try {
             this.app.addLog(
                 `Sending transcription request to WhisperVault: ${queueItem.bundle} ` +
-                `(language: ${transcribeParams.language || "auto"})`,
+                    `(language: ${transcribeParams.language || "auto"})`,
                 "info",
             );
 
@@ -1283,21 +1321,27 @@ class WhisperService {
 
             // Write SRT output directly from response
             if (result.outputs && result.outputs.srt) {
-                fs.writeFileSync(outputPath + "/transcription.srt", result.outputs.srt);
+                fs.writeFileSync(
+                    outputPath + "/transcription.srt",
+                    result.outputs.srt,
+                );
             } else {
                 throw new Error("WhisperVault response missing SRT output");
             }
 
             // Write TXT output (use response if available, otherwise convert from SRT)
             if (result.outputs && result.outputs.txt) {
-                fs.writeFileSync(outputPath + "/transcription.txt", result.outputs.txt);
+                fs.writeFileSync(
+                    outputPath + "/transcription.txt",
+                    result.outputs.txt,
+                );
             } else {
                 this.convertSrtToTxt(outputPath);
             }
 
             this.app.addLog(
                 `Transcription complete: ${result.language || "unknown"} language, ` +
-                `${(result.segments || []).length} segments, ${result.duration_seconds || "?"}s processing time`,
+                    `${(result.segments || []).length} segments, ${result.duration_seconds || "?"}s processing time`,
                 "info",
             );
 
@@ -1323,17 +1367,23 @@ class WhisperService {
                     errStr = String(err);
                 }
             }
-            
+
             this.app.addLog(
-                "Transcription failed for " + queueItem.project + "/" + 
-                queueItem.session + "/" + queueItem.bundle + ": " + errStr,
+                "Transcription failed for " +
+                    queueItem.project +
+                    "/" +
+                    queueItem.session +
+                    "/" +
+                    queueItem.bundle +
+                    ": " +
+                    errStr,
                 "error",
             );
             queueItem.error = "Transcription failed: " + errStr;
             queueItem.status = "error";
             queueItem.updatedAt = new Date();
             await queueItem.save();
-            
+
             // Return gracefully without throwing - allows queue processing to continue
             return;
         }
@@ -1403,7 +1453,7 @@ class WhisperService {
         if (this.notebookPending >= MAX_NOTEBOOK_PENDING) {
             throw new Error(
                 `Too many pending notebook transcriptions (max ${MAX_NOTEBOOK_PENDING}). ` +
-                "Please wait for a current transcription to finish before starting another."
+                    "Please wait for a current transcription to finish before starting another.",
             );
         }
         this.notebookPending++;
@@ -1429,17 +1479,22 @@ class WhisperService {
                     { stdio: "pipe" },
                 );
             } catch (err) {
-                throw new Error(`Audio conversion failed: ${err.stderr?.toString() || err.message}`);
+                throw new Error(
+                    `Audio conversion failed: ${err.stderr?.toString() || err.message}`,
+                );
             }
 
             const audioBuffer = fs.readFileSync(tmpPath);
-            try { fs.unlinkSync(tmpPath); } catch (_) {}
+            try {
+                fs.unlinkSync(tmpPath);
+            } catch (_) {}
 
             // Resolve language name → ISO code
             const langName = (options.language || "").toLowerCase();
-            const langIso = langName && langName !== "automatic detection"
-                ? (this.languageToIso[langName] || langName)
-                : null;
+            const langIso =
+                langName && langName !== "automatic detection"
+                    ? this.languageToIso[langName] || langName
+                    : null;
 
             const whisperParams = {
                 language: langIso,
@@ -1457,7 +1512,6 @@ class WhisperService {
             if (result.outputs?.txt !== undefined) out.txt = result.outputs.txt;
             if (result.outputs?.srt !== undefined) out.srt = result.outputs.srt;
             return out;
-
         } finally {
             this.transcriptionRunning = false;
             this.notebookPending = Math.max(0, this.notebookPending - 1);
@@ -1471,28 +1525,42 @@ class WhisperService {
      * @returns {Promise<Array<{id: string, language: string|null, description: string}>>}
      */
     async getAvailableModels() {
-        const packagesPath = process.env.WHISPERX_PACKAGES_PATH
-            || "/run/whisperx/packages.json";
+        const packagesPath =
+            process.env.WHISPERX_PACKAGES_PATH || "/run/whisperx/packages.json";
 
         if (!fs.existsSync(packagesPath)) {
             // Fall back to the two hard-coded package names
             return [
-                { id: "whisper",    language: null, description: "Multilingual (faster-whisper large-v3)" },
-                { id: "kb-whisper", language: "sv", description: "Swedish (KB Whisper large)" },
+                {
+                    id: "whisper",
+                    language: null,
+                    description: "Multilingual (faster-whisper large-v3)",
+                },
+                {
+                    id: "kb-whisper",
+                    language: "sv",
+                    description: "Swedish (KB Whisper large)",
+                },
             ];
         }
 
         try {
             const raw = JSON.parse(fs.readFileSync(packagesPath, "utf8"));
             // Map internal package names to the model IDs the API accepts
-            const packageToModelId = { "sv-standard": "kb-whisper", "multilingual": "whisper" };
+            const packageToModelId = {
+                "sv-standard": "kb-whisper",
+                multilingual: "whisper",
+            };
             return Object.entries(raw).map(([name, pkg]) => ({
                 id: packageToModelId[name] || name,
                 language: pkg.language || null,
                 description: pkg.description || name,
             }));
         } catch (err) {
-            this.app.addLog(`Failed to read packages.json: ${err.message}`, "warn");
+            this.app.addLog(
+                `Failed to read packages.json: ${err.message}`,
+                "warn",
+            );
             return [];
         }
     }
