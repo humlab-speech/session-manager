@@ -961,16 +961,32 @@ class ApiServer {
         return user;
     }
 
-    denyAccess(ws, msg) {
+    /**
+     * Refuse a command. `reason` separates the two very different failures that
+     * used to share one message: "authentication" means we no longer know who
+     * the caller is - a missing or expired php session - and the client should
+     * drop to a signed-out UI; "authorization" means we know exactly who they
+     * are but they lack the grant, and the client should stay signed in and
+     * offer the invite-code path instead.
+     */
+    denyAccess(ws, msg, reason = "authorization") {
+        let text =
+            reason === "authentication"
+                ? "Your session is no longer valid, please sign in again"
+                : "You are not authorized to use this functionality";
+
         ws.send(
             new WebSocketMessage(
                 msg.requestId,
                 msg.cmd ? msg.cmd : "unauthorized",
                 {
-                    result: 400,
-                    msg: "You are not authorized to use this functionality",
+                    result: reason === "authentication" ? 401 : 403,
+                    reason: reason,
+                    msg: text,
                 },
-                "You are not authorized to use this functionality",
+                text,
+                null,
+                false,
             ).toJSON(),
         );
     }
@@ -992,15 +1008,45 @@ class ApiServer {
         let client = this.getClientBySocket(ws);
 
         if (msg.cmd == "getSession") {
-            this.getUserByPhpSessionId(msg.data.phpSessId).then((user) => {
-                if (user) {
-                    client.phpSessionId = msg.data.phpSessId;
-                    client.userSession = user;
-                }
-                ws.send(
-                    new WebSocketMessage(msg.requestId, msg.cmd, user).toJSON(),
+            //getSession is deliberately reachable while signed out - the front
+            //page needs an answer either way - so a dead session is a normal
+            //empty response here, not an access denial.
+            //
+            //The php session store is the only authority on whether a session is
+            //still alive. users.phpSessionId in mongo is a convenience index that
+            //outlives it: php drops sessions at gc_maxlifetime while mongo only
+            //clears the field on an explicit sign-out. Reading mongo alone is what
+            //used to hand the client a fully populated user for a session that no
+            //longer existed, so the client rendered a signed-in dashboard that
+            //could not perform a single command.
+            let sessionAuth = await this.authenticateWebSocketUser(
+                client.originalRequest,
+                msg.data?.phpSessId,
+            );
+
+            if (!sessionAuth.authenticated) {
+                this.app.addLog(
+                    "getSession: no live session (" + sessionAuth.reason + ")",
+                    "debug",
                 );
-            });
+                await this.clearStalePhpSessionId(client, msg.data?.phpSessId);
+                client.phpSessionId = null;
+                client.userSession = null;
+                ws.send(
+                    new WebSocketMessage(msg.requestId, msg.cmd, null).toJSON(),
+                );
+                return;
+            }
+
+            client.phpSessionId = msg.data?.phpSessId;
+            client.userSession = sessionAuth.userSession;
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    sessionAuth.userSession,
+                ).toJSON(),
+            );
             return;
         }
 
@@ -1014,7 +1060,7 @@ class ApiServer {
                 "Failed to authenticate user, reason: " + authResult.reason,
                 "warn",
             );
-            this.denyAccess(ws, msg);
+            this.denyAccess(ws, msg, "authentication");
             return;
         } else {
             //this.app.addLog("User "+authResult.userSession.eppn+" authenticated", "debug");
@@ -1880,10 +1926,26 @@ class ApiServer {
         );
     }
 
-    async getUserByPhpSessionId(phpSessId) {
+    /**
+     * Drop a users.phpSessionId that no longer names a live php session, so the
+     * stale mapping cannot resurface. Only ids the connection actually presented
+     * as its own cookie are cleared - an id named purely in the message body is
+     * left alone, so an anonymous caller cannot walk guessed ids and detach other
+     * people's sessions.
+     */
+    async clearStalePhpSessionId(client, phpSessId) {
+        if (!phpSessId) {
+            return;
+        }
+        let cookies = this.parseCookies(client.originalRequest);
+        if (cookies.PHPSESSID !== phpSessId) {
+            return;
+        }
         const User = this.mongoose.model("User");
-        let user = await User.findOne({ phpSessionId: phpSessId });
-        return user;
+        await User.updateOne(
+            { phpSessionId: phpSessId },
+            { $set: { phpSessionId: null } },
+        );
     }
 
     async closeContainerSession(ws, user, msg) {
@@ -2425,16 +2487,22 @@ class ApiServer {
     }
 
     async searchUsers(ws, user, msg) {
+        if (!this.isSysAdminUser(user)) {
+            this.denyAccess(ws, msg);
+            return;
+        }
+
         const User = this.mongoose.model("User");
         let users = [];
+        const searchValue = this.escapeRegexForSearch(msg.searchValue || "");
 
         // Update the query to search in multiple fields
         User.find({
             $or: [
-                { username: { $regex: msg.searchValue, $options: "i" } },
-                { fullName: { $regex: msg.searchValue, $options: "i" } },
-                { firstName: { $regex: msg.searchValue, $options: "i" } },
-                { lastName: { $regex: msg.searchValue, $options: "i" } },
+                { username: { $regex: searchValue, $options: "i" } },
+                { fullName: { $regex: searchValue, $options: "i" } },
+                { firstName: { $regex: searchValue, $options: "i" } },
+                { lastName: { $regex: searchValue, $options: "i" } },
             ],
         })
             .then((result) => {
@@ -4572,21 +4640,9 @@ class ApiServer {
 
         let userCollection = db.collection("users");
 
-        //check that the user is not already in the database
-        let user = await userCollection.findOne({
+        const user = await userCollection.findOne({
             username: userInfo.username,
-            loginAllowed: true,
         });
-        if (user) {
-            this.app.addLog(
-                "User " +
-                    user.username +
-                    " tried to use an invite code, but user is already in the database and authorized.",
-                "warning",
-            );
-            respond(false);
-            return;
-        }
 
         const grantedProjectRole = this.isValidProjectRole(
             inviteCodeObject.role,
@@ -4595,14 +4651,19 @@ class ApiServer {
             : ApiServer.PROJECT_ROLE_RESEARCHER;
 
         // Invite codes never confer a system role - they let someone into one
-        // project. SysAdmin is granted out of band (vispctl / the admin panel).
+        // project. Preserve any existing system role, and only default missing
+        // roles for users who were just authorized by this invite.
+        const userUpdate = {
+            loginAllowed: true,
+        };
+        if (!user?.system_role) {
+            userUpdate.system_role = ApiServer.SYSTEM_ROLE_USER;
+        }
+
         await userCollection.updateOne(
             { username: userInfo.username },
             {
-                $set: {
-                    loginAllowed: true,
-                    system_role: ApiServer.SYSTEM_ROLE_USER,
-                },
+                $set: userUpdate,
             },
         );
 
@@ -7628,7 +7689,7 @@ session-manager_1    | }
     }
 
     async authorizeWebSocketUser(userSession) {
-        if (process.env.ACCESS_LIST_ENABLED == "false") {
+        if (String(process.env.ACCESS_LIST_ENABLED).toLowerCase() !== "true") {
             //If access list checking is not enabled, always pass the check
             return true;
         }
