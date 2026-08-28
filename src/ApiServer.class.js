@@ -1078,9 +1078,13 @@ class ApiServer {
         }
 
         //FROM THIS POINT ON, ALL COMMANDS REQUIRE AUTHENTICATION
+        //The PHP session id comes from the PHPSESSID cookie on the upgrade
+        //request (or the value the client proved via getSession), never from
+        //the message payload: a payload-supplied id would let the client
+        //authenticate as the owner of any PHP session it can name.
         let authResult = await this.authenticateWebSocketUser(
             client.originalRequest,
-            client.phpSessionId || msg.data?.phpSessionId,
+            client.phpSessionId,
         );
         if (!authResult.authenticated) {
             this.app.addLog(
