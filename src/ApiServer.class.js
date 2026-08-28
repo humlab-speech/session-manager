@@ -1013,7 +1013,7 @@ class ApiServer {
                     " attempted to access session " +
                     session.accessCode +
                     " owned by " +
-                    session.user.username +
+                    (session.user?.username ?? "unknown") +
                     " (cmd: " +
                     (msg.cmd ? msg.cmd : "unknown") +
                     ")",
@@ -4552,7 +4552,9 @@ class ApiServer {
         ).toString("base64");
         envVars.push("EMUDB_SESSIONS=" + sessionsJsonB64);
         envVars.push("UPLOAD_PATH=/home/uploads/" + context);
-        envVars.push("BUNDLE_LIST_NAME=" + userSession.getBundleListName());
+        // userSession is a plain object (see getUserSessionBySocket), not a
+        // UserSession model — getBundleListName() only exists on the model.
+        envVars.push("BUNDLE_LIST_NAME=" + userSession.username);
 
         ws.send(
             JSON.stringify({
