@@ -8,16 +8,21 @@ Jupyter, operations).
 ## Role in the VISP architecture
 
 ```
-┌─────────────┐  WebSocket (wss://)   ┌──────────────────┐  Podman API   ┌─────────────────────┐
-│  Webclient   │◄─────────────────────►│  session-manager  │◄────────────►│  Per-user containers │
-│  (Angular)   │                       │  :8020 ws / :8080 │              │  visp-rstudio-session │
-└──────┬───────┘                       └──────┬───────────┘              │  visp-jupyter-session │
-       │ HTTP                                 │                          │  visp-operations-sess │
-       ▼                                      ▼                          └─────────────────────┘
-┌─────────────┐  HTTP (auth check)    ┌───────────┐
-│   Apache     │◄─────────────────────│  MongoDB   │
-│  + webapi    │                      │  (visp db) │
-└─────────────┘                       └───────────┘
+┌─────────────┐  WebSocket (wss://)   ┌──────────────────┐  HTTP (auth check)  ┌───────────┐
+│  Webclient   │◄─────────────────────►│  session-manager  │◄───────────────────│  MongoDB   │
+│  (Angular)   │                       │  :8020 ws / :8080 │                    │  (visp db) │
+└──────┬───────┘                       └────────┬─────────┘                    └───────────┘
+        │ HTTP                                  │ Podman API
+        ▼                                       ▼
+┌─────────────┐                    ┌──────────────────┐
+│   Apache     │                    │ podman-socket-   │
+│  + webapi    │                    │ proxy            │
+└─────────────┘                    └────────┬─────────┘
+                                            │
+                                   ┌────────▼──────────┐   ┌─────────────────────┐
+                                   │ rootless Podman    │   │  Per-user containers │
+                                   │ daemon (host)      │──►│  visp-jupyter-session │
+                                   └───────────────────┘   └─────────────────────┘
 ```
 
 - **Apache** proxies WebSocket upgrade requests on the main domain to session-manager port 8020.
@@ -25,9 +30,11 @@ Jupyter, operations).
   interactive operations (project CRUD, session spawning, file upload, transcription, etc.).
 - A secondary **REST API on port 8080** is used for internal service-to-service calls
   (e.g. SPR recording imports from wsrng-server, session management from webapi).
-- Session-manager talks directly to **Podman** (via the socket at
-  `/run/user/1000/podman/podman.sock`) to create, start, stop, and exec into containers
-  using the libpod native API.
+- Session-manager talks to **Podman** through the `visp-podman-socket-proxy` (a security
+  proxy that validates `containers/create` requests against a policy: image allowlist,
+  no privileged mode, mount allowlist, capability allowlist, no host networking). The
+  proxy binds to `/run/podman-proxy/podman.sock` and forwards to the real rootless Podman
+  socket at `/run/user/1000/podman/podman.sock`.
 
 ## Core responsibilities
 
@@ -66,9 +73,8 @@ Users interact with their project data through spawned containers:
 
 | Session type | Image | Use case |
 |:---|:---|:---|
-| `rstudio` | `visp-rstudio-session` | RStudio IDE for statistical analysis |
 | `jupyter` | `visp-jupyter-session` | JupyterLab with Whisper models mounted |
-| `operations` | `visp-operations-session` | Short-lived, runs container-agent for EMU-DB ops |
+| `operations` | `visp-jupyter-session` | Short-lived, runs container-agent for EMU-DB ops |
 | `vscode` | `visp-vscode-session` | VS Code Server (experimental) |
 
 Container lifecycle:
@@ -169,7 +175,7 @@ Internal endpoints used by other VISP services:
 | Variable | Default | Description |
 |:---|:---|:---|
 | `ABS_ROOT_PATH` | — | Absolute path to the deployment root on the host |
-| `DOCKER_SOCKET_PATH` | `/run/user/1000/podman/podman.sock` | Path to the Podman socket |
+| `DOCKER_SOCKET_PATH` | `/run/podman-proxy/podman.sock` | Path to the podman-socket-proxy socket (forwards to real Podman socket) |
 | `LOG_LEVEL` | — | `info` or `debug` |
 | `DEVELOPMENT_MODE` | `false` | Mounts container-agent from local filesystem when `true` |
 | `MONGO_CONNECTION_STRING` | — | MongoDB connection URI |
