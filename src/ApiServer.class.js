@@ -1099,10 +1099,12 @@ class ApiServer {
         }
 
         if (msg.cmd == "authenticateUser") {
-            //msg.data might contain some userInfo, let's store it in the userSession
-            if (msg.data && msg.data.eppn) {
-                client.userSession = msg.data;
-            }
+            //client.userSession is already the server-side authenticated user
+            //(PHP session data merged with the mongo user), set during the
+            //authentication step above. The client payload (window.visp) is
+            //untrusted and must not overwrite the identity the server
+            //established - doing so let the client forge its own eppn,
+            //username and name fields.
 
             //since we are already authenticated, we can just send a success message
             ws.send(
