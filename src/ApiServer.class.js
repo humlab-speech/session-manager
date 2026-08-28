@@ -1377,10 +1377,13 @@ class ApiServer {
                 return;
             }
 
-            let envVars = [];
-            msg.env.forEach((pair) => {
-                envVars.push(pair.key + "=" + pair.value);
-            });
+            //Environment is fixed server-side. Client-supplied env vars are not
+            //passed through: they would let the caller control the environment
+            //of the container-agent process (e.g. override git or loader vars).
+            let envVars = [
+                "PROJECT_PATH=/home/jovyan/project",
+                "UPLOAD_PATH=/home/uploads",
+            ];
 
             session
                 .runCommand(
