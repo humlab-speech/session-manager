@@ -616,7 +616,14 @@ class ApiServer {
         //We need a regular https-server which then can be 'upgraded' to a websocket server
         this.httpWsServer = http.createServer((req, res) => {});
 
-        this.wss = new WebSocket.Server({ noServer: true });
+        //Cap message size: all real file uploads go over HTTP
+        //(POST /api/v1/upload); websocket messages are command/metadata JSON
+        //and never need more than this. Without a cap a client can stream
+        //unbounded frames into the server's memory.
+        this.wss = new WebSocket.Server({
+            noServer: true,
+            maxPayload: 1024 * 1024,
+        });
 
         this.httpWsServer.on("upgrade", (request, socket, head) => {
             this.wss.handleUpgrade(request, socket, head, (ws) => {
