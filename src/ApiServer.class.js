@@ -991,6 +991,33 @@ class ApiServer {
         );
     }
 
+    /**
+     * Assert that the session resolved from a client-supplied access code is
+     * owned by the authenticated user. Session access codes act as credentials
+     * for the session container, so only the user who launched the session may
+     * operate on it. Returns true if the user owns the session; otherwise logs
+     * the attempt, sends an authorization denial and returns false.
+     */
+    assertSessionOwner(ws, session, user, msg) {
+        if (session.user?.username !== user.username) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " attempted to access session " +
+                    session.accessCode +
+                    " owned by " +
+                    session.user.username +
+                    " (cmd: " +
+                    (msg.cmd ? msg.cmd : "unknown") +
+                    ")",
+                "warn",
+            );
+            this.denyAccess(ws, msg, "authorization");
+            return false;
+        }
+        return true;
+    }
+
     async handleIncomingWebSocketMessage(ws, message) {
         this.app.addLog("Received: " + message, "debug");
 
@@ -1346,6 +1373,10 @@ class ApiServer {
                 return;
             }
 
+            if (!this.assertSessionOwner(ws, session, user, msg)) {
+                return;
+            }
+
             let envVars = [];
             msg.env.forEach((pair) => {
                 envVars.push(pair.key + "=" + pair.value);
@@ -1386,6 +1417,9 @@ class ApiServer {
                 );
                 return;
             }
+            if (!this.assertSessionOwner(ws, session, user, msg)) {
+                return;
+            }
             session.commit().then((result) => {
                 ws.send(
                     JSON.stringify({
@@ -1421,6 +1455,12 @@ class ApiServer {
         if (msg.cmd == "shutdownOperationsSession") {
             try {
                 this.app.addLog("Shutdown of session " + msg.sessionAccessCode);
+                let session = this.app.sessMan.getSessionByCode(
+                    msg.sessionAccessCode,
+                );
+                if (session && !this.assertSessionOwner(ws, session, user, msg)) {
+                    return;
+                }
                 this.shutdownSessionContainer(msg.sessionAccessCode).then(
                     (result) => {
                         ws.send(
@@ -1445,6 +1485,16 @@ class ApiServer {
                 let session = this.app.sessMan.getSessionByCode(
                     msg.sessionAccessCode,
                 );
+                if (!session) {
+                    this.app.addLog(
+                        "scanEmudb: no such session " + msg.sessionAccessCode,
+                        "error",
+                    );
+                    return;
+                }
+                if (!this.assertSessionOwner(ws, session, user, msg)) {
+                    return;
+                }
                 let envVars = [
                     "PROJECT_PATH=/home/jovyan/project",
                     "UPLOAD_PATH=/home/uploads",
@@ -1964,17 +2014,7 @@ class ApiServer {
             return;
         }
 
-        if (session.user.username != user.username) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "closeSession",
-                    progress: "end",
-                    message: "Error - you are not the owner of this session",
-                    result: false,
-                    requestId: msg.requestId,
-                }),
-            );
+        if (!this.assertSessionOwner(ws, session, user, msg)) {
             return;
         }
 
@@ -4383,6 +4423,18 @@ class ApiServer {
             let session = this.app.sessMan.getSessionByCode(
                 msg.sessionAccessCode,
             );
+            if (!session) {
+                this.app.addLog(
+                    "updateBundleLists: no such session " +
+                        msg.sessionAccessCode,
+                    "error",
+                );
+                return;
+            }
+            let user = this.getUserSessionBySocket(ws);
+            if (!this.assertSessionOwner(ws, session, user, msg)) {
+                return;
+            }
             let envVars = [
                 "PROJECT_PATH=/home/jovyan/project",
                 "UPLOAD_PATH=/home/uploads",
@@ -4447,6 +4499,10 @@ class ApiServer {
                 "Couldn't find session for " + sessionAccessCode,
                 "error",
             );
+            return;
+        }
+        let user = this.getUserSessionBySocket(ws);
+        if (!this.assertSessionOwner(ws, containerSession, user, msg)) {
             return;
         }
 
@@ -4553,6 +4609,24 @@ class ApiServer {
     }
 
     async shutdownSession(ws, msg) {
+        let session = this.app.sessMan.getSessionByCode(
+            msg.sessionAccessCode,
+        );
+        if (!session) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "shutdownSession",
+                    progress: "end",
+                    result: "Shutdown failed",
+                }),
+            );
+            return;
+        }
+        let user = this.getUserSessionBySocket(ws);
+        if (!this.assertSessionOwner(ws, session, user, msg)) {
+            return;
+        }
         this.app.sessMan
             .deleteSession(msg.sessionAccessCode)
             .then(() => {
@@ -4995,6 +5069,23 @@ class ApiServer {
 
     async createEmuDb(ws, msg) {
         const session = this.app.sessMan.getSessionByCode(msg.appSession);
+        if (!session) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "createEmuDb",
+                    progress: "end",
+                    message: "Error - no such session",
+                    result: false,
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+        let user = this.getUserSessionBySocket(ws);
+        if (!this.assertSessionOwner(ws, session, user, msg)) {
+            return;
+        }
 
         let envVars = [
             //"PROJECT_PATH=/home/project-setup",
