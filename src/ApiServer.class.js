@@ -616,7 +616,14 @@ class ApiServer {
         //We need a regular https-server which then can be 'upgraded' to a websocket server
         this.httpWsServer = http.createServer((req, res) => {});
 
-        this.wss = new WebSocket.Server({ noServer: true });
+        //Cap message size: all real file uploads go over HTTP
+        //(POST /api/v1/upload); websocket messages are command/metadata JSON
+        //and never need more than this. Without a cap a client can stream
+        //unbounded frames into the server's memory.
+        this.wss = new WebSocket.Server({
+            noServer: true,
+            maxPayload: 1024 * 1024,
+        });
 
         this.httpWsServer.on("upgrade", (request, socket, head) => {
             this.wss.handleUpgrade(request, socket, head, (ws) => {
@@ -991,6 +998,33 @@ class ApiServer {
         );
     }
 
+    /**
+     * Assert that the session resolved from a client-supplied access code is
+     * owned by the authenticated user. Session access codes act as credentials
+     * for the session container, so only the user who launched the session may
+     * operate on it. Returns true if the user owns the session; otherwise logs
+     * the attempt, sends an authorization denial and returns false.
+     */
+    assertSessionOwner(ws, session, user, msg) {
+        if (session.user?.username !== user.username) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " attempted to access session " +
+                    session.accessCode +
+                    " owned by " +
+                    (session.user?.username ?? "unknown") +
+                    " (cmd: " +
+                    (msg.cmd ? msg.cmd : "unknown") +
+                    ")",
+                "warn",
+            );
+            this.denyAccess(ws, msg, "authorization");
+            return false;
+        }
+        return true;
+    }
+
     async handleIncomingWebSocketMessage(ws, message) {
         this.app.addLog("Received: " + message, "debug");
 
@@ -1051,9 +1085,13 @@ class ApiServer {
         }
 
         //FROM THIS POINT ON, ALL COMMANDS REQUIRE AUTHENTICATION
+        //The PHP session id comes from the PHPSESSID cookie on the upgrade
+        //request (or the value the client proved via getSession), never from
+        //the message payload: a payload-supplied id would let the client
+        //authenticate as the owner of any PHP session it can name.
         let authResult = await this.authenticateWebSocketUser(
             client.originalRequest,
-            client.phpSessionId || msg.data?.phpSessionId,
+            client.phpSessionId,
         );
         if (!authResult.authenticated) {
             this.app.addLog(
@@ -1068,10 +1106,12 @@ class ApiServer {
         }
 
         if (msg.cmd == "authenticateUser") {
-            //msg.data might contain some userInfo, let's store it in the userSession
-            if (msg.data && msg.data.eppn) {
-                client.userSession = msg.data;
-            }
+            //client.userSession is already the server-side authenticated user
+            //(PHP session data merged with the mongo user), set during the
+            //authentication step above. The client payload (window.visp) is
+            //untrusted and must not overwrite the identity the server
+            //established - doing so let the client forge its own eppn,
+            //username and name fields.
 
             //since we are already authenticated, we can just send a success message
             ws.send(
@@ -1346,10 +1386,17 @@ class ApiServer {
                 return;
             }
 
-            let envVars = [];
-            msg.env.forEach((pair) => {
-                envVars.push(pair.key + "=" + pair.value);
-            });
+            if (!this.assertSessionOwner(ws, session, user, msg)) {
+                return;
+            }
+
+            //Environment is fixed server-side. Client-supplied env vars are not
+            //passed through: they would let the caller control the environment
+            //of the container-agent process (e.g. override git or loader vars).
+            let envVars = [
+                "PROJECT_PATH=/home/jovyan/project",
+                "UPLOAD_PATH=/home/uploads",
+            ];
 
             session
                 .runCommand(
@@ -1384,6 +1431,9 @@ class ApiServer {
                         result: "Error - no such session",
                     }),
                 );
+                return;
+            }
+            if (!this.assertSessionOwner(ws, session, user, msg)) {
                 return;
             }
             session.commit().then((result) => {
@@ -1421,6 +1471,12 @@ class ApiServer {
         if (msg.cmd == "shutdownOperationsSession") {
             try {
                 this.app.addLog("Shutdown of session " + msg.sessionAccessCode);
+                let session = this.app.sessMan.getSessionByCode(
+                    msg.sessionAccessCode,
+                );
+                if (session && !this.assertSessionOwner(ws, session, user, msg)) {
+                    return;
+                }
                 this.shutdownSessionContainer(msg.sessionAccessCode).then(
                     (result) => {
                         ws.send(
@@ -1445,6 +1501,16 @@ class ApiServer {
                 let session = this.app.sessMan.getSessionByCode(
                     msg.sessionAccessCode,
                 );
+                if (!session) {
+                    this.app.addLog(
+                        "scanEmudb: no such session " + msg.sessionAccessCode,
+                        "error",
+                    );
+                    return;
+                }
+                if (!this.assertSessionOwner(ws, session, user, msg)) {
+                    return;
+                }
                 let envVars = [
                     "PROJECT_PATH=/home/jovyan/project",
                     "UPLOAD_PATH=/home/uploads",
@@ -1964,17 +2030,7 @@ class ApiServer {
             return;
         }
 
-        if (session.user.username != user.username) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "closeSession",
-                    progress: "end",
-                    message: "Error - you are not the owner of this session",
-                    result: false,
-                    requestId: msg.requestId,
-                }),
-            );
+        if (!this.assertSessionOwner(ws, session, user, msg)) {
             return;
         }
 
@@ -4383,6 +4439,18 @@ class ApiServer {
             let session = this.app.sessMan.getSessionByCode(
                 msg.sessionAccessCode,
             );
+            if (!session) {
+                this.app.addLog(
+                    "updateBundleLists: no such session " +
+                        msg.sessionAccessCode,
+                    "error",
+                );
+                return;
+            }
+            let user = this.getUserSessionBySocket(ws);
+            if (!this.assertSessionOwner(ws, session, user, msg)) {
+                return;
+            }
             let envVars = [
                 "PROJECT_PATH=/home/jovyan/project",
                 "UPLOAD_PATH=/home/uploads",
@@ -4449,6 +4517,10 @@ class ApiServer {
             );
             return;
         }
+        let user = this.getUserSessionBySocket(ws);
+        if (!this.assertSessionOwner(ws, containerSession, user, msg)) {
+            return;
+        }
 
         //Check that names are ok
         for (let key in msg.data.form.sessions) {
@@ -4480,7 +4552,9 @@ class ApiServer {
         ).toString("base64");
         envVars.push("EMUDB_SESSIONS=" + sessionsJsonB64);
         envVars.push("UPLOAD_PATH=/home/uploads/" + context);
-        envVars.push("BUNDLE_LIST_NAME=" + userSession.getBundleListName());
+        // userSession is a plain object (see getUserSessionBySocket), not a
+        // UserSession model — getBundleListName() only exists on the model.
+        envVars.push("BUNDLE_LIST_NAME=" + userSession.username);
 
         ws.send(
             JSON.stringify({
@@ -4553,6 +4627,24 @@ class ApiServer {
     }
 
     async shutdownSession(ws, msg) {
+        let session = this.app.sessMan.getSessionByCode(
+            msg.sessionAccessCode,
+        );
+        if (!session) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "shutdownSession",
+                    progress: "end",
+                    result: "Shutdown failed",
+                }),
+            );
+            return;
+        }
+        let user = this.getUserSessionBySocket(ws);
+        if (!this.assertSessionOwner(ws, session, user, msg)) {
+            return;
+        }
         this.app.sessMan
             .deleteSession(msg.sessionAccessCode)
             .then(() => {
@@ -4995,6 +5087,23 @@ class ApiServer {
 
     async createEmuDb(ws, msg) {
         const session = this.app.sessMan.getSessionByCode(msg.appSession);
+        if (!session) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "createEmuDb",
+                    progress: "end",
+                    message: "Error - no such session",
+                    result: false,
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+        let user = this.getUserSessionBySocket(ws);
+        if (!this.assertSessionOwner(ws, session, user, msg)) {
+            return;
+        }
 
         let envVars = [
             //"PROJECT_PATH=/home/project-setup",

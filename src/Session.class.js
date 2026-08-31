@@ -784,6 +784,12 @@ class Session {
             // only — it cannot affect the host or other containers.
             cap_add: ["NET_ADMIN"],
             no_new_privileges: true,
+            // Same rootless hardening as the session container: container root
+            // maps onto a subuid, never the host user. The shared socket is
+            // created mode 777 by entrypoint.sh, so connectivity is unaffected.
+            userns: {
+                nsmode: "keep-id",
+            },
             resource_limits: {
                 memory: {
                     limit: 64 * 1024 * 1024, // 64 MB
