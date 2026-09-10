@@ -1085,6 +1085,12 @@ class ApiServer {
 
         if (msg.cmd == "signOut") {
             try {
+                // Drop the cached phpSessionId -> eppn binding used by
+                // routeToApp's ownership check, so a signed-out id stops
+                // authorizing anything (belt-and-braces; the id is also
+                // invalidated in the DB below).
+                this.app.sessMan.forgetAuthenticatedUser(client.phpSessionId);
+
                 // Update the database to remove the PHP session ID
                 const user = await this.mongoose
                     .model("User")
@@ -7772,6 +7778,16 @@ session-manager_1    | }
                             return;
                         }
                         //this.app.addLog("Welcome user "+userSession.username);
+                        // Record which user this PHP session belongs to, so
+                        // routeToApp() can cheaply confirm that a request proxying
+                        // into a session container comes from that session's owner
+                        // (see SessionManager.recordAuthenticatedUser). This is the
+                        // one place identity is resolved against Apache, so it is
+                        // the natural point to cache the phpSessionId -> eppn link.
+                        this.app.sessMan.recordAuthenticatedUser(
+                            phpSessionId,
+                            userSession.eppn,
+                        );
                         resolve({
                             authenticated: true,
                             userSession: userSession,
@@ -8321,12 +8337,41 @@ session-manager_1    | }
         // Diagnostic endpoint for visp.py session-doctor.
         // Returns all in-memory sessions so the doctor can detect containers
         // that are running but not tracked by session-manager (adrift).
+        // Diagnostic endpoint for visp.py session-doctor: lists in-memory sessions
+        // so the doctor can spot containers that are running but untracked (adrift).
+        //
+        // SECURITY: this REST API (port 8080) has no authentication and is reachable
+        // by every container on visp-net. Two rules keep this endpoint from becoming
+        // an unauthenticated credential leak:
+        //   1. It MUST NOT expose accessCode. The accessCode is the bearer token
+        //      routeToApp() trusts to proxy a browser into a session container;
+        //      returning it here once let any peer container harvest every active
+        //      user's session credential. session-doctor never needed it (it
+        //      correlates by containerId), so it is omitted.
+        //   2. It is restricted to loopback. session-doctor reaches it as
+        //      `podman exec session-manager curl http://localhost:8080/...`, so the
+        //      connection originates on 127.0.0.1/::1 inside this container; a peer
+        //      container connecting over visp-net has a bridge IP and is refused.
+        // If you add fields here, never add accessCode (or any per-session secret).
         this.expressApp.get("/api/debug/sessions", (req, res) => {
+            const remote = req.socket.remoteAddress || "";
+            const isLoopback =
+                remote === "127.0.0.1" ||
+                remote === "::1" ||
+                remote === "::ffff:127.0.0.1";
+            if (!isLoopback) {
+                this.app.addLog(
+                    "Refused non-loopback /api/debug/sessions request from " +
+                        remote,
+                    "warn",
+                );
+                res.status(403).json({ error: "forbidden" });
+                return;
+            }
             const sessions = this.app.sessMan.sessions.map((s) => ({
                 containerName: s.containerName || null,
                 containerId: s.shortDockerContainerId || null,
                 fullContainerId: s.fullDockerContainerId || null,
-                accessCode: s.accessCode || null,
                 username: s.user ? s.user.username : null,
                 projectId: s.project ? s.project.id : null,
                 type: s.hsApp || null,
