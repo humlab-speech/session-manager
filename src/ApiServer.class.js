@@ -21,6 +21,7 @@ const { nativeSync } = require("rimraf");
 const mime = require("mime-types");
 const { execSync } = require("child_process");
 const WhisperService = require("./WhisperService.class");
+const SprImportService = require("./SprImportService.class");
 const AdmZip = require("adm-zip");
 const { parseFile } = require("music-metadata");
 const {
@@ -52,11 +53,11 @@ class ApiServer {
         this.expressApp.use(bodyParser.json());
         this.transcriptionQueue = [];
         this.whisperService = new WhisperService(this.app);
+        this.sprImportService = new SprImportService(this.app, this);
 
         this.setupEndpoints();
         this.startServer();
         this.startWsServer();
-        this.importQueueRunning = false;
         this.systemRolesCache = {};
         this.projectRolesCache = {};
         this.talkToMeGoose().then(async (mongoose) => {
@@ -64,7 +65,7 @@ class ApiServer {
             this.defineModels();
             await this.seedRoles();
             this.whisperService.init();
-            this.startImportQueueProcessor();
+            this.sprImportService.start();
         });
     }
 
@@ -1489,7 +1490,10 @@ class ApiServer {
                 let session = this.app.sessMan.getSessionByCode(
                     msg.sessionAccessCode,
                 );
-                if (session && !this.assertSessionOwner(ws, session, user, msg)) {
+                if (
+                    session &&
+                    !this.assertSessionOwner(ws, session, user, msg)
+                ) {
                     return;
                 }
                 this.shutdownSessionContainer(msg.sessionAccessCode).then(
@@ -4642,9 +4646,7 @@ class ApiServer {
     }
 
     async shutdownSession(ws, msg) {
-        let session = this.app.sessMan.getSessionByCode(
-            msg.sessionAccessCode,
-        );
+        let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
         if (!session) {
             ws.send(
                 JSON.stringify({
@@ -5474,11 +5476,46 @@ class ApiServer {
             return;
         }
 
+        // A recorded session's bundles are rebuilt from its uploaded takes on
+        // every import, so remove the take too or the next import restores it.
+        // Removing it also changes the uploads, which prompts a re-import that
+        // brings the EMU-DB in line.
+        if (session.dataSource == "record") {
+            const uploadedTake = safeJoinedPath(
+                "/repositories",
+                project.id,
+                "Data",
+                "speech_recorder_uploads",
+                "emudb-sessions",
+                safePathComponent(sessionId, "sessionId"),
+                fileBaseName + ".wav",
+            );
+            try {
+                fs.unlinkSync(uploadedTake);
+            } catch (err) {
+                if (err.code !== "ENOENT") {
+                    this.app.addLog(
+                        "Could not delete uploaded take " +
+                            uploadedTake +
+                            ": " +
+                            err.message,
+                        "error",
+                    );
+                }
+            }
+        }
+
         const Project = this.mongoose.model("Project");
         await Project.updateOne(
             { id: projectId, "sessions.id": sessionId },
             { $pull: { "sessions.$.files": { name: fileName } } },
         );
+        if (session.dataSource == "record") {
+            await this.sprImportService.markUploadsImported(
+                projectId,
+                sessionId,
+            );
+        }
 
         ws.send(
             JSON.stringify({
@@ -6077,11 +6114,16 @@ session-manager_1    | }
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
 
-            mongoSession.files = formSession.files.map((fileMeta) => ({
-                name: fileMeta.name.replace(/ /g, "_"),
-                size: fileMeta.size,
-                type: fileMeta.type,
-            }));
+            // A recorded session's files are written by the SPR import, not
+            // the form, and the form's copy can be stale: an import may have
+            // landed while the dialog was open. Keep the server's list.
+            if (formSession.dataSource != "record") {
+                mongoSession.files = formSession.files.map((fileMeta) => ({
+                    name: fileMeta.name.replace(/ /g, "_"),
+                    size: fileMeta.size,
+                    type: fileMeta.type,
+                }));
+            }
 
             if (formSession.dataSource == "record") {
                 this.sprSessionUpdate(formSession);
@@ -7955,116 +7997,10 @@ session-manager_1    | }
         return mongoProject;
     }
 
-    async registerAudioFilesForImport(projectId, sessionId) {
-        this.app.addLog(
-            "Registering audio files for import: project " +
-                projectId +
-                ", session " +
-                sessionId,
-            "info",
-        );
-        const ImportQueueItem = this.mongoose.model("ImportQueueItem");
-        const queueItem = new ImportQueueItem({
-            projectId: projectId,
-            sessionId: sessionId,
-            status: "pending",
-            createdAt: new Date(),
-        });
-        await queueItem.save();
-        this.app.addLog(
-            "Import queue item registered: " + queueItem._id,
-            "info",
-        );
-        // wsrng-server only registers an item once the session is genuinely
-        // complete (all expected files uploaded), so process it right away rather
-        // than waiting for the next poll. Fire-and-forget; the importQueueRunning
-        // guard inside prevents overlap with the periodic processor.
-        this.processNextImportItem();
-        return queueItem;
-    }
-
-    startImportQueueProcessor() {
-        this.app.addLog("Starting import queue processor", "info");
-        // Periodic safety net that retries any item left pending (e.g. registered
-        // while a previous import was still running, or after a restart).
-        setInterval(() => this.processNextImportItem(), 15000);
-    }
-
-    async processNextImportItem() {
-        if (this.importQueueRunning) {
-            return;
-        }
-        try {
-            this.importQueueRunning = true;
-            const ImportQueueItem = this.mongoose.model("ImportQueueItem");
-            const item = await ImportQueueItem.findOne({
-                status: "pending",
-            }).sort({ createdAt: 1 });
-
-            if (!item) {
-                return;
-            }
-
-            this.app.addLog(
-                "Processing import queue item: " +
-                    item._id +
-                    " (project: " +
-                    item.projectId +
-                    ", session: " +
-                    item.sessionId +
-                    ")",
-                "info",
-            );
-            item.status = "processing";
-            item.updatedAt = new Date();
-            await item.save();
-
-            try {
-                const result = await this.importAudioFiles(
-                    item.projectId,
-                    item.sessionId,
-                );
-                item.status = "completed";
-                item.finishedAt = new Date();
-                item.updatedAt = new Date();
-                await item.save();
-                this.app.addLog(
-                    "Import queue item completed: " + item._id,
-                    "info",
-                );
-            } catch (err) {
-                this.app.addLog(
-                    "Import queue item failed: " +
-                        item._id +
-                        " - " +
-                        err.message,
-                    "error",
-                );
-                item.status = "failed";
-                item.error = err.message;
-                item.updatedAt = new Date();
-                await item.save();
-            }
-        } catch (err) {
-            this.app.addLog(
-                "Import queue processor error: " + err.message,
-                "error",
-            );
-        } finally {
-            this.importQueueRunning = false;
-        }
-    }
-
-    async importAudioFiles(projectId, sessionId) {
-        this.app.addLog("Starting SPR audio files import", "info");
-        /**
-         * This method will import audio files from the speech recorder into the project directory.
-         * It will do this in two main steps:
-         * 1. Copy the last recorded version of each wav file from the speech recorder directory to a new directory
-         * 2. Run an R script in the operations container that will import the files to the correct location in the project directory
-         */
-
-        safePathComponent(projectId, "projectId");
+    // Run createSessions.R (via container-agent) in a short-lived operations
+    // container, importing the takes under uploadPath into projectSession.
+    async runSprImportContainer(project, projectSession, uploadPath) {
+        const projectId = project.id;
         let volumes = [
             {
                 source: safeMountSource(
@@ -8084,28 +8020,11 @@ session-manager_1    | }
             eppn: "operations@visp",
         };
 
-        let project = await this.fetchMongoProjectById(projectId);
-
-        const containerSession = this.app.sessMan.createSession(
-            user,
-            project,
-            "operations",
-            volumes,
-        );
-        await containerSession.createContainer();
-
-        let projectSession = null;
-        project.sessions.forEach((sess) => {
-            if (sess.id == sessionId) {
-                projectSession = sess;
-            }
-        });
-
         let sessions = [
             {
-                id: sessionId,
+                id: projectSession.id,
                 slug: this.slugify(projectSession.name),
-                sessionId: sessionId,
+                sessionId: projectSession.id,
                 name: projectSession.name,
                 speakerGender: "", //unused, but needs to be included
                 speakerAge: "", //unused, but needs to be included
@@ -8116,101 +8035,183 @@ session-manager_1    | }
             "base64",
         );
         let envVars = [
-            "PROJECT_PATH=/home/jovyan/project", // + /home/project/Data/VISP_emuDB
-            "UPLOAD_PATH=/home/jovyan/project/Data/speech_recorder_uploads",
-            //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
+            "PROJECT_PATH=/home/jovyan/project",
+            "UPLOAD_PATH=" + uploadPath,
             "EMUDB_SESSIONS=" + sessionsJsonB64,
             "WRITE_META_JSON=false",
         ];
 
-        //first delete any old versions of bundles in this session that might exist (if this session has been previously recorded)
-        await containerSession.runCommand(
-            [
-                "/usr/local/bin/node",
-                "/container-agent/main.js",
-                "emudb-delete-session-bundles",
-            ],
-            envVars,
+        const containerSession = this.app.sessMan.createSession(
+            user,
+            project,
+            "operations",
+            volumes,
+        );
+        await containerSession.createContainer();
+
+        // runCommand() logs and swallows exec errors, resolving undefined, and
+        // container-agent reports its own failures as {code, body} JSON. Turn
+        // both into exceptions so a failed step fails the import.
+        const runAgentStep = async (step) => {
+            const output = await containerSession.runCommand(
+                ["/usr/local/bin/node", "/container-agent/main.js", step],
+                envVars,
+            );
+            if (output === undefined) {
+                throw new Error(step + " could not be run");
+            }
+            let result = null;
+            try {
+                result = JSON.parse(output);
+            } catch (err) {
+                this.app.addLog(
+                    step + " returned unparseable output; assuming success",
+                    "warn",
+                );
+                return;
+            }
+            if (result && result.code >= 400) {
+                const body = result.body || {};
+                throw new Error(
+                    step +
+                        " failed: " +
+                        String(body.stderr || body.stdout || "").slice(-500),
+                );
+            }
+        };
+
+        try {
+            await runAgentStep("emudb-create-sessions");
+            await runAgentStep("emudb-track-definitions");
+        } finally {
+            //shutdown the container, also when a step failed, so it isn't left running
+            await this.app.sessMan.deleteSession(containerSession.accessCode);
+        }
+    }
+
+    /**
+     * Import recorded takes into a session of the project's EMU-DB.
+     *
+     * Only the takes named in takeNames are (re)imported: their existing bundles
+     * are removed first (import_mediaFiles refuses to overwrite a bundle, so a
+     * re-take could otherwise never replace the audio), and the takes are staged
+     * into a directory of their own so the import doesn't touch other bundles or
+     * their annotations. The session's files list is then set to every take in
+     * the upload directory.
+     *
+     * Throws if any step fails. Called by SprImportService, which decides what
+     * needs importing and verifies the result.
+     */
+    async importAudioFiles(projectId, sessionId, takeNames) {
+        this.app.addLog(
+            "Starting SPR audio files import of " +
+                takeNames.length +
+                " take(s) into session " +
+                sessionId,
+            "info",
         );
 
-        //emudb-create-sessions
-        await containerSession.runCommand(
-            [
-                "/usr/local/bin/node",
-                "/container-agent/main.js",
-                "emudb-create-sessions",
-            ],
-            envVars,
-        );
-        await containerSession.runCommand(
-            [
-                "/usr/local/bin/node",
-                "/container-agent/main.js",
-                "emudb-track-definitions",
-            ],
-            envVars,
-        );
+        safePathComponent(projectId, "projectId");
+        safePathComponent(sessionId, "sessionId");
+        takeNames.forEach((name) => safePathComponent(name, "take name"));
 
-        //shutdown the container
-        await this.app.sessMan.deleteSession(containerSession.accessCode);
+        let project = await this.fetchMongoProjectById(projectId);
+        if (!project) {
+            throw new Error("Project " + projectId + " not found");
+        }
+        const projectSession = project.sessions.find(
+            (sess) => sess.id == sessionId,
+        );
+        if (!projectSession) {
+            throw new Error(
+                "Session " + sessionId + " not found in project " + projectId,
+            );
+        }
+        safePathComponent(projectSession.name + "_ses", "session name");
 
-        const fileLocation = safeJoinedPath(
+        const uploadsRoot = safeJoinedPath(
             "/repositories",
             projectId,
             "Data",
             "speech_recorder_uploads",
+        );
+        const fileLocation = safeJoinedPath(
+            uploadsRoot,
             "emudb-sessions",
             sessionId,
         );
+
+        if (takeNames.length > 0) {
+            // Remove the bundles being replaced.
+            for (const name of takeNames) {
+                const base = path.basename(name, ".wav");
+                fs.rmSync(
+                    safeJoinedPath(
+                        "/repositories",
+                        projectId,
+                        "Data",
+                        "VISP_emuDB",
+                        projectSession.name + "_ses",
+                        base + "_bndl",
+                    ),
+                    { recursive: true, force: true },
+                );
+            }
+
+            // Stage the takes where createSessions.R expects uploads:
+            // <UPLOAD_PATH>/emudb-sessions/<sessionId>/.
+            const stagingRoot = safeJoinedPath(
+                uploadsRoot,
+                ".import-staging",
+                sessionId,
+            );
+            const stagingDir = safeJoinedPath(
+                stagingRoot,
+                "emudb-sessions",
+                sessionId,
+            );
+            fs.rmSync(stagingRoot, { recursive: true, force: true });
+            fs.mkdirSync(stagingDir, { recursive: true });
+            for (const name of takeNames) {
+                fs.copyFileSync(
+                    fileLocation + "/" + name,
+                    stagingDir + "/" + name,
+                );
+            }
+
+            try {
+                await this.runSprImportContainer(
+                    project,
+                    projectSession,
+                    "/home/jovyan/project/Data/speech_recorder_uploads/.import-staging/" +
+                        sessionId,
+                );
+            } finally {
+                fs.rmSync(stagingRoot, { recursive: true, force: true });
+            }
+        }
+
+        // Skip wsrng-server's in-flight ".<name>.tmp" files.
         let files = fs
             .readdirSync(fileLocation)
-            .filter((file) => file !== "." && file !== "..");
+            .filter((file) => !file.startsWith("."));
 
-        //now update the project in mongo to reflect the new files in project.sessions[].files[]
-        project.sessions.forEach((sess) => {
-            if (sess.id == sessionId) {
-                files.forEach((file) => {
-                    //check that this session does not already have a file with this exact name
-                    //if it does, then just update the size and type
-
-                    let fileExists = false;
-
-                    let fileSize = fs.statSync(fileLocation + "/" + file).size;
-                    let fileMimeType = mime.lookup(fileLocation + "/" + file);
-
-                    sess.files.forEach((sessFile) => {
-                        if (sessFile.name == file) {
-                            fileExists = true;
-                            sessFile.size = fileSize;
-                            sessFile.type = fileMimeType;
-                            this.app.addLog(
-                                "File " +
-                                    file +
-                                    " already exists in session " +
-                                    sessionId +
-                                    ", updating size and type",
-                                "debug",
-                            );
-                        }
-                    });
-
-                    if (!fileExists) {
-                        sess.files.push({
-                            name: file,
-                            size: fileSize,
-                            type: fileMimeType,
-                        });
-                        this.app.addLog(
-                            "File " + file + " added to session " + sessionId,
-                            "debug",
-                        );
-                    }
-                });
-            }
-        });
-
-        project.markModified("sessions");
-        await project.save();
+        // Every take in the upload directory now has a bundle, so the session's
+        // file list is exactly those files. Written with a positional update
+        // rather than project.save(): the import takes several seconds, and
+        // saving the whole sessions array would overwrite anything else that
+        // changed meanwhile (a dialog save, import status updates).
+        const sessionFiles = files.map((file) => ({
+            name: file,
+            size: fs.statSync(fileLocation + "/" + file).size,
+            type: mime.lookup(fileLocation + "/" + file),
+        }));
+        await this.mongoose
+            .model("Project")
+            .collection.updateOne(
+                { id: projectId, "sessions.id": sessionId },
+                { $set: { "sessions.$.files": sessionFiles } },
+            );
 
         //now delete the files copied for import...?
         /*
@@ -8228,6 +8229,9 @@ session-manager_1    | }
         const sessionName = projectSession ? projectSession.name : sessionId;
         const fileCount = files.length;
         try {
+            if (takeNames.length === 0) {
+                return new ApiResponse(200, "No new recordings to import");
+            }
             await this.notifyProjectMembers(projectId, {
                 type: "success",
                 message:
@@ -8409,29 +8413,21 @@ session-manager_1    | }
 
     setupEndpoints() {
         this.expressApp.post("/api/importaudiofiles", async (req, res) => {
-            this.app.addLog(
-                "importAudioFiles - registering for import",
-                "debug",
-            );
+            // wsrng-server's hint that a recording session changed. The
+            // SprImportService decides whether and when to import.
             try {
-                const queueItem = await this.registerAudioFilesForImport(
+                this.sprImportService.requestCheck(
                     req.body.projectId,
                     req.body.sessionId,
                 );
-                let ar = new ApiResponse(
-                    200,
-                    "Audio files registered for import",
-                );
+                let ar = new ApiResponse(200, "Import check scheduled");
                 res.status(ar.code).end(ar.toJSON());
             } catch (err) {
                 this.app.addLog(
-                    "Error registering audio files for import: " + err.message,
+                    "Error scheduling import check: " + err.message,
                     "error",
                 );
-                let ar = new ApiResponse(
-                    500,
-                    "Error registering audio files for import",
-                );
+                let ar = new ApiResponse(400, "Invalid import check request");
                 res.status(ar.code).end(ar.toJSON());
             }
         });
