@@ -1072,6 +1072,15 @@ class ApiServer {
                 return;
             }
 
+            //The raw users.loginAllowed flag is only the answer when the access
+            //list is enabled; in open-access mode it may well be false for
+            //everyone. The client treats this field as its authorization state
+            //(and re-reads it on every heartbeat), so it must carry the same
+            //verdict authorizeUser gives, or the UI flips to "Missing access
+            //grant" a minute after a successful sign-in.
+            sessionAuth.userSession.loginAllowed =
+                await this.authorizeWebSocketUser(sessionAuth.userSession);
+
             client.phpSessionId = msg.data?.phpSessId;
             client.userSession = sessionAuth.userSession;
             ws.send(
