@@ -21,6 +21,17 @@ const { nativeSync } = require("rimraf");
 const mime = require("mime-types");
 const { execSync } = require("child_process");
 const WhisperService = require("./WhisperService.class");
+const SprImportService = require("./SprImportService.class");
+const {
+    ORIGIN_UPLOAD,
+    ORIGIN_RECORDING,
+    sessionSources,
+    filesOfOrigin,
+    withRecordings,
+    withUploads,
+    promptItemCodes,
+    findUploadNameClashes,
+} = require("./sessionFiles");
 const AdmZip = require("adm-zip");
 const { parseFile } = require("music-metadata");
 const {
@@ -52,11 +63,11 @@ class ApiServer {
         this.expressApp.use(bodyParser.json());
         this.transcriptionQueue = [];
         this.whisperService = new WhisperService(this.app);
+        this.sprImportService = new SprImportService(this.app, this);
 
         this.setupEndpoints();
         this.startServer();
         this.startWsServer();
-        this.importQueueRunning = false;
         this.systemRolesCache = {};
         this.projectRolesCache = {};
         this.talkToMeGoose().then(async (mongoose) => {
@@ -64,7 +75,7 @@ class ApiServer {
             this.defineModels();
             await this.seedRoles();
             this.whisperService.init();
-            this.startImportQueueProcessor();
+            this.sprImportService.start();
         });
     }
 
@@ -1489,7 +1500,10 @@ class ApiServer {
                 let session = this.app.sessMan.getSessionByCode(
                     msg.sessionAccessCode,
                 );
-                if (session && !this.assertSessionOwner(ws, session, user, msg)) {
+                if (
+                    session &&
+                    !this.assertSessionOwner(ws, session, user, msg)
+                ) {
                     return;
                 }
                 this.shutdownSessionContainer(msg.sessionAccessCode).then(
@@ -4642,9 +4656,7 @@ class ApiServer {
     }
 
     async shutdownSession(ws, msg) {
-        let session = this.app.sessMan.getSessionByCode(
-            msg.sessionAccessCode,
-        );
+        let session = this.app.sessMan.getSessionByCode(msg.sessionAccessCode);
         if (!session) {
             ws.send(
                 JSON.stringify({
@@ -5474,11 +5486,46 @@ class ApiServer {
             return;
         }
 
+        // A recording's bundle is rebuilt from its uploaded take on every
+        // import, so remove the take too or the next import restores it. Any
+        // session can hold recordings, so look for a take whatever its type;
+        // uploaded files have none (their names can't clash with takes).
+        let takeRemoved = false;
+        const uploadedTake = safeJoinedPath(
+            "/repositories",
+            project.id,
+            "Data",
+            "speech_recorder_uploads",
+            "emudb-sessions",
+            safePathComponent(sessionId, "sessionId"),
+            fileBaseName + ".wav",
+        );
+        try {
+            fs.unlinkSync(uploadedTake);
+            takeRemoved = true;
+        } catch (err) {
+            if (err.code !== "ENOENT") {
+                this.app.addLog(
+                    "Could not delete uploaded take " +
+                        uploadedTake +
+                        ": " +
+                        err.message,
+                    "error",
+                );
+            }
+        }
+
         const Project = this.mongoose.model("Project");
         await Project.updateOne(
             { id: projectId, "sessions.id": sessionId },
             { $pull: { "sessions.$.files": { name: fileName } } },
         );
+        if (takeRemoved) {
+            await this.sprImportService.markUploadsImported(
+                projectId,
+                sessionId,
+            );
+        }
 
         ws.send(
             JSON.stringify({
@@ -5722,6 +5769,15 @@ session-manager_1    | }
         if (!this.validateProjectForm(projectFormData)) {
             return;
         }
+        const uploadsBySession = await this.prepareSessionUploads(
+            ws,
+            msg,
+            user,
+            projectFormData,
+        );
+        if (!uploadsBySession) {
+            return;
+        }
 
         ws.send(
             JSON.stringify({
@@ -5781,14 +5837,14 @@ session-manager_1    | }
             true,
         );
 
-        await this.saveSessionsMongo(projectFormData);
+        await this.saveSessionsMongo(projectFormData, uploadsBySession);
 
-        //create a bundlelist for the user creating the project
+        //create a bundlelist for the user creating the project, from the files actually uploaded
         // NOTE: emuR's import_mediaFiles() replaces spaces with underscores in filenames/bundle names,
         // so we must apply the same sanitization here so MongoDB names match the files on disk.
         let bundles = [];
         projectFormData.sessions.forEach((session) => {
-            session.files.forEach((file) => {
+            (uploadsBySession.get(session.id) || []).forEach((file) => {
                 let sanitizedFileName = file.name.replace(/ /g, "_");
                 let bundleName = sanitizedFileName.replace(/\.[^/.]+$/, "");
                 bundles.push({
@@ -5905,6 +5961,15 @@ session-manager_1    | }
             this.app.addLog("Project form validation failed", "error");
             return;
         }
+        const uploadsBySession = await this.prepareSessionUploads(
+            ws,
+            msg,
+            user,
+            projectFormData,
+        );
+        if (!uploadsBySession) {
+            return;
+        }
 
         ws.send(
             JSON.stringify({
@@ -5921,7 +5986,7 @@ session-manager_1    | }
             projectMetadata,
             true,
         );
-        await this.saveSessionsMongo(projectFormData);
+        await this.saveSessionsMongo(projectFormData, uploadsBySession);
         //await this.saveSprSession(projectFormData);
 
         ws.send(
@@ -6009,7 +6074,144 @@ session-manager_1    | }
         await mongoProject.save();
     }
 
-    async saveSessionsMongo(projectFormData) {
+    /**
+     * The audio files that arrived in this save's upload directory, per session.
+     * These, not the dialog's file list, say what was uploaded: the PHP upload
+     * handler sanitizes names, so the dialog's names can differ from the files
+     * (and bundles) actually created.
+     *
+     * @returns {Map<string, Array<{name, size, type}>>} keyed by session id
+     */
+    collectSessionUploads(user, projectFormData) {
+        const uploadsBySession = new Map();
+        safePathComponent(user.username, "username");
+        safePathComponent(projectFormData.formContextId, "formContextId");
+        for (const session of projectFormData.sessions || []) {
+            if (session.deleted) {
+                continue;
+            }
+            safePathComponent(session.id, "sessionId");
+            const dir = safeJoinedPath(
+                "/tmp/uploads",
+                user.username,
+                projectFormData.formContextId,
+                "emudb-sessions",
+                session.id,
+            );
+            if (!fs.existsSync(dir)) {
+                continue;
+            }
+            const uploads = fs
+                .readdirSync(dir, { withFileTypes: true })
+                .filter((e) => e.isFile() && !e.name.startsWith("."))
+                .map((e) => ({
+                    name: e.name,
+                    size: fs.statSync(path.join(dir, e.name)).size,
+                    type: mime.lookup(e.name) || null,
+                }));
+            if (uploads.length > 0) {
+                uploadsBySession.set(session.id, uploads);
+            }
+        }
+        return uploadsBySession;
+    }
+
+    /**
+     * Refuse uploads whose bundle name is already taken, before anything is
+     * written: import_mediaFiles can't import over an existing bundle, and a
+     * name used by a prompt of the session's recording script would be replaced
+     * by that prompt's take.
+     *
+     * @returns {Promise<string[]>} one message per refused file
+     */
+    async validateSessionUploads(projectFormData, uploadsBySession) {
+        const mongoProject = projectFormData.id
+            ? await this.fetchMongoProjectById(projectFormData.id)
+            : null;
+        const errors = [];
+        for (const formSession of projectFormData.sessions || []) {
+            const uploads = uploadsBySession.get(formSession.id);
+            if (!uploads) {
+                continue;
+            }
+            const storedSession = formSession.new
+                ? { files: [] }
+                : mongoProject?.sessions?.find(
+                      (s) => s.id == formSession.id,
+                  ) || { files: [] };
+            let itemCodes = [];
+            if (
+                sessionSources(formSession).record &&
+                formSession.sessionScript
+            ) {
+                const script = await this.fetchSprScript(
+                    formSession.sessionScript,
+                );
+                itemCodes = promptItemCodes(script);
+            }
+            const clashes = findUploadNameClashes(
+                storedSession,
+                uploads.map((u) => u.name),
+                itemCodes,
+            );
+            for (const clash of clashes) {
+                const reason = {
+                    existing: "a file with that name is already in the session",
+                    duplicate: "it was uploaded twice",
+                    prompt: "a prompt in the session's recording script has that name",
+                }[clash.reason];
+                // An existing session's name is a disabled control, which the
+                // dialog doesn't send.
+                const sessionName = formSession.name || storedSession.name;
+                errors.push(
+                    '"' +
+                        clash.name +
+                        '" in session "' +
+                        sessionName +
+                        '": ' +
+                        reason,
+                );
+            }
+        }
+        return errors;
+    }
+
+    /**
+     * Collect and validate this save's uploads. On failure, reports it to the
+     * client and returns null.
+     */
+    async prepareSessionUploads(ws, msg, user, projectFormData) {
+        const uploadsBySession = this.collectSessionUploads(
+            user,
+            projectFormData,
+        );
+        const errors = await this.validateSessionUploads(
+            projectFormData,
+            uploadsBySession,
+        );
+        if (errors.length == 0) {
+            return uploadsBySession;
+        }
+        this.app.addLog(
+            "Refused project save, upload name conflicts: " + errors.join("; "),
+            "warn",
+        );
+        ws.send(
+            JSON.stringify({
+                requestId: msg.requestId,
+                type: "cmd-result",
+                cmd: "saveProject",
+                progress: "end",
+                result: false,
+                message:
+                    "Can't save, please rename or remove these files: " +
+                    errors.join("; "),
+            }),
+        );
+        return null;
+    }
+
+    async saveSessionsMongo(projectFormData, uploadsBySession = new Map()) {
         this.app.addLog("Saving sessions to MongoDB");
         let mongoProject = await this.mongoose
             .model("Project")
@@ -6039,6 +6241,7 @@ session-manager_1    | }
                     "Adding session " + formSession.name + " to mongo project",
                     "debug",
                 );
+                const sources = sessionSources(formSession);
                 //create new session in mongo
                 mongoProject.sessions.push({
                     id: formSession.id,
@@ -6047,16 +6250,24 @@ session-manager_1    | }
                     speakerAge: formSession.speakerAge,
                     timeOfRecording: formSession.timeOfRecording,
                     placeOfRecording: formSession.placeOfRecording,
+                    // Kept for older code and rollbacks; the flags below rule.
                     dataSource: formSession.dataSource,
+                    uploadEnabled: sources.upload,
+                    recordEnabled: sources.record,
                     sessionScript: formSession.sessionScript,
                     sessionId: formSession.sessionId,
-                    files: formSession.files.map((f) => ({
-                        ...f,
-                        name: f.name.replace(/ /g, "_"),
-                    })),
+                    files: withUploads(
+                        { files: [] },
+                        uploadsBySession.get(formSession.id) || [],
+                    ),
                 });
 
-                this.sprSessionCreate(projectFormData.id, formSession);
+                if (sources.record) {
+                    await this.sprSessionEnsure(
+                        projectFormData.id,
+                        formSession,
+                    );
+                }
                 continue;
             }
 
@@ -6073,18 +6284,50 @@ session-manager_1    | }
             mongoSession.speakerAge = formSession.speakerAge;
             mongoSession.timeOfRecording = formSession.timeOfRecording;
             mongoSession.placeOfRecording = formSession.placeOfRecording;
-            mongoSession.dataSource = formSession.dataSource;
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
+            // dataSource is left as it was: files stored before origins
+            // existed take their origin from it (see sessionFiles.js).
 
-            mongoSession.files = formSession.files.map((fileMeta) => ({
-                name: fileMeta.name.replace(/ /g, "_"),
-                size: fileMeta.size,
-                type: fileMeta.type,
-            }));
+            // The stored list is authoritative; the form's copy can be stale
+            // (an import may have landed while the dialog was open) and lacks
+            // sizes. Stored files are removed through deleteBundle, so a save
+            // only ever adds this save's uploads.
+            const wasRecording = sessionSources(mongoSession).record;
+            mongoSession.files = withUploads(
+                mongoSession,
+                uploadsBySession.get(formSession.id) || [],
+            );
 
-            if (formSession.dataSource == "record") {
-                this.sprSessionUpdate(formSession);
+            // A source can't be switched off while it has files. The dialog
+            // doesn't offer it; this guards against a stale or older client.
+            const requested = sessionSources(formSession);
+            const hasUploads =
+                filesOfOrigin(mongoSession, ORIGIN_UPLOAD).length > 0;
+            const hasRecordings =
+                filesOfOrigin(mongoSession, ORIGIN_RECORDING).length > 0 ||
+                this.sprImportService.listUploads(
+                    projectFormData.id,
+                    formSession.id,
+                ).length > 0;
+            if (
+                (!requested.upload && hasUploads) ||
+                (!requested.record && hasRecordings)
+            ) {
+                this.app.addLog(
+                    "Keeping a source with files switched on in session " +
+                        formSession.id,
+                    "warn",
+                );
+            }
+            mongoSession.uploadEnabled = requested.upload || hasUploads;
+            mongoSession.recordEnabled = requested.record || hasRecordings;
+
+            if (mongoSession.recordEnabled) {
+                await this.sprSessionEnsure(projectFormData.id, formSession);
+            } else if (wasRecording) {
+                // Switched off with nothing recorded: the link stops working.
+                await this.sprSessionDelete(formSession.id);
             }
         }
         mongoProject.markModified("sessions");
@@ -6095,7 +6338,7 @@ session-manager_1    | }
         this.app.addLog("Creating SPR session " + session.id);
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
-        collection.insertOne({
+        await collection.insertOne({
             project: projectId,
             sessionId: session.id,
             script: session.sessionScript,
@@ -6107,19 +6350,34 @@ session-manager_1    | }
         });
     }
 
-    async sprSessionUpdate(session) {
-        if (session.dataSource != "record") {
-            return;
+    // Make sure a session that records online has its SPR session (which the
+    // recording link opens), with the script and sealed state from the form.
+    // Recording can be switched on after a session was created.
+    async sprSessionEnsure(projectId, session) {
+        let db = await this.connectToMongo("wsrng");
+        const exists = await db
+            .collection("sessions")
+            .findOne({ sessionId: session.id }, { projection: { _id: 1 } });
+        if (!exists) {
+            await this.sprSessionCreate(projectId, session);
         }
+        await this.sprSessionUpdate(session);
+    }
+
+    async sprSessionUpdate(session) {
         this.app.addLog("Updating SPR session " + session.id);
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
-        collection.updateOne(
+        await collection.updateOne(
             { sessionId: session.id },
             {
                 $set: {
                     script: session.sessionScript,
-                    sealed: session.sprSessionSealed == "true" ? true : false,
+                    // The webclient sends the flag as it loaded it (a boolean),
+                    // or as a string when it was changed via a <select>.
+                    sealed:
+                        session.sprSessionSealed === true ||
+                        session.sprSessionSealed === "true",
                 },
             },
         );
@@ -7288,21 +7546,33 @@ session-manager_1    | }
                 }),
             );
         }
-        resultJson = await session.copyUploadedDocs();
-        result = JSON.parse(resultJson);
-        if (!result || (result.code != 200 && result.code != 400)) {
-            //accept 400 as a success code here since it generally just means that there were no documents to copy, which is fine
+        resultJson = await session.copyUploadedDocs(envVars);
+        try {
+            result = JSON.parse(resultJson);
+        } catch (error) {
+            result = null;
+        }
+        if (!result || result.code != 200) {
+            // Fail before the upload directory is cleaned up below, or the documents are lost
             this.app.addLog(
-                "Failed creating emuDB (code " +
-                    result.code +
-                    "): stdout: " +
-                    result.body.stdout +
-                    ". stderr: " +
-                    result.body.stderr,
+                "Failed copying uploaded documents: " +
+                    (result ? JSON.stringify(result.body) : resultJson),
                 "error",
             );
+            if (ws && msg) {
+                ws.send(
+                    JSON.stringify({
+                        requestId: msg.requestId,
+                        type: "cmd-result",
+                        cmd: msg.cmd,
+                        progress: "end",
+                        result: false,
+                        message: "Failed copying uploaded documents",
+                    }),
+                );
+            }
             await this.app.sessMan.deleteSession(session.accessCode);
-            return;
+            return false;
         }
 
         envVars.push("GIT_USER_EMAIL=" + user.email);
@@ -7526,6 +7796,18 @@ session-manager_1    | }
                     "warn",
                 );
                 return false;
+            }
+            for (const flag of ["uploadEnabled", "recordEnabled"]) {
+                if (
+                    session[flag] !== undefined &&
+                    typeof session[flag] !== "boolean"
+                ) {
+                    this.app.addLog(
+                        "Session " + flag + " must be a boolean",
+                        "warn",
+                    );
+                    return false;
+                }
             }
 
             //If dataSource is set to 'upload', check that all the uploaded files are a supported file format (wav or flac)
@@ -7955,116 +8237,10 @@ session-manager_1    | }
         return mongoProject;
     }
 
-    async registerAudioFilesForImport(projectId, sessionId) {
-        this.app.addLog(
-            "Registering audio files for import: project " +
-                projectId +
-                ", session " +
-                sessionId,
-            "info",
-        );
-        const ImportQueueItem = this.mongoose.model("ImportQueueItem");
-        const queueItem = new ImportQueueItem({
-            projectId: projectId,
-            sessionId: sessionId,
-            status: "pending",
-            createdAt: new Date(),
-        });
-        await queueItem.save();
-        this.app.addLog(
-            "Import queue item registered: " + queueItem._id,
-            "info",
-        );
-        // wsrng-server only registers an item once the session is genuinely
-        // complete (all expected files uploaded), so process it right away rather
-        // than waiting for the next poll. Fire-and-forget; the importQueueRunning
-        // guard inside prevents overlap with the periodic processor.
-        this.processNextImportItem();
-        return queueItem;
-    }
-
-    startImportQueueProcessor() {
-        this.app.addLog("Starting import queue processor", "info");
-        // Periodic safety net that retries any item left pending (e.g. registered
-        // while a previous import was still running, or after a restart).
-        setInterval(() => this.processNextImportItem(), 15000);
-    }
-
-    async processNextImportItem() {
-        if (this.importQueueRunning) {
-            return;
-        }
-        try {
-            this.importQueueRunning = true;
-            const ImportQueueItem = this.mongoose.model("ImportQueueItem");
-            const item = await ImportQueueItem.findOne({
-                status: "pending",
-            }).sort({ createdAt: 1 });
-
-            if (!item) {
-                return;
-            }
-
-            this.app.addLog(
-                "Processing import queue item: " +
-                    item._id +
-                    " (project: " +
-                    item.projectId +
-                    ", session: " +
-                    item.sessionId +
-                    ")",
-                "info",
-            );
-            item.status = "processing";
-            item.updatedAt = new Date();
-            await item.save();
-
-            try {
-                const result = await this.importAudioFiles(
-                    item.projectId,
-                    item.sessionId,
-                );
-                item.status = "completed";
-                item.finishedAt = new Date();
-                item.updatedAt = new Date();
-                await item.save();
-                this.app.addLog(
-                    "Import queue item completed: " + item._id,
-                    "info",
-                );
-            } catch (err) {
-                this.app.addLog(
-                    "Import queue item failed: " +
-                        item._id +
-                        " - " +
-                        err.message,
-                    "error",
-                );
-                item.status = "failed";
-                item.error = err.message;
-                item.updatedAt = new Date();
-                await item.save();
-            }
-        } catch (err) {
-            this.app.addLog(
-                "Import queue processor error: " + err.message,
-                "error",
-            );
-        } finally {
-            this.importQueueRunning = false;
-        }
-    }
-
-    async importAudioFiles(projectId, sessionId) {
-        this.app.addLog("Starting SPR audio files import", "info");
-        /**
-         * This method will import audio files from the speech recorder into the project directory.
-         * It will do this in two main steps:
-         * 1. Copy the last recorded version of each wav file from the speech recorder directory to a new directory
-         * 2. Run an R script in the operations container that will import the files to the correct location in the project directory
-         */
-
-        safePathComponent(projectId, "projectId");
+    // Run createSessions.R (via container-agent) in a short-lived operations
+    // container, importing the takes under uploadPath into projectSession.
+    async runSprImportContainer(project, projectSession, uploadPath) {
+        const projectId = project.id;
         let volumes = [
             {
                 source: safeMountSource(
@@ -8084,28 +8260,11 @@ session-manager_1    | }
             eppn: "operations@visp",
         };
 
-        let project = await this.fetchMongoProjectById(projectId);
-
-        const containerSession = this.app.sessMan.createSession(
-            user,
-            project,
-            "operations",
-            volumes,
-        );
-        await containerSession.createContainer();
-
-        let projectSession = null;
-        project.sessions.forEach((sess) => {
-            if (sess.id == sessionId) {
-                projectSession = sess;
-            }
-        });
-
         let sessions = [
             {
-                id: sessionId,
+                id: projectSession.id,
                 slug: this.slugify(projectSession.name),
-                sessionId: sessionId,
+                sessionId: projectSession.id,
                 name: projectSession.name,
                 speakerGender: "", //unused, but needs to be included
                 speakerAge: "", //unused, but needs to be included
@@ -8116,101 +8275,196 @@ session-manager_1    | }
             "base64",
         );
         let envVars = [
-            "PROJECT_PATH=/home/jovyan/project", // + /home/project/Data/VISP_emuDB
-            "UPLOAD_PATH=/home/jovyan/project/Data/speech_recorder_uploads",
-            //"BUNDLE_LIST_NAME="+userSession.getBundleListName(),
+            "PROJECT_PATH=/home/jovyan/project",
+            "UPLOAD_PATH=" + uploadPath,
             "EMUDB_SESSIONS=" + sessionsJsonB64,
             "WRITE_META_JSON=false",
         ];
 
-        //first delete any old versions of bundles in this session that might exist (if this session has been previously recorded)
-        await containerSession.runCommand(
-            [
-                "/usr/local/bin/node",
-                "/container-agent/main.js",
-                "emudb-delete-session-bundles",
-            ],
-            envVars,
+        const containerSession = this.app.sessMan.createSession(
+            user,
+            project,
+            "operations",
+            volumes,
+        );
+        await containerSession.createContainer();
+
+        // runCommand() logs and swallows exec errors, resolving undefined, and
+        // container-agent reports its own failures as {code, body} JSON. Turn
+        // both into exceptions so a failed step fails the import.
+        const runAgentStep = async (step) => {
+            const output = await containerSession.runCommand(
+                ["/usr/local/bin/node", "/container-agent/main.js", step],
+                envVars,
+            );
+            if (output === undefined) {
+                throw new Error(step + " could not be run");
+            }
+            let result = null;
+            try {
+                result = JSON.parse(output);
+            } catch (err) {
+                this.app.addLog(
+                    step + " returned unparseable output; assuming success",
+                    "warn",
+                );
+                return;
+            }
+            if (result && result.code >= 400) {
+                const body = result.body || {};
+                throw new Error(
+                    step +
+                        " failed: " +
+                        String(body.stderr || body.stdout || "").slice(-500),
+                );
+            }
+        };
+
+        try {
+            await runAgentStep("emudb-create-sessions");
+            await runAgentStep("emudb-track-definitions");
+        } finally {
+            //shutdown the container, also when a step failed, so it isn't left running
+            await this.app.sessMan.deleteSession(containerSession.accessCode);
+        }
+    }
+
+    /**
+     * Import recorded takes into a session of the project's EMU-DB.
+     *
+     * Only the takes named in takeNames are (re)imported: their existing bundles
+     * are removed first (import_mediaFiles refuses to overwrite a bundle, so a
+     * re-take could otherwise never replace the audio), and the takes are staged
+     * into a directory of their own so the import doesn't touch other bundles or
+     * their annotations. The session's files list is then set to every take in
+     * the upload directory.
+     *
+     * Throws if any step fails. Called by SprImportService, which decides what
+     * needs importing and verifies the result.
+     */
+    async importAudioFiles(projectId, sessionId, takeNames) {
+        this.app.addLog(
+            "Starting SPR audio files import of " +
+                takeNames.length +
+                " take(s) into session " +
+                sessionId,
+            "info",
         );
 
-        //emudb-create-sessions
-        await containerSession.runCommand(
-            [
-                "/usr/local/bin/node",
-                "/container-agent/main.js",
-                "emudb-create-sessions",
-            ],
-            envVars,
-        );
-        await containerSession.runCommand(
-            [
-                "/usr/local/bin/node",
-                "/container-agent/main.js",
-                "emudb-track-definitions",
-            ],
-            envVars,
-        );
+        safePathComponent(projectId, "projectId");
+        safePathComponent(sessionId, "sessionId");
+        takeNames.forEach((name) => safePathComponent(name, "take name"));
 
-        //shutdown the container
-        await this.app.sessMan.deleteSession(containerSession.accessCode);
+        let project = await this.fetchMongoProjectById(projectId);
+        if (!project) {
+            throw new Error("Project " + projectId + " not found");
+        }
+        const projectSession = project.sessions.find(
+            (sess) => sess.id == sessionId,
+        );
+        if (!projectSession) {
+            throw new Error(
+                "Session " + sessionId + " not found in project " + projectId,
+            );
+        }
+        safePathComponent(projectSession.name + "_ses", "session name");
 
-        const fileLocation = safeJoinedPath(
+        const uploadsRoot = safeJoinedPath(
             "/repositories",
             projectId,
             "Data",
             "speech_recorder_uploads",
+        );
+        const fileLocation = safeJoinedPath(
+            uploadsRoot,
             "emudb-sessions",
             sessionId,
         );
+
+        if (takeNames.length > 0) {
+            // Remove the bundles being replaced.
+            for (const name of takeNames) {
+                const base = path.basename(name, ".wav");
+                fs.rmSync(
+                    safeJoinedPath(
+                        "/repositories",
+                        projectId,
+                        "Data",
+                        "VISP_emuDB",
+                        projectSession.name + "_ses",
+                        base + "_bndl",
+                    ),
+                    { recursive: true, force: true },
+                );
+            }
+
+            // Stage the takes where createSessions.R expects uploads:
+            // <UPLOAD_PATH>/emudb-sessions/<sessionId>/.
+            const stagingRoot = safeJoinedPath(
+                uploadsRoot,
+                ".import-staging",
+                sessionId,
+            );
+            const stagingDir = safeJoinedPath(
+                stagingRoot,
+                "emudb-sessions",
+                sessionId,
+            );
+            fs.rmSync(stagingRoot, { recursive: true, force: true });
+            fs.mkdirSync(stagingDir, { recursive: true });
+            for (const name of takeNames) {
+                fs.copyFileSync(
+                    fileLocation + "/" + name,
+                    stagingDir + "/" + name,
+                );
+            }
+
+            try {
+                await this.runSprImportContainer(
+                    project,
+                    projectSession,
+                    "/home/jovyan/project/Data/speech_recorder_uploads/.import-staging/" +
+                        sessionId,
+                );
+            } finally {
+                fs.rmSync(stagingRoot, { recursive: true, force: true });
+            }
+        }
+
+        // Skip wsrng-server's in-flight ".<name>.tmp" files.
         let files = fs
             .readdirSync(fileLocation)
-            .filter((file) => file !== "." && file !== "..");
+            .filter((file) => !file.startsWith("."));
 
-        //now update the project in mongo to reflect the new files in project.sessions[].files[]
-        project.sessions.forEach((sess) => {
-            if (sess.id == sessionId) {
-                files.forEach((file) => {
-                    //check that this session does not already have a file with this exact name
-                    //if it does, then just update the size and type
-
-                    let fileExists = false;
-
-                    let fileSize = fs.statSync(fileLocation + "/" + file).size;
-                    let fileMimeType = mime.lookup(fileLocation + "/" + file);
-
-                    sess.files.forEach((sessFile) => {
-                        if (sessFile.name == file) {
-                            fileExists = true;
-                            sessFile.size = fileSize;
-                            sessFile.type = fileMimeType;
-                            this.app.addLog(
-                                "File " +
-                                    file +
-                                    " already exists in session " +
-                                    sessionId +
-                                    ", updating size and type",
-                                "debug",
-                            );
-                        }
-                    });
-
-                    if (!fileExists) {
-                        sess.files.push({
-                            name: file,
-                            size: fileSize,
-                            type: fileMimeType,
-                        });
-                        this.app.addLog(
-                            "File " + file + " added to session " + sessionId,
-                            "debug",
-                        );
-                    }
-                });
-            }
-        });
-
-        project.markModified("sessions");
-        await project.save();
+        // Every take in the upload directory now has a bundle, so the session's
+        // recordings are exactly those files; its uploaded files are kept.
+        // Re-read the session first, and write with a positional update rather
+        // than project.save(): the import takes several seconds, and anything
+        // else that changed meanwhile (a dialog save adding uploads, import
+        // status updates) must survive.
+        const freshProject = await this.fetchMongoProjectById(projectId);
+        const freshSession = freshProject?.sessions?.find(
+            (sess) => sess.id == sessionId,
+        );
+        if (!freshSession) {
+            throw new Error(
+                "Session " + sessionId + " was removed during the import",
+            );
+        }
+        const sessionFiles = withRecordings(
+            freshSession,
+            files.map((file) => ({
+                name: file,
+                size: fs.statSync(fileLocation + "/" + file).size,
+                type: mime.lookup(fileLocation + "/" + file),
+            })),
+        );
+        await this.mongoose
+            .model("Project")
+            .collection.updateOne(
+                { id: projectId, "sessions.id": sessionId },
+                { $set: { "sessions.$.files": sessionFiles } },
+            );
 
         //now delete the files copied for import...?
         /*
@@ -8228,6 +8482,9 @@ session-manager_1    | }
         const sessionName = projectSession ? projectSession.name : sessionId;
         const fileCount = files.length;
         try {
+            if (takeNames.length === 0) {
+                return new ApiResponse(200, "No new recordings to import");
+            }
             await this.notifyProjectMembers(projectId, {
                 type: "success",
                 message:
@@ -8409,29 +8666,21 @@ session-manager_1    | }
 
     setupEndpoints() {
         this.expressApp.post("/api/importaudiofiles", async (req, res) => {
-            this.app.addLog(
-                "importAudioFiles - registering for import",
-                "debug",
-            );
+            // wsrng-server's hint that a recording session changed. The
+            // SprImportService decides whether and when to import.
             try {
-                const queueItem = await this.registerAudioFilesForImport(
+                this.sprImportService.requestCheck(
                     req.body.projectId,
                     req.body.sessionId,
                 );
-                let ar = new ApiResponse(
-                    200,
-                    "Audio files registered for import",
-                );
+                let ar = new ApiResponse(200, "Import check scheduled");
                 res.status(ar.code).end(ar.toJSON());
             } catch (err) {
                 this.app.addLog(
-                    "Error registering audio files for import: " + err.message,
+                    "Error scheduling import check: " + err.message,
                     "error",
                 );
-                let ar = new ApiResponse(
-                    500,
-                    "Error registering audio files for import",
-                );
+                let ar = new ApiResponse(400, "Invalid import check request");
                 res.status(ar.code).end(ar.toJSON());
             }
         });
