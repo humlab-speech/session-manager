@@ -21,6 +21,12 @@
 
 const fs = require("fs");
 const { safePathComponent, safeJoinedPath } = require("./pathSecurity");
+const {
+    ORIGIN_RECORDING,
+    sessionSources,
+    filesOfOrigin,
+    findTakesClashingWithUploads,
+} = require("./sessionFiles");
 
 // Uploads must be unchanged for this long before importing. The SPR client
 // sends COMPLETED before its final upload, and a participant may re-record.
@@ -212,14 +218,17 @@ class SprImportService {
                 .find(
                     {
                         archived: { $ne: true },
-                        "sessions.dataSource": "record",
+                        $or: [
+                            { "sessions.dataSource": "record" },
+                            { "sessions.recordEnabled": true },
+                        ],
                     },
                     { projection: { id: 1, sessions: 1 } },
                 )
                 .toArray();
             for (const project of projects) {
                 for (const session of project.sessions || []) {
-                    if (session.dataSource !== "record" || session.deleted) {
+                    if (!sessionSources(session).record || session.deleted) {
                         continue;
                     }
                     try {
@@ -279,7 +288,9 @@ class SprImportService {
         const decision = decideSprImportAction({
             uploads,
             sprImport: state,
-            filesInDb: session.files || [],
+            // Only recordings: uploaded files in the same session say nothing
+            // about whether its takes were imported.
+            filesInDb: filesOfOrigin(session, ORIGIN_RECORDING),
             bundlesPresent:
                 !state &&
                 this.missingBundles(projectId, session, uploads).length === 0,
@@ -397,6 +408,18 @@ class SprImportService {
             // Only takes whose bundle is missing or holds different audio are
             // (re)imported; the rest keep their bundles and annotations.
             const toImport = this.outdatedBundles(projectId, session, uploads);
+
+            // Never let a take replace an uploaded file of the same name.
+            // Uploads with a prompt's name are refused, but a script can
+            // change after files were uploaded.
+            const clashes = findTakesClashingWithUploads(session, toImport);
+            if (clashes.length > 0) {
+                throw new Error(
+                    "These recordings have the same name as uploaded files in the session, " +
+                        "rename or delete the uploaded files: " +
+                        clashes.join(", "),
+                );
+            }
 
             await this.apiServer.importAudioFiles(
                 projectId,

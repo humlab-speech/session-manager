@@ -83,14 +83,49 @@ class Session {
         this.accessCode = code;
     }
 
+    /**
+     * The output of a non-TTY exec is multiplexed: frames of an 8-byte header
+     * (stream type, 3 zero bytes, big-endian payload length) and a payload.
+     * Returns the concatenated payloads (stdout and stderr, in order), or the
+     * raw bytes if they aren't framed.
+     */
+    static demuxExecOutput(buf) {
+        const parts = [];
+        let pos = 0;
+        while (pos < buf.length) {
+            const framed =
+                pos + 8 <= buf.length &&
+                buf[pos] <= 2 &&
+                buf[pos + 1] === 0 &&
+                buf[pos + 2] === 0 &&
+                buf[pos + 3] === 0 &&
+                pos + 8 + buf.readUInt32BE(pos + 4) <= buf.length;
+            if (!framed) {
+                return pos === 0
+                    ? buf
+                    : Buffer.concat(parts.concat(buf.subarray(pos)));
+            }
+            const size = buf.readUInt32BE(pos + 4);
+            parts.push(buf.subarray(pos + 8, pos + 8 + size));
+            pos += 8 + size;
+        }
+        return Buffer.concat(parts);
+    }
+
     promisifyStream(stream, expectJsonResponse = true) {
-        let streamData = "";
+        const chunks = [];
         return new Promise((resolve, reject) => {
             stream.on("data", (data) => {
                 this.app.addLog("Stream data: " + data.toString());
-                streamData += data.toString();
+                chunks.push(Buffer.from(data));
             });
             stream.on("end", () => {
+                // Demultiplex the whole output at once: frames can span chunks,
+                // and output longer than one frame (8 KB) would otherwise have
+                // binary headers in the middle of the JSON.
+                let streamData = Session.demuxExecOutput(
+                    Buffer.concat(chunks),
+                ).toString();
                 if (expectJsonResponse) {
                     streamData = this.reduceToJson(streamData);
                 }
@@ -231,7 +266,9 @@ class Session {
             HostConfig: {
                 // Allow disabling AutoRemove during development to keep exited containers for post-mortem
                 AutoRemove: !keepContainers,
-                NetworkMode: process.env.VISP_NETWORK_NAME || process.env.COMPOSE_PROJECT_NAME + "_visp-net",
+                NetworkMode:
+                    process.env.VISP_NETWORK_NAME ||
+                    process.env.COMPOSE_PROJECT_NAME + "_visp-net",
                 Mounts: mounts,
                 Memory: 8 * 1024 * 1024 * 1024, //bytes
                 MemorySwap: 16 * 1024 * 1024 * 1024,
@@ -421,7 +458,13 @@ class Session {
             // - VSCode: runs as non-root, caps mainly for entrypoint setup
             const securityProfiles = {
                 "localhost/visp-jupyter-session": {
-                    capAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                    capAdd: [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "FOWNER",
+                        "SETGID",
+                        "SETUID",
+                    ],
                     pidsLimit: 512,
                 },
                 "localhost/visp-vscode-session": {
@@ -483,9 +526,7 @@ class Session {
             if (this.useUDS) {
                 const socketDirName = containerConfig.name;
                 const hostSocketDir =
-                    this.app.absRootPath +
-                    "/mounts/sessions/" +
-                    socketDirName;
+                    this.app.absRootPath + "/mounts/sessions/" + socketDirName;
                 const smSocketDir = "/sessions/" + socketDirName;
 
                 // Create the socket directory (session-manager sees /sessions/)
@@ -753,8 +794,7 @@ class Session {
                     : {}),
                 ...(process.env.PROXY_BLOCKED_CIDRS
                     ? {
-                          PROXY_BLOCKED_CIDRS:
-                              process.env.PROXY_BLOCKED_CIDRS,
+                          PROXY_BLOCKED_CIDRS: process.env.PROXY_BLOCKED_CIDRS,
                       }
                     : {}),
             },
@@ -1059,18 +1099,12 @@ class Session {
         });
 
         this.proxyServer.on("proxyReqWs", (_err, req) => {
-            this.app.addLog(
-                "Session proxy received ws request!",
-                "debug",
-            );
+            this.app.addLog("Session proxy received ws request!", "debug");
             this.app.addLog(req.url);
         });
 
         this.proxyServer.on("upgrade", function () {
-            this.app.addLog(
-                "Session proxy received upgrade!",
-                "debug",
-            );
+            this.app.addLog("Session proxy received upgrade!", "debug");
             //this.proxyServer.proxy.ws(req, socket, head);
         });
     }
@@ -1115,12 +1149,15 @@ class Session {
         });
     }
 
-    async copyUploadedDocs() {
-        this.app.addLog("Copying uploaded files");
-        this.app.addLog("PROJECT_PATH=" + this.localProjectPath);
+    /**
+     * @param {string[]} envVars must carry the container's PROJECT_PATH and
+     * UPLOAD_PATH; they depend on how the caller mounted the container.
+     */
+    async copyUploadedDocs(envVars) {
+        this.app.addLog("Copying uploaded documents");
         return await this.runCommand(
             ["node", "/container-agent/main.js", "copy-docs"],
-            ["PROJECT_PATH=" + this.localProjectPath],
+            envVars,
         ).then((cmdResultString) => {
             //Strip everything preceding the first '{' since it will just be garbage
             cmdResultString = cmdResultString.substring(
@@ -1252,9 +1289,7 @@ class Session {
                 if (fs.existsSync(socketDir)) {
                     fs.rmdirSync(socketDir);
                 }
-                this.app.addLog(
-                    `Cleaned up UDS socket dir: ${socketDir}`,
-                );
+                this.app.addLog(`Cleaned up UDS socket dir: ${socketDir}`);
             } catch (err) {
                 this.app.addLog(
                     `Warning: failed to clean up socket dir: ${err.message}`,
@@ -1273,4 +1308,3 @@ class Session {
 }
 
 module.exports = Session;
-
