@@ -3390,6 +3390,18 @@ class ApiServer {
         return this.getProjectRoleDoc(roleName).permissions;
     }
 
+    /**
+     * Deleting a project is irreversible, so it is not one of the role permissions
+     * a researcher could hold: only the project's ProjectAdmins and SysAdmins may.
+     */
+    canDeleteProject(project, user) {
+        return (
+            this.isSysAdminUser(user) ||
+            this.resolveProjectRole(project, user?.username) ===
+                ApiServer.PROJECT_ROLE_PROJECT_ADMIN
+        );
+    }
+
     sendAdminUnauthorized(ws, msg) {
         ws.send(
             new WebSocketMessage(
@@ -5340,6 +5352,22 @@ class ApiServer {
             return;
         }
 
+        if (
+            !this.isSysAdminUser(user) &&
+            !this.isProjectMember(project, user?.username)
+        ) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "downloadBundle",
+                    progress: "end",
+                    result: false,
+                    message: "User is not authorized to access this project",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
         let fileBaseName = path.basename(fileName, path.extname(fileName));
         safePathComponent(project.id, "projectId");
         safePathComponent(session.name, "sessionName");
@@ -5621,6 +5649,35 @@ class ApiServer {
     }
 
     async deleteProject(ws, user, msg) {
+        //The client only names the project; everything else is looked up here,
+        //and nothing happens unless this user may delete that project.
+        const projectId = msg?.data?.project?.id;
+        const Project = this.mongoose.model("Project");
+        const project =
+            typeof projectId === "string"
+                ? await Project.findOne({ id: projectId })
+                : null;
+        if (!project || !this.canDeleteProject(project, user)) {
+            this.app.addLog(
+                "deleteProject refused for " +
+                    user?.username +
+                    " on project " +
+                    projectId,
+                "warn",
+            );
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "deleteProject",
+                    progress: "end",
+                    message: "User is not authorized to delete this project",
+                    result: false,
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+
         let totalStepsNum = 3;
         let stepNum = 0;
         ws.send(
@@ -5635,7 +5692,7 @@ class ApiServer {
 
         //first, stop all running container sessions for this project
         let sessions = await this.app.sessMan.getContainerSessionsByProjectId(
-            msg.data.project.id,
+            project.id,
         );
 
         for (let key in sessions) {
@@ -5643,7 +5700,6 @@ class ApiServer {
             await this.app.sessMan.deleteSession(session.accessCode);
         }
 
-        let project = msg.data.project;
         safePathComponent(project.id, "projectId");
         let repoPath = safeJoinedPath("/repositories", project.id);
 
@@ -5656,7 +5712,6 @@ class ApiServer {
                 result: true,
             }),
         );
-        const Project = this.mongoose.model("Project");
         await Project.deleteOne({ id: project.id });
 
         ws.send(
