@@ -4508,6 +4508,31 @@ class ApiServer {
         );
     }
 
+    /**
+     * High-water mark for a script's "prompt_N" item codes, stored on the script so
+     * numbering never walks back. Item codes name recorded takes, so a number that
+     * is handed out must never come back into service - deleting or emptying the
+     * highest prompt frees its number in the editor, and the next prompt would
+     * otherwise be recorded over an older take. The mark is the max of what the
+     * backend last stored, what the editor counted, and what the saved prompts
+     * carry - so it only ever goes up, whichever of several editors writes last.
+     */
+    static nextItemcodeSeq(storedScript, sentSeq, promptItems) {
+        let seq = Math.max(
+            Number(storedScript?.itemcodeSeq) || 0,
+            Number(sentSeq) || 0,
+        );
+        for (const item of promptItems || []) {
+            const numbered = /^prompt_(\d+)$/.exec(
+                String(item?.itemcode || ""),
+            );
+            if (numbered) {
+                seq = Math.max(seq, Number(numbered[1]));
+            }
+        }
+        return seq;
+    }
+
     async saveSprScripts(ws, msg) {
         let scripts = msg.data.scripts;
         let owner = msg.data.owner;
@@ -4574,6 +4599,11 @@ class ApiServer {
                 let found = await db
                     .collection("scripts")
                     .findOne({ scriptId: script.scriptId });
+                script.itemcodeSeq = ApiServer.nextItemcodeSeq(
+                    found,
+                    scripts[key]?.itemcodeSeq,
+                    script.sections?.[0]?.groups?.[0]?.promptItems,
+                );
                 if (found) {
                     await db
                         .collection("scripts")
@@ -8644,8 +8674,9 @@ session-manager_1    | }
     // Run createSessions.R (via container-agent) in a short-lived operations
     // container, importing the takes under uploadPath into projectSession.
     /**
+    /**
      * Move a bundle directory that an import is about to replace out of the
-     * project's EMU-DB and into <dataDir>/.replaced-bundles/<session>/<utc>-<bundle>,
+     * project's EMU-DB and into <dataDir>/replaced-recordings/<session>/<utc>-<bundle>,
      * instead of deleting it. A replaced bundle takes its annotations with it, and
      * item codes can come back into use (a prompt is deleted, its number is handed
      * to a later prompt), so deleting on sight can destroy recorded work that
@@ -8653,10 +8684,13 @@ session-manager_1    | }
      * bundle is gone from the session and the new one is imported - without
      * throwing anything away.
      *
-     * Returns the retired path, or null when there was nothing to retire.
-     *
-     * ponytail: nothing prunes .replaced-bundles yet; the upgrade is a retention
-     * sweep (keep 30 days), not a delete-on-import.
+     * The folder is deliberately not hidden and deliberately not pruned: it is the
+     * researcher's own undo, visible in the project's file browser (a dot-directory
+     * would not be - Jupyter's contents manager refuses to serve hidden paths).
+     * Nothing deletes it yet, so it grows with every replaced take; see
+     * TODO.md ("Replaced recordings") for what that costs and where a report or
+     * prune would go. Returns the retired path, or null when there was nothing to
+     * retire.
      */
     async retireBundle(dataDir, sessionDirName, bundleName) {
         const bundleDir = safeJoinedPath(
@@ -8670,7 +8704,7 @@ session-manager_1    | }
         }
         const retiredRoot = safeJoinedPath(
             dataDir,
-            ".replaced-bundles",
+            "replaced-recordings",
             sessionDirName,
         );
         fs.mkdirSync(retiredRoot, { recursive: true });
@@ -8778,6 +8812,37 @@ session-manager_1    | }
     }
 
     /**
+     * Commit the project as it stands just before an import replaces bundles, so the
+     * recordings and annotations that are about to be superseded are in the
+     * project's git history before they stop being live. Nothing else commits an
+     * imported take: the background importer never runs a git operation, so until a
+     * dialog happens to save the project the newest work is only on disk.
+     *
+     * The importer runs without a logged-in user, hence the system authorship. A
+     * failure here must not fail the import - the copy retireBundle() leaves on disk
+     * is still the safety net.
+     */
+    async commitProjectBeforeReplacingBundles(projectId) {
+        const repoDir = safeJoinedPath("/repositories", projectId);
+        try {
+            const git = await simpleGit(repoDir);
+            await git.addConfig("user.name", "VISP system");
+            await git.addConfig("user.email", "system@visp.local");
+            await this.addFilesToGit(git, projectId);
+            await git.commit(
+                "System commit before replacing imported recordings",
+            );
+        } catch (error) {
+            // Includes "nothing to commit", which is the common case.
+            this.app.addLog(
+                "Could not commit project before replacing recordings: " +
+                    error.toString(),
+                "warn",
+            );
+        }
+    }
+
+    /**
      * Import recorded takes into a session of the project's EMU-DB.
      *
      * Only the takes named in takeNames are (re)imported: their existing bundles
@@ -8829,19 +8894,36 @@ session-manager_1    | }
             sessionId,
         );
 
+        let replacedCount = 0;
         if (takeNames.length > 0) {
             // Move the bundles being replaced out of the way instead of deleting
             // them. A re-import that replaces a bundle also throws away everything
             // annotated in it, and a reused item code (a prompt deleted and its
             // number handed out again later) would then silently destroy recorded
             // work that belongs to a different prompt.
-            for (const name of takeNames) {
-                const base = path.basename(name, ".wav");
-                await this.retireBundle(
-                    safeJoinedPath("/repositories", projectId, "Data"),
-                    projectSession.name + "_ses",
-                    base + "_bndl",
-                );
+            const dataDir = safeJoinedPath("/repositories", projectId, "Data");
+            const sessionDirName = projectSession.name + "_ses";
+            const bundleName = (name) => path.basename(name, ".wav") + "_bndl";
+            const replaced = takeNames.filter((name) =>
+                fs.existsSync(
+                    safeJoinedPath(
+                        dataDir,
+                        "VISP_emuDB",
+                        sessionDirName,
+                        bundleName(name),
+                    ),
+                ),
+            );
+            if (replaced.length > 0) {
+                await this.commitProjectBeforeReplacingBundles(projectId);
+                for (const name of replaced) {
+                    await this.retireBundle(
+                        dataDir,
+                        sessionDirName,
+                        bundleName(name),
+                    );
+                }
+                replacedCount = replaced.length;
             }
 
             // Stage the takes where createSessions.R expects uploads:
@@ -8927,6 +9009,15 @@ session-manager_1    | }
         // notification list without refreshing the user's active view.
         const sessionName = projectSession ? projectSession.name : sessionId;
         const fileCount = files.length;
+        const replacedNote =
+            replacedCount > 0
+                ? " " +
+                  replacedCount +
+                  (replacedCount === 1
+                      ? " replaced recording was"
+                      : " replaced recordings were") +
+                  " kept under Data/replaced-recordings/."
+                : "";
         try {
             if (takeNames.length === 0) {
                 return new ApiResponse(200, "No new recordings to import");
@@ -8939,7 +9030,8 @@ session-manager_1    | }
                     '" was imported (' +
                     fileCount +
                     (fileCount === 1 ? " file" : " files") +
-                    ").",
+                    ")." +
+                    replacedNote,
                 metadata: {
                     sessionId: sessionId,
                     fileCount: fileCount,

@@ -12,7 +12,9 @@ function createContext() {
     const api = Object.create(ApiServer.prototype);
     api.app = { addLog: () => {} };
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "visp-data-"));
-    fs.mkdirSync(path.join(dataDir, "VISP_emuDB", "sess_ses"), { recursive: true });
+    fs.mkdirSync(path.join(dataDir, "VISP_emuDB", "sess_ses"), {
+        recursive: true,
+    });
     return { api, dataDir };
 }
 
@@ -27,16 +29,37 @@ test("a replaced bundle is moved aside with its annotations, not deleted", async
     const { api, dataDir } = createContext();
     makeBundle(dataDir, "prompt_2_bndl", "annotated work");
 
-    const retired = await api.retireBundle(dataDir, "sess_ses", "prompt_2_bndl");
+    const retired = await api.retireBundle(
+        dataDir,
+        "sess_ses",
+        "prompt_2_bndl",
+    );
 
     assert.ok(retired, "the retired bundle must be reported");
-    assert.ok(!fs.existsSync(path.join(dataDir, "VISP_emuDB", "sess_ses", "prompt_2_bndl")), "gone from the session");
-    assert.equal(fs.readFileSync(path.join(retired, "annotation.json"), "utf8"), "annotated work");
+    assert.ok(
+        !fs.existsSync(
+            path.join(dataDir, "VISP_emuDB", "sess_ses", "prompt_2_bndl"),
+        ),
+        "gone from the session",
+    );
+    assert.equal(
+        fs.readFileSync(path.join(retired, "annotation.json"), "utf8"),
+        "annotated work",
+    );
+
+    // The point of the folder is that a researcher can open it in the project's
+    // file browser, which refuses to serve hidden paths.
+    const kept = path.basename(path.dirname(path.dirname(retired)));
+    assert.equal(kept, "replaced-recordings");
+    assert.ok(!kept.startsWith("."), "the folder must not be hidden");
 });
 
 test("nothing to replace is not an error", async () => {
     const { api, dataDir } = createContext();
-    assert.equal(await api.retireBundle(dataDir, "sess_ses", "prompt_9_bndl"), null);
+    assert.equal(
+        await api.retireBundle(dataDir, "sess_ses", "prompt_9_bndl"),
+        null,
+    );
 });
 
 test("two replacements of the same code both survive", async () => {
@@ -47,6 +70,12 @@ test("two replacements of the same code both survive", async () => {
     const second = await api.retireBundle(dataDir, "sess_ses", "prompt_1_bndl");
 
     assert.notEqual(first, second);
-    assert.equal(fs.readFileSync(path.join(first, "annotation.json"), "utf8"), "first");
-    assert.equal(fs.readFileSync(path.join(second, "annotation.json"), "utf8"), "second");
+    assert.equal(
+        fs.readFileSync(path.join(first, "annotation.json"), "utf8"),
+        "first",
+    );
+    assert.equal(
+        fs.readFileSync(path.join(second, "annotation.json"), "utf8"),
+        "second",
+    );
 });
