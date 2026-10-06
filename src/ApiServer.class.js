@@ -2630,23 +2630,24 @@ class ApiServer {
     }
 
     async fetchBundleList(ws, user, msg) {
-        const User = this.mongoose.model("User");
-        let selectedUser = await User.findOne({ username: msg.username });
-
-        const Project = this.mongoose.model("Project");
-        let project = await Project.findOne({ id: msg.projectId });
+        // Identity comes from the connection, membership is checked server-side.
+        const project = await this.requireBundleListProject(ws, user, msg);
+        if (!project) {
+            return;
+        }
+        const owner = user.username;
 
         //find via mongoose
         const BundleList = this.mongoose.model("BundleList");
         let bundleListResult = await BundleList.findOne({
-            owner: selectedUser.username,
+            owner: owner,
             projectId: project.id,
         });
 
         if (!bundleListResult) {
             //insert a new bundlelist
             bundleListResult = new BundleList({
-                owner: selectedUser.username,
+                owner: owner,
                 projectId: project.id,
                 bundles: [],
             });
@@ -2663,23 +2664,21 @@ class ApiServer {
     }
 
     async saveBundleLists(ws, user, msg) {
+        // Writes are confined to the connection user's own lists inside a
+        // project they belong to; bundleListDef.username is never trusted.
+        const project = await this.requireBundleListProject(ws, user, msg);
+        if (!project) {
+            return;
+        }
+        const owner = user.username;
+
         for (let key in msg.bundleLists) {
             let bundleListDef = msg.bundleLists[key];
-
-            const User = this.mongoose.model("User");
-            let userResult = await User.find({
-                username: bundleListDef.username,
-            });
-            let selectedUser = userResult[0];
-
-            const Project = this.mongoose.model("Project");
-            let projectResult = await Project.find({ id: msg.projectId });
-            let project = projectResult[0];
 
             //find via mongoose
             const BundleList = this.mongoose.model("BundleList");
             let bundleListResult = await BundleList.find({
-                owner: selectedUser.username,
+                owner: owner,
                 projectId: project.id,
             });
 
@@ -2691,7 +2690,7 @@ class ApiServer {
             } else {
                 //create
                 bundleList = new BundleList({
-                    owner: selectedUser.username,
+                    owner: owner,
                     projectId: project.id,
                     bundles: bundleListDef.bundles,
                 });
@@ -3406,6 +3405,53 @@ class ApiServer {
             this.resolveProjectRole(project, user?.username) ===
                 ApiServer.PROJECT_ROLE_PROJECT_ADMIN
         );
+    }
+
+    /**
+     * Bundle lists belong to one user inside one project. The client may only
+     * name the project: the owner is always the authenticated connection user
+     * (msg.username is never trusted), and the named project must actually
+     * contain that user - SysAdmins excepted, as everywhere else. The project
+     * id is string-gated before it reaches findOne() so a client cannot send a
+     * NoSQL-shaped object as the query value.
+     *
+     * Returns the project document, or null after sending the refusal.
+     */
+    async requireBundleListProject(ws, user, msg) {
+        const owner = user?.username;
+        const projectId =
+            typeof msg?.projectId === "string" ? msg.projectId : null;
+        const Project = this.mongoose.model("Project");
+        const project =
+            projectId === null
+                ? null
+                : await Project.findOne({ id: projectId });
+
+        if (
+            !owner ||
+            !project ||
+            !(this.isSysAdminUser(user) || this.isProjectMember(project, owner))
+        ) {
+            this.app.addLog(
+                "Bundle-list access refused for " +
+                    owner +
+                    " on project " +
+                    projectId,
+                "warn",
+            );
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {},
+                    "Unauthorized",
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+            return null;
+        }
+        return project;
     }
 
     sendAdminUnauthorized(ws, msg) {
