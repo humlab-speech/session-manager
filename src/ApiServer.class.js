@@ -2630,12 +2630,22 @@ class ApiServer {
     }
 
     async fetchBundleList(ws, user, msg) {
-        // Identity comes from the connection, membership is checked server-side.
+        // Identity comes from the connection, unless the caller administers the
+        // project - the distribution dialog reads one list per member.
         const project = await this.requireBundleListProject(ws, user, msg);
         if (!project) {
             return;
         }
-        const owner = user.username;
+        const owner = this.resolveBundleListOwner(project, user, msg.username);
+        if (owner === null) {
+            this.refuseBundleListAccess(
+                ws,
+                msg,
+                user?.username + " -> " + msg.username,
+                msg.projectId,
+            );
+            return;
+        }
 
         //find via mongoose
         const BundleList = this.mongoose.model("BundleList");
@@ -2664,21 +2674,37 @@ class ApiServer {
     }
 
     async saveBundleLists(ws, user, msg) {
-        // Writes are confined to the connection user's own lists inside a
-        // project they belong to; bundleListDef.username is never trusted.
         const project = await this.requireBundleListProject(ws, user, msg);
         if (!project) {
             return;
         }
-        const owner = user.username;
 
+        // Resolve every owner BEFORE writing anything: a call that names someone
+        // the caller may not act for has to fail as a whole, not half-apply.
+        const BundleList = this.mongoose.model("BundleList");
+        const entries = [];
         for (let key in msg.bundleLists) {
             let bundleListDef = msg.bundleLists[key];
+            const owner = this.resolveBundleListOwner(
+                project,
+                user,
+                bundleListDef?.username,
+            );
+            if (owner === null) {
+                this.refuseBundleListAccess(
+                    ws,
+                    msg,
+                    user?.username + " -> " + bundleListDef?.username,
+                    msg.projectId,
+                );
+                return;
+            }
+            entries.push({ owner: owner, bundles: bundleListDef?.bundles });
+        }
 
-            //find via mongoose
-            const BundleList = this.mongoose.model("BundleList");
+        for (const entry of entries) {
             let bundleListResult = await BundleList.find({
-                owner: owner,
+                owner: entry.owner,
                 projectId: project.id,
             });
 
@@ -2686,13 +2712,13 @@ class ApiServer {
             if (bundleListResult.length > 0) {
                 //update
                 bundleList = bundleListResult[0];
-                bundleList.bundles = bundleListDef.bundles;
+                bundleList.bundles = entry.bundles;
             } else {
                 //create
                 bundleList = new BundleList({
-                    owner: owner,
+                    owner: entry.owner,
                     projectId: project.id,
-                    bundles: bundleListDef.bundles,
+                    bundles: entry.bundles,
                 });
             }
             bundleList.save();
@@ -3400,6 +3426,13 @@ class ApiServer {
      * a researcher could hold: only the project's ProjectAdmins and SysAdmins may.
      */
     canDeleteProject(project, user) {
+        return this.isProjectAdminOrSysAdmin(project, user);
+    }
+
+    /**
+     * ProjectAdmin or SysAdmin: the two roles that administer a project itself.
+     */
+    isProjectAdminOrSysAdmin(project, user) {
         return (
             this.isSysAdminUser(user) ||
             this.resolveProjectRole(project, user?.username) ===
@@ -3408,10 +3441,11 @@ class ApiServer {
     }
 
     /**
-     * Bundle lists belong to one user inside one project. The client may only
-     * name the project: the owner is always the authenticated connection user
-     * (msg.username is never trusted), and the named project must actually
-     * contain that user - SysAdmins excepted, as everywhere else. The project
+     * Bundle lists belong to one user inside one project. The client names the
+     * project, and the owner defaults to the authenticated connection user; a
+     * client may name someone else only through resolveBundleListOwner(), i.e.
+     * when it administers that project. The named project must contain the
+     * connection user - SysAdmins excepted, as everywhere else. The project
      * id is string-gated before it reaches findOne() so a client cannot send a
      * NoSQL-shaped object as the query value.
      *
@@ -3450,26 +3484,58 @@ class ApiServer {
             !project ||
             !(this.isSysAdminUser(user) || this.isProjectMember(project, owner))
         ) {
-            this.app.addLog(
-                "Bundle-list access refused for " +
-                    owner +
-                    " on project " +
-                    projectId,
-                "warn",
-            );
-            ws.send(
-                new WebSocketMessage(
-                    msg.requestId,
-                    msg.cmd,
-                    {},
-                    "Unauthorized",
-                    "end",
-                    false,
-                ).toJSON(),
-            );
+            this.refuseBundleListAccess(ws, msg, owner, projectId);
             return null;
         }
         return project;
+    }
+
+    /**
+     * Whose bundle list is being read or written?
+     *
+     * The connection user, by default. A client may name someone else only to run
+     * the "distribute bundles for annotation in Artic" flow, which assigns a list
+     * per project member in one pass - so that is granted to ProjectAdmins and
+     * SysAdmins (the bar for administering the project itself), and only for a
+     * user who is actually a member of that project. Anything else returns null,
+     * i.e. refused: the write is never silently retargeted onto the caller, which
+     * would hand back a green "saved" for a list nobody asked about.
+     */
+    resolveBundleListOwner(project, user, requestedOwner) {
+        const self = user?.username;
+        if (
+            typeof requestedOwner !== "string" ||
+            requestedOwner === "" ||
+            requestedOwner === self
+        ) {
+            return self;
+        }
+        if (!this.isProjectAdminOrSysAdmin(project, user)) {
+            return null;
+        }
+        return this.isProjectMember(project, requestedOwner)
+            ? requestedOwner
+            : null;
+    }
+
+    refuseBundleListAccess(ws, msg, owner, projectId) {
+        this.app.addLog(
+            "Bundle-list access refused for " +
+                owner +
+                " on project " +
+                projectId,
+            "warn",
+        );
+        ws.send(
+            new WebSocketMessage(
+                msg.requestId,
+                msg.cmd,
+                {},
+                "Unauthorized",
+                "end",
+                false,
+            ).toJSON(),
+        );
     }
 
     sendAdminUnauthorized(ws, msg) {
@@ -8577,6 +8643,50 @@ session-manager_1    | }
 
     // Run createSessions.R (via container-agent) in a short-lived operations
     // container, importing the takes under uploadPath into projectSession.
+    /**
+     * Move a bundle directory that an import is about to replace out of the
+     * project's EMU-DB and into <dataDir>/.replaced-bundles/<session>/<utc>-<bundle>,
+     * instead of deleting it. A replaced bundle takes its annotations with it, and
+     * item codes can come back into use (a prompt is deleted, its number is handed
+     * to a later prompt), so deleting on sight can destroy recorded work that
+     * belongs to a different prompt. Renaming keeps the import behaviour - the
+     * bundle is gone from the session and the new one is imported - without
+     * throwing anything away.
+     *
+     * Returns the retired path, or null when there was nothing to retire.
+     *
+     * ponytail: nothing prunes .replaced-bundles yet; the upgrade is a retention
+     * sweep (keep 30 days), not a delete-on-import.
+     */
+    async retireBundle(dataDir, sessionDirName, bundleName) {
+        const bundleDir = safeJoinedPath(
+            dataDir,
+            "VISP_emuDB",
+            sessionDirName,
+            bundleName,
+        );
+        if (!fs.existsSync(bundleDir)) {
+            return null;
+        }
+        const retiredRoot = safeJoinedPath(
+            dataDir,
+            ".replaced-bundles",
+            sessionDirName,
+        );
+        fs.mkdirSync(retiredRoot, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        let target = safeJoinedPath(retiredRoot, stamp + "-" + bundleName);
+        for (let n = 1; fs.existsSync(target); n++) {
+            target = safeJoinedPath(
+                retiredRoot,
+                stamp + "-" + bundleName + "-" + n,
+            );
+        }
+        fs.renameSync(bundleDir, target);
+        this.app.addLog("Replaced EMU-DB bundle kept at " + target, "warn");
+        return target;
+    }
+
     async runSprImportContainer(project, projectSession, uploadPath) {
         const projectId = project.id;
         let volumes = [
@@ -8720,19 +8830,17 @@ session-manager_1    | }
         );
 
         if (takeNames.length > 0) {
-            // Remove the bundles being replaced.
+            // Move the bundles being replaced out of the way instead of deleting
+            // them. A re-import that replaces a bundle also throws away everything
+            // annotated in it, and a reused item code (a prompt deleted and its
+            // number handed out again later) would then silently destroy recorded
+            // work that belongs to a different prompt.
             for (const name of takeNames) {
                 const base = path.basename(name, ".wav");
-                fs.rmSync(
-                    safeJoinedPath(
-                        "/repositories",
-                        projectId,
-                        "Data",
-                        "VISP_emuDB",
-                        projectSession.name + "_ses",
-                        base + "_bndl",
-                    ),
-                    { recursive: true, force: true },
+                await this.retireBundle(
+                    safeJoinedPath("/repositories", projectId, "Data"),
+                    projectSession.name + "_ses",
+                    base + "_bndl",
                 );
             }
 
