@@ -50,3 +50,27 @@ test("the strip list and the tag rules are unchanged by the whitespace fix", () 
     // the mojibake en/em dash entries of api.php's $strip
     assert.equal(api.sanitizeFileName("â€“dash"), "dash");
 });
+
+test("every character the trim class claims is actually trimmed", () => {
+    // The collapse class is pinned by the a\fb / a\vb vectors above; without these
+    // the trim class could drop \r, \v or \0 and the suite would not notice.
+    const api = createApi();
+    const cases = {
+        "\ra": "a",
+        "\va": "a",
+        "\u0000a": "a",
+        "\fa": "_a", // form feed is NOT in PHP's trim() set, so it reaches the collapse
+        "\f": "_", // a name that is only a form feed collapses to one underscore
+        " \f ": "_", // trimmed around, then collapsed
+        "a\r\nb": "a_b",
+        "a  b": "a  b", // two NBSP: nothing collapses, nothing trims
+        "\u2028a\u2029": "\u2028a\u2029",
+    };
+    for (const [input, expected] of Object.entries(cases)) {
+        assert.equal(
+            api.sanitizeFileName(input),
+            expected,
+            JSON.stringify(input),
+        );
+    }
+});
