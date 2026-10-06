@@ -24,7 +24,7 @@ class Session {
         this.container = null;
         // In-container service identity (uid:gid). Used both to enforce the
         // spawn user and to anchor the rootless --userns=keep-id mapping so this
-        // UID maps to the host repository owner (johan, 1000:1000). Every write
+        // UID maps to the host repository owner (uid:gid 1000:1000). Every write
         // to a bind mount is then owned by that single repository identity,
         // regardless of which UID the in-container service runs as.
         // jovyan = 1000:100 in the jupyter/datascience base image.
@@ -493,9 +493,10 @@ class Session {
                 // upstream quay.io/jupyter/datascience-notebook base image.
                 user: this.containerUidGid,
                 // Rootless userns mapping: pin this container's service UID/GID to
-                // the host user that owns the bind-mounted repositories (johan,
-                // 1000:1000). Files the container writes to a mount are then owned
-                // by that single repository identity — no exec-as-root needed and
+                // the host user that owns the bind-mounted repositories (the
+                // deploying user, uid:gid 1000:1000). Files the container writes
+                // to a mount are then owned by that single repository identity —
+                // no exec-as-root needed and
                 // no foreign-owned (subuid) emuDB files. As a bonus this remaps
                 // container UID 0 away from the host repo owner onto a subuid, so a
                 // container-root escape lands on an unprivileged host id.
