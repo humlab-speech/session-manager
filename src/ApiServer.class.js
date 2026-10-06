@@ -7740,11 +7740,13 @@ session-manager_1    | }
      * buildDocFilesEnv
      *
      * Builds the DOC_FILES env var for container-agent's copy-docs command:
-     * a JSON array of the file names the user actually kept in the form
-     * (projectFormData.docFiles, entries are {name} objects). container-agent
-     * src/main.mjs parses it with JSON.parse(...).map(f => f.name ?? f).
-     * Returns null when the payload carries no docFiles array, so callers keep
-     * the old copy-whole-directory behaviour (safe roll-forward).
+     * a JSON array of the DISK names of the documents the user actually kept in
+     * the form (projectFormData.docFiles, entries are {name,size,type} objects).
+     * container-agent src/main.mjs matches those entries against the names in
+     * UPLOAD_PATH/docs, so they must be the names the files were stored under,
+     * not the browser names (see docFileDiskName). Returns null when the payload
+     * carries no docFiles array, so callers keep the old copy-whole-directory
+     * behaviour (safe roll-forward).
      *
      * @param {object} projectFormData
      * @returns {string|null}
@@ -7756,8 +7758,53 @@ session-manager_1    | }
         }
         return (
             "DOC_FILES=" +
-            JSON.stringify(docs.map((d) => (d && d.name ? d.name : d)))
+            JSON.stringify(docs.map((d) => this.docFileDiskName(d)))
         );
+    }
+
+    /**
+     * docFileDiskName
+     *
+     * Name an uploaded document actually has on disk under UPLOAD_PATH/docs.
+     * Uploads go through api.php's uploadFile(), which stores the file under
+     * sanitize($fileMeta->filename) - so "consent report (v1).pdf" lands as
+     * "consent_report_v1.pdf" - while the project payload only carries the
+     * browser's original File.name. Entries that already carry the stored name
+     * (webclient's FileUploadService.storedName) are used verbatim; api.php
+     * sanitize() is mirrored below for entries carrying only the original name,
+     * otherwise the allow list matches nothing and the document silently
+     * disappears from the project repo.
+     *
+     * @param {object|string} entry
+     * @returns {string}
+     */
+    docFileDiskName(entry) {
+        return this.sanitizeFileName(entry?.storedName ?? entry?.name ?? entry);
+    }
+
+    /**
+     * sanitizeFileName
+     *
+     * Mirrors sanitize() in webclient/api/api.php (api.php is the contract
+     * source - it is what names the upload gets on disk), minus the $anal /
+     * $force_lowercase arguments api.php never passes: strip HTML tags, delete
+     * the characters in $strip, trim, then collapse runs of whitespace to "_".
+     * Keep in sync with api.php (and webclient's FileUploadService.storedName).
+     *
+     * @param {string} name
+     * @returns {string}
+     */
+    sanitizeFileName(name) {
+        // api.php's $strip character class, as one string: ~ ` ! @ # $ % ^ & *
+        // = + [ { ] } \ | ; : " ' , < > ? ( )
+        const strip = "~`!@#$%^&*+=[]{}\\|;:\"',<>?()";
+        // strip_tags
+        let clean = String(name ?? "").replace(/<[^>]*>/g, "");
+        for (const char of strip) {
+            clean = clean.split(char).join("");
+        }
+        clean = clean.trim();
+        return clean.replace(/\s+/g, "_");
     }
 
     async addFilesToGit(git, projectId) {
