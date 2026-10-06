@@ -1586,9 +1586,17 @@ class ApiServer {
                 // saveProject is async: a synchronous try/catch cannot catch
                 // its rejections, and an unhandled rejection would take down
                 // the whole process. Report failures like the sync path does.
-                this.saveProject(ws, user, msg).catch((error) =>
-                    this.app.addLog(error, "error"),
-                );
+                this.saveProject(ws, user, msg).catch((error) => {
+                    this.app.addLog(error, "error");
+                    // A form the server cannot even walk (a missing annotLevels,
+                    // say) used to end here: logged, and the client waited for a
+                    // reply that never came.
+                    this.sendProjectSaveFailure(
+                        ws,
+                        msg,
+                        "The project could not be processed",
+                    );
+                });
             } catch (error) {
                 this.app.addLog(error, "error");
             }
@@ -6095,6 +6103,11 @@ session-manager_1    | }
             }),
         );
         if (!this.validateProjectForm(projectFormData)) {
+            this.sendProjectSaveFailure(
+                ws,
+                msg,
+                "The project form did not pass validation",
+            );
             return;
         }
         const uploadsBySession = await this.prepareSessionUploads(
@@ -6204,8 +6217,19 @@ session-manager_1    | }
             ws,
             msg,
         );
-        if (emuDbOk === false) {
-            // saveProjectEmuDb already sent the error progress=end message, nothing more to do
+        // saveProjectEmuDb returns true only at the very end. Anything else did
+        // not complete the save, and saying "Done" over it told the client a
+        // project was stored when it was not: false means the callee already
+        // sent its own progress=end failure, undefined means nobody said
+        // anything (a failed container command, an early bail-out).
+        if (emuDbOk !== true) {
+            if (emuDbOk !== false) {
+                this.sendProjectSaveFailure(
+                    ws,
+                    msg,
+                    "Project could not be saved",
+                );
+            }
             return;
         }
         ws.send(
@@ -6287,6 +6311,11 @@ session-manager_1    | }
         this.app.addLog("Updating project");
         if (!this.validateProjectForm(projectFormData)) {
             this.app.addLog("Project form validation failed", "error");
+            this.sendProjectSaveFailure(
+                ws,
+                msg,
+                "The project form did not pass validation",
+            );
             return;
         }
         const uploadsBySession = await this.prepareSessionUploads(
@@ -6333,7 +6362,14 @@ session-manager_1    | }
             ws,
             msg,
         );
-        if (emuDbOk === false) {
+        if (emuDbOk !== true) {
+            if (emuDbOk !== false) {
+                this.sendProjectSaveFailure(
+                    ws,
+                    msg,
+                    "Project could not be saved",
+                );
+            }
             return;
         }
         ws.send(
@@ -6343,6 +6379,23 @@ session-manager_1    | }
                 cmd: "saveProject",
                 progress: "end",
                 result: "Done",
+            }),
+        );
+    }
+
+    // The one way a saveProject command is allowed to finish: a progress=end
+    // that says whether the project was stored. Without this the client sat on
+    // its progress dialog (a rejected handler) or read "Done" for a save that
+    // stopped halfway.
+    sendProjectSaveFailure(ws, msg, message) {
+        ws.send(
+            JSON.stringify({
+                requestId: msg.requestId,
+                type: "cmd-result",
+                cmd: "saveProject",
+                progress: "end",
+                result: false,
+                message: message,
             }),
         );
     }
@@ -6997,7 +7050,7 @@ session-manager_1    | }
                     }),
                 );
             }
-            return;
+            return false; // already answered above
         }
 
         //Spawning container
@@ -8255,11 +8308,17 @@ session-manager_1    | }
             return false;
         }
 
-        //Check that documents doesn't contain any weird files?
-        projectFormData.docFiles.forEach((docFile) => {
+        // Warning only, and deliberately so: "return false" here only ever
+        // returned from the callback, so this check has never rejected a save -
+        // and it compares against validator.escape(), which is not the rule
+        // api.php actually applies (sanitizeFileName is). Turning it into a
+        // refusal would start rejecting names that upload fine today (anything
+        // with an "&"), so it stays a log line until the name policy is decided
+        // in one place.
+        for (const docFile of projectFormData.docFiles) {
             if (typeof docFile.name == "undefined") {
                 this.app.addLog("Document file name undefined", "warn");
-                return false;
+                continue;
             }
             if (docFile.name != validator.escape(docFile.name)) {
                 this.app.addLog(
@@ -8268,9 +8327,8 @@ session-manager_1    | }
                         " contained invalid characters",
                     "warn",
                 );
-                return false;
             }
-        });
+        }
 
         const projectWideMetadata =
             this.getProjectWideMetadataFromPayload(projectFormData);
