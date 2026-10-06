@@ -9653,10 +9653,21 @@ session-manager_1    | }
         });
 
         this.expressApp.get("/api/importtest", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             this.app.addLog("importtest");
-            this.importContainerTest().then((ar) => {
-                res.status(ar.code).end("ok");
-            });
+            this.importContainerTest()
+                .then((ar) => {
+                    res.status(ar.code).end("ok");
+                })
+                .catch((err) => {
+                    this.app.addLog(
+                        "importtest failed: " + err.message,
+                        "error",
+                    );
+                    res.status(500).end("importtest failed");
+                });
         });
 
         this.expressApp.get("/api/sessions/:user_id", (req, res) => {
