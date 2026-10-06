@@ -7015,7 +7015,7 @@ session-manager_1    | }
         //DOC_FILES: allow list consumed by container-agent's copy-docs. Files
         //removed in the webclient docs form are never deleted server-side, so
         //without the list copy-docs would leak removed uploads into the project
-        //repo (container-agent FLAW-2). The env reaches the container via
+        //repo. The env reaches the container via
         //docker exec's Env array (argv, no shell), so the JSON needs no quoting.
         const docFilesEnv = this.buildDocFilesEnv(projectFormData);
         if (docFilesEnv !== null) {
@@ -9011,9 +9011,9 @@ session-manager_1    | }
     // SessionManagerInterface) already sends hs_api_access_token. Without it a
     // request would otherwise run container control commands, delete sessions or
     // read the session table with no credentials at all - port 8080 is reachable
-    // from every container on visp-net. /api/debug/sessions has its own loopback
-    // check (vispctl's session-doctor curls it without a token) and
-    // /api/importaudiofiles is wsrng-server's, which sends no token.
+    // from every container on the deployment network. /api/debug/sessions keeps
+    // its own loopback check, and /api/importaudiofiles is wsrng-server's,
+    // which sends no token.
     apiGuard(req, res) {
         if (this.checkApiAccessCode(req)) {
             return true;
