@@ -652,7 +652,13 @@ class ApiServer {
                 this.wsClients.push(client);
 
                 ws.on("message", (message) =>
-                    this.handleIncomingWebSocketMessage(ws, message),
+                    this.handleIncomingWebSocketMessage(ws, message).catch(
+                        (error) =>
+                            this.app.addLog(
+                                "Websocket command failed: " + error.toString(),
+                                "error",
+                            ),
+                    ),
                 );
                 ws.on("close", (evt) => {
                     this.app.addLog("Websocket connection closed.");
@@ -696,7 +702,16 @@ class ApiServer {
 
                         this.wsClients.push(client);
                         
-                        ws.on('message', message => this.handleIncomingWebSocketMessage(ws, message));
+                        ws.on('message', (message) =>
+                            this.handleIncomingWebSocketMessage(ws, message).catch(
+                                (error) =>
+                                    this.app.addLog(
+                                        "Websocket command failed: " +
+                                            error.toString(),
+                                        "error",
+                                    ),
+                            ),
+                        );
                         ws.on('close', () => {
                             this.app.addLog("Client closed connection.");
                             this.handleConnectionClosed(client);
@@ -1041,18 +1056,40 @@ class ApiServer {
         return true;
     }
 
+    // A websocket frame is whatever the client sent (maxPayload is 1 MB) and can
+    // carry newlines, which forge log lines in a log an attacker half-controls.
+    // addLog writes synchronously to two files, so logging whole frames is also a
+    // disk fill and event-loop stall that one unauthenticated client can drive.
+    frameLogText(message, limit = 200) {
+        return String(message)
+            .replace(/[\r\n\t]+/g, " ")
+            .slice(0, limit);
+    }
+
     async handleIncomingWebSocketMessage(ws, message) {
-        this.app.addLog("Received: " + message, "debug");
+        this.app.addLog("Received: " + this.frameLogText(message), "debug");
 
         let msg = null;
         try {
             msg = JSON.parse(message);
         } catch (err) {
             this.app.addLog(
-                "Failed parsing incoming websocket message as JSON. Message was: " +
-                    message,
+                "Failed parsing incoming websocket message as JSON. Message started: " +
+                    this.frameLogText(message, 400),
                 "error",
             );
+        }
+
+        if (msg === null || typeof msg !== "object") {
+            // Has to be here: every command check below dereferences msg.cmd, so the
+            // guard that used to sit further down could never run - an unparsable
+            // frame threw instead, and a non-object one ("42", "[]") fell through
+            // every branch and was never answered.
+            this.app.addLog(
+                "Received unparsable websocket message, ignoring.",
+                "warning",
+            );
+            return;
         }
 
         let client = this.getClientBySocket(ws);
@@ -1203,14 +1240,6 @@ class ApiServer {
 
         if (msg.cmd == "validateInviteCode") {
             this.validateInviteCode(ws, msg, user);
-            return;
-        }
-
-        if (msg == null) {
-            this.app.addLog(
-                "Received unparsable websocket message, ignoring.",
-                "warning",
-            );
             return;
         }
 
@@ -1484,16 +1513,39 @@ class ApiServer {
         }
 
         if (msg.cmd == "accessListCheck") {
+            // Nothing in quadlets/ or docker/ ever creates /access-list.json, so a
+            // missing file is the normal case - and "throw" inside an fs callback is
+            // an uncaughtException, not a rejection, and index.js handles only
+            // rejections: one frame from any signed-in user stopped session-manager
+            // for everyone and orphaned the running Jupyter sessions. An unreadable
+            // list now denies (the safe direction) and only the caller's own
+            // membership is ever answered - the two console.logs printed the whole
+            // list, with every username in it, to the journal.
             fs.readFile("/access-list.json", (error, data) => {
-                if (error) throw error;
-                console.log(data);
-                const accessList = JSON.parse(data);
-                console.log(accessList);
+                let allowed = false;
+                if (error) {
+                    this.app.addLog(
+                        "accessListCheck: no access list readable (" +
+                            error.code +
+                            "), denying",
+                        "warn",
+                    );
+                } else {
+                    try {
+                        allowed = JSON.parse(data).includes(msg.username);
+                    } catch (parseError) {
+                        this.app.addLog(
+                            "accessListCheck: unparsable access list, denying: " +
+                                parseError.toString(),
+                            "error",
+                        );
+                    }
+                }
                 ws.send(
                     JSON.stringify({
                         type: "cmd-result",
                         cmd: "accessListCheck",
-                        result: accessList.includes(msg.username),
+                        result: allowed,
                     }),
                 );
             });
@@ -6388,6 +6440,18 @@ session-manager_1    | }
     // its progress dialog (a rejected handler) or read "Done" for a save that
     // stopped halfway.
     sendProjectSaveFailure(ws, msg, message) {
+        if (ws.readyState !== 1) {
+            // ws drops a send on a closing socket silently (sendAfterClose), so
+            // without this the promised terminal frame vanishes without a trace and
+            // the next reader blames whatever they were debugging at the time.
+            this.app.addLog(
+                "Could not answer saveProject (" +
+                    message +
+                    "): the socket was already closed",
+                "warn",
+            );
+            return;
+        }
         ws.send(
             JSON.stringify({
                 requestId: msg.requestId,

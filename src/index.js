@@ -101,10 +101,17 @@ let application = null;
 // user. Log it and stay up.
 process.on('unhandledRejection', (reason) => {
   const msg = 'Unhandled rejection: ' + (reason && reason.stack ? reason.stack : reason);
-  if (application) {
-    application.addLog(msg, 'error');
-  } else {
-    console.error(msg);
+  // The safety net must not be fatal itself: addLog is an appendFileSync onto a host
+  // bind mount, so a full or read-only disk turns logging the last error into an
+  // uncaughtException inside the handler that exists to keep the process alive.
+  try {
+    if (application) {
+      application.addLog(msg, 'error');
+    } else {
+      console.error(msg);
+    }
+  } catch (logError) {
+    console.error(msg + ' (and logging it failed: ' + logError + ')');
   }
 });
 
