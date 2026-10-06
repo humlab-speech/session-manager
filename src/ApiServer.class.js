@@ -3186,10 +3186,15 @@ class ApiServer {
                 project,
                 user.username,
             );
-            project.userProjectPermissions = this.getProjectPermissions(
-                project,
-                user,
-            );
+            project.userProjectPermissions = {
+                ...this.getProjectPermissions(project, user),
+                // Bundles are as destructive as the project itself, so deleting
+                // one needs ProjectAdmin/SysAdmin (see deleteBundle) rather than
+                // the editProjectFiles a Researcher holds. Derived from the same
+                // server-side check instead of being a fourth seeded role flag, so
+                // the UI can gate on exactly what the backend will enforce.
+                deleteBundles: this.canDeleteProject(project, user),
+            };
             try {
                 await this.syncProjectMetadataWithFile(project);
             } catch (metadataError) {
@@ -5755,6 +5760,18 @@ class ApiServer {
         // deletion (ProjectAdmin or SysAdmin of THIS project, taken from the
         // server-side document, never from the payload) and not by the mere
         // editProjectFiles file-edit permission a researcher holds.
+        //
+        // Decided 2026-10-05 (review round, after the bundle-list owner work):
+        // ONLY SysAdmins and this project's ProjectAdmins may delete a bundle. A
+        // Researcher can still create one - uploads and online recordings go in
+        // through saveProject, which needs editProjectFiles - so the asymmetry is
+        // deliberate: adding audio is a normal research action, removing stored
+        // audio destroys data a colleague may already be working with. The
+        // frontend hides the trash button on the same flag (see
+        // userProjectPermissions.deleteBundles in fetchProjects); this check is
+        // the one that matters. If the round-trip to an admin turns out to be a
+        // real bottleneck, the upgrade path is per-bundle ownership - the owner
+        // is recorded on the bundle list - not a wider role.
         if (!this.canDeleteProject(project, user)) {
             ws.send(
                 JSON.stringify({
