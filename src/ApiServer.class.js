@@ -7769,17 +7769,16 @@ session-manager_1    | }
      * Uploads go through api.php's uploadFile(), which stores the file under
      * sanitize($fileMeta->filename) - so "consent report (v1).pdf" lands as
      * "consent_report_v1.pdf" - while the project payload only carries the
-     * browser's original File.name. Entries that already carry the stored name
-     * (webclient's FileUploadService.storedName) are used verbatim; api.php
-     * sanitize() is mirrored below for entries carrying only the original name,
-     * otherwise the allow list matches nothing and the document silently
-     * disappears from the project repo.
+     * browser's original File.name ({name,size,type}), so the browser name has
+     * to run through the api.php sanitize() mirror below, otherwise the allow
+     * list matches nothing and the document silently disappears from the
+     * project repo.
      *
      * @param {object|string} entry
      * @returns {string}
      */
     docFileDiskName(entry) {
-        return this.sanitizeFileName(entry?.storedName ?? entry?.name ?? entry);
+        return this.sanitizeFileName(entry?.name ?? entry);
     }
 
     /**
@@ -7789,17 +7788,29 @@ session-manager_1    | }
      * source - it is what names the upload gets on disk), minus the $anal /
      * $force_lowercase arguments api.php never passes: strip HTML tags, delete
      * the characters in $strip, trim, then collapse runs of whitespace to "_".
-     * Keep in sync with api.php (and webclient's FileUploadService.storedName).
+     * Keep in sync with api.php.
      *
      * @param {string} name
      * @returns {string}
      */
     sanitizeFileName(name) {
-        // api.php's $strip character class, as one string: ~ ` ! @ # $ % ^ & *
+        // api.php's $strip single characters, as one string: ~ ` ! @ # $ % ^ & *
         // = + [ { ] } \ | ; : " ' , < > ? ( )
         const strip = "~`!@#$%^&*+=[]{}\\|;:\"',<>?()";
-        // strip_tags
-        let clean = String(name ?? "").replace(/<[^>]*>/g, "");
+        // The two multi-character entries of $strip: the double-encoded em dash
+        // "\u00e2\u20ac\u201d" and en dash "\u00e2\u20ac\u201c". api.php's six
+        // "&#8216;"-style entity entries are NOT mirrored: they are inert
+        // there because str_replace() runs in array order and "&", "#", ";"
+        // have already been deleted by the time those entries are reached.
+        const stripSequences = ["\u00e2\u20ac\u201d", "\u00e2\u20ac\u201c"];
+        // strip_tags. PHP eats to the end of the input on an unterminated "<"
+        // (strip_tags("a<b>c<d") === "ac"), hence the second pass.
+        let clean = String(name ?? "")
+            .replace(/<[^>]*>/g, "")
+            .replace(/<[\s\S]*$/, "");
+        for (const sequence of stripSequences) {
+            clean = clean.split(sequence).join("");
+        }
         for (const char of strip) {
             clean = clean.split(char).join("");
         }

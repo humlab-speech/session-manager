@@ -58,17 +58,57 @@ test("DOC_FILES carries the sanitized disk name, not the browser name", () => {
         parse({ docFiles: [{ name: "a,b (c): d;e & \"f\" 'g' <h>.pdf" }] }),
         ["ab_c_de_f_g_.pdf"],
     );
-    // A stored name in the payload wins over the original one
+    // api.php's uploadFile() returns only "File uploaded successfully.", so the
+    // payload never carries a stored name; the browser name is what has to be
+    // sanitized (any stray storedName is ignored).
     assert.deepStrictEqual(
         parse({
             docFiles: [
                 {
                     name: "consent report (v1).pdf",
-                    storedName: "consent_report_v1.pdf",
+                    storedName: "not-a-real-field.pdf",
                 },
             ],
         }),
         ["consent_report_v1.pdf"],
+    );
+});
+
+test("sanitizeFileName mirrors api.php's active mojibake strip entries", () => {
+    const sanitize = (n) => ApiServer.prototype.sanitizeFileName(n);
+    // api.php's $strip holds the double-encoded em dash "â€”" (bytes
+    // c3 a2 e2 82 ac e2 80 9d = \u00e2\u20ac\u201d) and en dash "â€“"
+    // (\u00e2\u20ac\u201c) as whole sequences; their characters are not stripped
+    // individually, so the whole sequence must vanish - that is the disk name
+    // api.php's sanitize() produces for such an upload.
+    assert.strictEqual(
+        sanitize("safety\u00e2\u20ac\u201dsummary.pdf"),
+        "safetysummary.pdf",
+    );
+    assert.strictEqual(
+        sanitize("safety \u00e2\u20ac\u201c summary.pdf"),
+        "safety_summary.pdf",
+    );
+    // The entity entries of $strip stay inert in api.php ("&", "#", ";" are
+    // stripped earlier in the same array), so "&#8212;" survives there as "8212;"
+    // minus "&", "#", ";" -> "8212". The mirror matches by only stripping the
+    // single characters.
+    assert.strictEqual(sanitize("a&#8212;b.pdf"), "a8212b.pdf");
+    // A well-formed em dash is untouched in api.php too.
+    assert.strictEqual(
+        sanitize("safety\u2014summary.pdf"),
+        "safety\u2014summary.pdf",
+    );
+});
+
+test("sanitizeFileName matches PHP strip_tags on an unterminated '<'", () => {
+    // PHP: strip_tags("a<b>c<d") === "ac" - an unclosed "<" eats the rest of
+    // the string, it does not merely leave the trailing text behind.
+    assert.strictEqual(ApiServer.prototype.sanitizeFileName("a<b>c<d"), "ac");
+    assert.strictEqual(ApiServer.prototype.sanitizeFileName("a<b"), "a");
+    assert.strictEqual(
+        ApiServer.prototype.sanitizeFileName("rep<b>ort.pdf<x"),
+        "report.pdf",
     );
 });
 
