@@ -94,6 +94,20 @@ class Application {
 
 let application = null;
 
+// The websocket dispatcher fires off its async command handlers without
+// awaiting them (ApiServer.handleIncomingWebSocketMessage), so a rejection in
+// any one of them would otherwise be an unhandled rejection - fatal under the
+// Node >=15 default, i.e. one bad command would take the server down for every
+// user. Log it and stay up.
+process.on('unhandledRejection', (reason) => {
+  const msg = 'Unhandled rejection: ' + (reason && reason.stack ? reason.stack : reason);
+  if (application) {
+    application.addLog(msg, 'error');
+  } else {
+    console.error(msg);
+  }
+});
+
 process.on('SIGINT', () => {
   console.log("SIGINT received");
   application.shutdown();

@@ -1578,7 +1578,12 @@ class ApiServer {
 
         if (msg.cmd == "saveProject") {
             try {
-                this.saveProject(ws, user, msg);
+                // saveProject is async: a synchronous try/catch cannot catch
+                // its rejections, and an unhandled rejection would take down
+                // the whole process. Report failures like the sync path does.
+                this.saveProject(ws, user, msg).catch((error) =>
+                    this.app.addLog(error, "error"),
+                );
             } catch (error) {
                 this.app.addLog(error, "error");
             }
