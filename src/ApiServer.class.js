@@ -5465,7 +5465,14 @@ class ApiServer {
             " ": "_",
         };
 
-        return inputString.replace(/[.@\s]/g, (match) => replacements[match]);
+        // The pattern matches every kind of whitespace but the map only knows a
+        // plain space, and an unmapped match used to splice the literal text
+        // "undefined" into the slug: "Session\u00a01" became "Sessionundefined1".
+        // Session slugs name bundle directories, so this was not cosmetic.
+        return inputString.replace(
+            /[.@\s]/g,
+            (match) => replacements[match] ?? "_",
+        );
     }
 
     async copyDirectory(sourceDir, targetDir) {
