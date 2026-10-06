@@ -79,3 +79,22 @@ test("two replacements of the same code both survive", async () => {
         "second",
     );
 });
+
+// The retired copies are a working-tree undo; committing them would permanently
+// double a re-taken recording in the project's git history, and project repos have
+// no .gitignore at all. api.ensureReplacedRecordingsIgnored writes the rule.
+test("retired recordings are kept out of the project's git history", () => {
+    const { api } = createContext();
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "visp-repo-"));
+
+    api.ensureReplacedRecordingsIgnored(repoDir);
+    api.ensureReplacedRecordingsIgnored(repoDir);
+    let ignore = fs.readFileSync(path.join(repoDir, ".gitignore"), "utf8");
+    assert.equal(ignore, "Data/replaced-recordings/\n");
+
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), "something/\n");
+    api.ensureReplacedRecordingsIgnored(repoDir);
+    api.ensureReplacedRecordingsIgnored(repoDir);
+    ignore = fs.readFileSync(path.join(repoDir, ".gitignore"), "utf8");
+    assert.equal(ignore, "something/\nData/replaced-recordings/\n");
+});

@@ -46,6 +46,11 @@ const {
     safeMountSource,
 } = require("./pathSecurity");
 
+// How young a .git/index.lock must be to be treated as somebody's running git
+// operation rather than debris from a dead one. A git add over a multi-gigabyte
+// project can legitimately take minutes, so err well on the side of leaving it.
+const STALE_GIT_LOCK_MS = 5 * 60 * 1000;
+
 class ApiServer {
     constructor(app) {
         this.app = app;
@@ -8191,9 +8196,23 @@ session-manager_1    | }
                     "warn",
                 );
                 try {
+                    // A lock this young belongs to a git add that is still running -
+                    // deleting it mid-operation is how a project's index gets
+                    // corrupted, and a second git operation on the same project is
+                    // normal now that the SPR importer commits too. Only a lock left
+                    // behind by a dead process is fair game.
+                    const lockAgeMs =
+                        Date.now() - (await fs.stat(lockFilePath)).mtimeMs;
+                    if (lockAgeMs < STALE_GIT_LOCK_MS) {
+                        this.app.addLog(
+                            `Index lock is only ${Math.round(lockAgeMs / 1000)}s old, leaving it alone: ${lockFilePath}`,
+                            "warn",
+                        );
+                        return;
+                    }
                     await fs.unlink(lockFilePath);
                     this.app.addLog(
-                        "Lock file deleted, retrying git add operation.",
+                        "Stale lock file deleted, retrying git add operation.",
                         "info",
                     );
                     await git.add("."); // Retry the operation
@@ -8892,6 +8911,28 @@ session-manager_1    | }
     }
 
     /**
+     * Retired recordings are a working-tree undo for the researcher, not a second
+     * copy of the truth: keep them out of the project repo. Project repositories
+     * have no .gitignore at all, so without this every re-taken recording is
+     * committed into git history as well, permanently doubling that audio.
+     */
+    ensureReplacedRecordingsIgnored(repoDir) {
+        const ignoreFile = path.join(repoDir, ".gitignore");
+        const rule = "Data/replaced-recordings/";
+        let current = "";
+        try {
+            current = fs.readFileSync(ignoreFile, "utf8");
+        } catch (error) {
+            // No .gitignore yet, which is the normal case.
+        }
+        if (current.split("\n").some((line) => line.trim() === rule)) {
+            return;
+        }
+        const separator = current === "" || current.endsWith("\n") ? "" : "\n";
+        fs.writeFileSync(ignoreFile, current + separator + rule + "\n");
+    }
+
+    /**
      * Commit the project as it stands just before an import replaces bundles, so the
      * recordings and annotations that are about to be superseded are in the
      * project's git history before they stop being live. Nothing else commits an
@@ -8905,6 +8946,7 @@ session-manager_1    | }
     async commitProjectBeforeReplacingBundles(projectId) {
         const repoDir = safeJoinedPath("/repositories", projectId);
         try {
+            this.ensureReplacedRecordingsIgnored(repoDir);
             const git = await simpleGit(repoDir);
             await git.addConfig("user.name", "VISP system");
             await git.addConfig("user.email", "system@visp.local");
