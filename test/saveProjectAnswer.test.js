@@ -65,3 +65,20 @@ test("a form that fails validation answers instead of leaving the client waiting
     assert.equal(got.length, 1);
     assert.equal(got[0].result, false);
 });
+
+test("one request gets one terminal frame, however often it fails", async () => {
+    const { api, ws } = fakeApi(true);
+    const sends = [];
+    ws.send = (m) => sends.push(JSON.parse(m));
+    const client = { saveAnsweredFor: undefined };
+    api.getClientBySocket = () => client;
+    api.sendProjectSaveFailure(ws, msg, "first");
+    api.sendProjectSaveFailure(ws, msg, "second");
+    api.sendProjectSaveFailure(
+        ws,
+        { requestId: "r2", cmd: "saveProject" },
+        "another request",
+    );
+    assert.equal(sends.length, 2);
+    assert.match(sends[0].message, /first/);
+});

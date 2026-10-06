@@ -1013,19 +1013,20 @@ class ApiServer {
                 ? "Your session is no longer valid, please sign in again"
                 : "You are not authorized to use this functionality";
 
+        // Not a WebSocketMessage: toJSON() emits no "type" field, and every client
+        // handler starts with `data.type == "cmd-result"`, so a denial built that
+        // way is parsed and thrown away - the dialog waits for a reply that was
+        // already sent. The shape below is the one the rest of this file answers with.
         ws.send(
-            new WebSocketMessage(
-                msg.requestId,
-                msg.cmd ? msg.cmd : "unauthorized",
-                {
-                    result: reason === "authentication" ? 401 : 403,
-                    reason: reason,
-                    msg: text,
-                },
-                text,
-                null,
-                false,
-            ).toJSON(),
+            JSON.stringify({
+                requestId: msg.requestId,
+                type: "cmd-result",
+                cmd: msg.cmd ? msg.cmd : "unauthorized",
+                result: false,
+                reason: reason,
+                statusCode: reason === "authentication" ? 401 : 403,
+                message: text,
+            }),
         );
     }
 
@@ -1080,7 +1081,7 @@ class ApiServer {
             );
         }
 
-        if (msg === null || typeof msg !== "object") {
+        if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
             // Has to be here: every command check below dereferences msg.cmd, so the
             // guard that used to sit further down could never run - an unparsable
             // frame threw instead, and a non-object one ("42", "[]") fell through
@@ -1512,44 +1513,12 @@ class ApiServer {
             this.updateBundleLists(ws, msg);
         }
 
-        if (msg.cmd == "accessListCheck") {
-            // Nothing in quadlets/ or docker/ ever creates /access-list.json, so a
-            // missing file is the normal case - and "throw" inside an fs callback is
-            // an uncaughtException, not a rejection, and index.js handles only
-            // rejections: one frame from any signed-in user stopped session-manager
-            // for everyone and orphaned the running Jupyter sessions. An unreadable
-            // list now denies (the safe direction) and only the caller's own
-            // membership is ever answered - the two console.logs printed the whole
-            // list, with every username in it, to the journal.
-            fs.readFile("/access-list.json", (error, data) => {
-                let allowed = false;
-                if (error) {
-                    this.app.addLog(
-                        "accessListCheck: no access list readable (" +
-                            error.code +
-                            "), denying",
-                        "warn",
-                    );
-                } else {
-                    try {
-                        allowed = JSON.parse(data).includes(msg.username);
-                    } catch (parseError) {
-                        this.app.addLog(
-                            "accessListCheck: unparsable access list, denying: " +
-                                parseError.toString(),
-                            "error",
-                        );
-                    }
-                }
-                ws.send(
-                    JSON.stringify({
-                        type: "cmd-result",
-                        cmd: "accessListCheck",
-                        result: allowed,
-                    }),
-                );
-            });
-        }
+        // (an "accessListCheck" command used to live here, answering whether a
+        // username appeared in /access-list.json - a file nothing ever creates, in a
+        // build nothing ever mounts. No client sends that cmd: grep finds it in this
+        // file alone. The real gate is api.php's ACCESS_LIST_ENABLED plus the
+        // loginAllowed flag this dispatcher already checks. It went rather than
+        // being hardened further.)
 
         if (msg.cmd == "shutdownOperationsSession") {
             try {
@@ -6447,6 +6416,17 @@ session-manager_1    | }
     // its progress dialog (a rejected handler) or read "Done" for a save that
     // stopped halfway.
     sendProjectSaveFailure(ws, msg, message) {
+        const client = this.getClientBySocket(ws);
+        if (client && client.saveAnsweredFor === msg.requestId) {
+            // One terminal frame per request. Code that runs after the client was
+            // already answered can still reject (tearing down the operations
+            // container, a log line that derefs a missing field), and the
+            // dispatcher's catch would otherwise answer the same requestId twice.
+            return;
+        }
+        if (client) {
+            client.saveAnsweredFor = msg.requestId;
+        }
         if (ws.readyState !== 1) {
             // ws drops a send on a closing socket silently (sendAfterClose), so
             // without this the promised terminal frame vanishes without a trace and
@@ -8304,6 +8284,16 @@ session-manager_1    | }
      * api.php's uploadFileName() applies no other transform, so this is the
      * whole contract.
      *
+     * Known ceiling (measured, not guessed): the strip_tags half is a regex, and
+     * PHP's is a state machine, so a few structural inputs still disagree -
+     * "a<b '>'XY>c" (a quoted > keeps the tag open in PHP), "Anteckning< draft>.md"
+     * (a space after < is not a tag start), "a<!-- x -->b", and the $strip order
+     * for the mojibake dash sequences. Every one of them makes this return a name
+     * that does not exist on disk, which copy-docs refuses loudly and by name -
+     * it cannot pick a wrong file, because PHP owns the name. Upgrading to exact
+     * parity means porting PHP's scanner, which is not worth it while the failure
+     * is a refusal the user can act on.
+     *
      * @param {string} name
      * @returns {string}
      */
@@ -8320,13 +8310,13 @@ session-manager_1    | }
         // strip_tags. PHP eats to the end of the input on an unterminated "<"
         // (strip_tags("a<b>c<d") === "ac"), hence the second pass.
         let clean = String(name ?? "")
+            // NUL first: strip_tags removes NUL bytes while it scans, so it acts
+            // before the tag rules and not after them. api.php's uploadFileName()
+            // refuses any name containing a NUL, so this only matters for a
+            // docFiles name that arrived over the websocket instead.
+            .replace(/\u0000/g, "")
             .replace(/<[^>]*>/g, "")
             .replace(/<[\s\S]*$/, "");
-        // strip_tags is byte-wise and drops NUL bytes anywhere in the input; the
-        // two regexes above only handle "<...>". api.php's uploadFileName()
-        // refuses any name containing a NUL, so this only ever applies to a
-        // docFiles name that arrived over the websocket instead.
-        clean = clean.replace(/\u0000/g, "");
         for (const sequence of stripSequences) {
             clean = clean.split(sequence).join("");
         }
