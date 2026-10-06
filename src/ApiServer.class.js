@@ -8719,6 +8719,21 @@ session-manager_1    | }
         */
     }
 
+    // Gate for the port-8080 control API: every caller (the webclient's
+    // SessionManagerInterface) already sends hs_api_access_token. Without it a
+    // request would otherwise run container control commands, delete sessions or
+    // read the session table with no credentials at all - port 8080 is reachable
+    // from every container on visp-net. /api/debug/sessions has its own loopback
+    // check (vispctl's session-doctor curls it without a token) and
+    // /api/importaudiofiles is wsrng-server's, which sends no token.
+    apiGuard(req, res) {
+        if (this.checkApiAccessCode(req)) {
+            return true;
+        }
+        res.status(401).end('{"msg":"unauthorized"}');
+        return false;
+    }
+
     setupEndpoints() {
         this.expressApp.post("/api/importaudiofiles", async (req, res) => {
             // wsrng-server's hint that a recording session changed. The
@@ -8748,6 +8763,9 @@ session-manager_1    | }
         });
 
         this.expressApp.get("/api/sessions/:user_id", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             this.app.addLog("/api/sessions/:user_id " + req.params.user_id);
             let sessions = this.app.sessMan.getUserSessions(
                 parseInt(req.params.username),
@@ -8807,6 +8825,9 @@ session-manager_1    | }
         });
 
         this.expressApp.get("/api/session/:session_id/commit", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             let sess = this.app.sessMan.getSessionByCode(req.params.session_id);
             if (sess === false) {
                 //Todo: Add error handling here if session doesn't exist
@@ -8826,6 +8847,9 @@ session-manager_1    | }
         });
 
         this.expressApp.get("/api/session/:session_id/delete", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             this.app.addLog(
                 "/api/session/:session_id/delete " + req.params.session_id,
             );
@@ -8835,6 +8859,9 @@ session-manager_1    | }
         });
 
         this.expressApp.post("/api/session/run", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             let sessionId = req.body.appSession;
             let runCmd = JSON.parse(req.body.cmd);
             //let runCmd = req.body.cmd;
@@ -8867,6 +8894,9 @@ session-manager_1    | }
 
         //This asks to create a new session for this user/project
         this.expressApp.post("/api/session/user", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             let user = JSON.parse(req.body.gitlabUser);
             let project = JSON.parse(req.body.project);
             let hsApp = req.body.hsApp;
@@ -8959,6 +8989,9 @@ session-manager_1    | }
 
         //This demands to create a new session for this user/project
         this.expressApp.post("/api/session/new/user", (req, res) => {
+            if (!this.apiGuard(req, res)) {
+                return;
+            }
             let user = JSON.parse(req.body.gitlabUser);
             let project = JSON.parse(req.body.project);
             let hsApp = req.body.hsApp;
@@ -9043,9 +9076,12 @@ session-manager_1    | }
     }
 
     checkApiAccessCode(req) {
+        // The token is set on the Application (index.js), not on ApiServer.
+        const expected = this.app.hsApiAccessToken;
         if (
-            req.headers.hs_api_access_token !== this.hsApiAccessToken ||
-            typeof this.hsApiAccessToken == "undefined"
+            req.headers.hs_api_access_token !== expected ||
+            typeof expected == "undefined" ||
+            expected === ""
         ) {
             this.app.addLog(
                 "Error: Invalid hs_api_access_token! Ignoring request.",
