@@ -3176,6 +3176,7 @@ class ApiServer {
             projects[key].liveAppSessions =
                 this.app.sessMan.getContainerSessionsOverviewByProjectId(
                     project.id,
+                    user.username,
                 );
 
             // Add health status and file count
