@@ -5485,9 +5485,33 @@ class ApiServer {
     }
 
     async deleteBundle(ws, user, msg) {
-        let projectId = msg.data.projectId;
-        let sessionId = msg.data.sessionId;
-        let fileName = msg.data.fileName;
+        // Everything below deletes directories, so nothing is looked up or
+        // removed unless every id is a plain string (a NoSQL-shaped object
+        // must never reach findOne) and this user is who the guard checks.
+        const projectId =
+            typeof msg?.data?.projectId === "string"
+                ? msg.data.projectId
+                : null;
+        const sessionId =
+            typeof msg?.data?.sessionId === "string"
+                ? msg.data.sessionId
+                : null;
+        const fileName =
+            typeof msg?.data?.fileName === "string" ? msg.data.fileName : null;
+        if (!projectId || !sessionId || !fileName) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "deleteBundle",
+                    progress: "end",
+                    result: false,
+                    message:
+                        "Malformed request: projectId, sessionId and fileName must be strings",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
 
         let project = await this.getProjectById(projectId);
         let session = await this.getSessionById(projectId, sessionId);
@@ -5506,12 +5530,11 @@ class ApiServer {
             return;
         }
 
-        //check that this user is a project member allowed to edit files
-        let userCanEditFiles = this.getProjectPermissions(
-            project,
-            user,
-        ).editProjectFiles;
-        if (!userCanEditFiles) {
+        // Deleting a bundle is destructive, so it is gated like project
+        // deletion (ProjectAdmin or SysAdmin of THIS project, taken from the
+        // server-side document, never from the payload) and not by the mere
+        // editProjectFiles file-edit permission a researcher holds.
+        if (!this.canDeleteProject(project, user)) {
             ws.send(
                 JSON.stringify({
                     type: "cmd-result",
@@ -5519,7 +5542,7 @@ class ApiServer {
                     progress: "end",
                     result: false,
                     message:
-                        "User is not authorized to edit files in this project",
+                        "User is not authorized to delete bundles in this project",
                     requestId: msg.requestId,
                 }),
             );
