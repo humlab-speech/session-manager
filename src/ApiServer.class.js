@@ -6187,7 +6187,7 @@ session-manager_1    |   firstName: 'Test',
 session-manager_1    |   lastName: 'User',
 session-manager_1    |   email: 'testuser@example.com',
 session-manager_1    |   username: 'testuser_at_example_dot_com',
-session-manager_1    |   personalAccessToken: 'glpat-mzSUUgcxozyAuyxruMfx',
+session-manager_1    |   personalAccessToken: 'glpat-REDACTED-EXAMPLE',
 session-manager_1    |   eppn: 'testuser@example.com'
 session-manager_1    | }
         */
