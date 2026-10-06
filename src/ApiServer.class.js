@@ -5576,7 +5576,7 @@ class ApiServer {
 
                 if (stats.isDirectory()) {
                     // If the item is a subdirectory, recursively set permissions
-                    await setPermissionsRecursive(itemPath, mode);
+                    await this.setPermissionsRecursive(itemPath, mode);
                 } else {
                     // Set permissions for individual files
                     await fs.chmod(itemPath, mode);
