@@ -1031,6 +1031,12 @@ class ApiServer {
                 cmd: msg.cmd ? msg.cmd : "unauthorized",
                 result: false,
                 reason: reason,
+                // Emitted under data too: webclient's signed-out detection
+                // (system.service.ts) reads data.data.reason. One side must
+                // not depend on an Angular rebuild to start working again;
+                // the client now accepts either position (and a spec asserts
+                // this shape from here on).
+                data: { reason: reason },
                 statusCode: reason === "authentication" ? 401 : 403,
                 message: text,
             }),
