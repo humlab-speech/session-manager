@@ -3,17 +3,17 @@ const assert = require("node:assert");
 
 // deleteProject removes the repository directory through rimraf; stub it
 // BEFORE ApiServer.class is required so its destructure picks up the fake.
-const rimraf = require("rimraf");
-const removedPaths = [];
-rimraf.nativeSync = (p) => {
-    removedPaths.push(p);
-    return true;
-};
+const {
+    stubRimraf,
+    fakeModels,
+    createApiServer,
+    wsRecorder,
+} = require("../test-helpers/fake-mongoose.js");
+const removedPaths = stubRimraf();
 
 const ApiServer = require("../src/ApiServer.class");
 
 function createContext() {
-    const deleted = [];
     const store = {
         Project: [
             {
@@ -28,25 +28,13 @@ function createContext() {
             },
         ],
     };
-    const models = {};
-    for (const [name, docs] of Object.entries(store)) {
-        class Model {
-            static async findOne(q) {
-                return docs.find((d) => d.id === q.id) ?? null;
-            }
-            static async deleteOne(q) {
-                deleted.push(q.id);
-            }
-        }
-        models[name] = Model;
-    }
-    const api = Object.create(ApiServer.prototype);
-    api.mongoose = { model: (name) => models[name] };
-    api.app = {
+    const { models, deleted } = fakeModels(store);
+    const api = createApiServer(ApiServer, {
         addLog: () => {},
         sessMan: { getContainerSessionsByProjectId: async () => ({}) },
-    };
-    const ws = { sent: [], send: (m) => ws.sent.push(JSON.parse(m)) };
+    });
+    api.mongoose = { model: (name) => models[name] };
+    const ws = wsRecorder();
     return { api, ws, deleted, removedPaths };
 }
 

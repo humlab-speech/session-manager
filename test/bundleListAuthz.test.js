@@ -1,5 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert");
+const {
+    fakeModels,
+    createApiServer,
+    wsRecorder,
+} = require("../test-helpers/fake-mongoose.js");
 const ApiServer = require("../src/ApiServer.class");
 
 // fetchBundleList/saveBundleLists only need mongoose.model(), app.addLog() and
@@ -18,36 +23,11 @@ function createContext() {
         User: [{ username: "alice" }, { username: "bob" }, { username: "mallory" }],
         BundleList: [],
     };
-    const models = {};
-    for (const [name, docs] of Object.entries(store)) {
-        class Model {
-            constructor(fields) {
-                Object.assign(this, fields);
-            }
-            save() {
-                if (!docs.includes(this)) docs.push(this);
-            }
-            // strict equality matching: a NoSQL-shaped query value ({ $ne: ... })
-            // matches nothing, like the real driver does for { id: { $ne: null } }
-            // against a string field.
-            static async findOne(q) {
-                return docs.find((d) => matches(d, q)) ?? null;
-            }
-            static async find(q) {
-                return docs.filter((d) => matches(d, q));
-            }
-        }
-        models[name] = Model;
-    }
-    const api = Object.create(ApiServer.prototype);
+    const { models } = fakeModels(store);
+    const api = createApiServer(ApiServer);
     api.mongoose = { model: (name) => models[name] };
-    api.app = { addLog: () => {} };
-    const ws = { sent: [], send: (m) => ws.sent.push(JSON.parse(m)) };
+    const ws = wsRecorder();
     return { api, ws, store };
-}
-
-function matches(doc, q) {
-    return Object.entries(q).every(([k, v]) => doc[k] === v);
 }
 
 const refused = (ws) =>

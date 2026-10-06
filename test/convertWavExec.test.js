@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // convertAllInDirectoryToWav() reaches ffmpeg; a fake binary on PATH records
 // the argv it actually received, and a hostile file name carries shell syntax
@@ -27,8 +28,7 @@ test("conversion passes hostile file names as literal argv, never through a shel
     const filePath = path.join(sessionDir, hostile);
     fs.writeFileSync(filePath, "x");
 
-    const api = Object.create(ApiServer.prototype);
-    api.app = { addLog: () => {} };
+    const api = createApiServer(ApiServer);
     api.updateFileMetaDataOfConvertedFile = async () => {};
 
     const prevPath = process.env.PATH;

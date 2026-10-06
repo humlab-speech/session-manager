@@ -1,9 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // canDeleteProject only uses the role helpers, so a bare prototype instance is enough.
-const api = Object.create(ApiServer.prototype);
+const api = createApiServer(ApiServer);
 
 const project = {
     id: "p1",

@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // The whole point of sanitizeFileName is that api.php's sanitize() decides the name
 // an upload gets on disk (uploadFileName() applies no other transform), so any name
@@ -8,11 +9,7 @@ const ApiServer = require("../src/ApiServer.class");
 // refuses the save over an invisible character. JS trims and matches \s per code
 // point; PHP trims and matches \s per byte (ASCII only). These vectors are where the
 // two disagreed.
-function createApi() {
-    const api = Object.create(ApiServer.prototype);
-    api.app = { addLog: () => {} };
-    return api;
-}
+const createApi = () => createApiServer(ApiServer);
 
 test("sanitizeFileName matches PHP's whitespace semantics", () => {
     const api = createApi();

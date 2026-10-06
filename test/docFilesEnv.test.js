@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const ApiServer = require("../src/ApiServer.class");
 const Session = require("../src/Session.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // Contract: container-agent src/main.mjs copy-docs parses DOC_FILES with
 // JSON.parse(process.env.DOC_FILES).map(f => (f && f.name) ? f.name : f)
@@ -20,7 +21,7 @@ const parse = (formData) =>
     );
 
 test("buildDocFilesEnv yields a DOC_FILES allow list", () => {
-    const api = Object.create(ApiServer.prototype);
+    const api = createApiServer(ApiServer);
     const env = api.buildDocFilesEnv({
         docFiles: [{ name: "with space.pdf" }, { name: "consent.pdf" }],
     });
@@ -77,17 +78,13 @@ test("DOC_FILES carries the sanitized disk name, not the browser name", () => {
 test("sanitizeFileName mirrors api.php's active mojibake strip entries", () => {
     const sanitize = (n) => ApiServer.prototype.sanitizeFileName(n);
     // api.php's $strip holds the double-encoded em dash "â€”" (bytes
-    // c3 a2 e2 82 ac e2 80 9d = \u00e2\u20ac\u201d) and en dash "â€“"
-    // (\u00e2\u20ac\u201c) as whole sequences; their characters are not stripped
-    // individually, so the whole sequence must vanish - that is the disk name
-    // api.php's sanitize() produces for such an upload.
+    // c3 a2 e2 82 ac e2 80 9d = \u00e2\u20ac\u201d) as a whole sequence; its
+    // characters are not stripped individually, so the whole sequence must
+    // vanish - that is the disk name api.php's sanitize() produces for such an
+    // upload. (The en dash entry is pinned in sanitizeEquivalence.test.js.)
     assert.strictEqual(
         sanitize("safety\u00e2\u20ac\u201dsummary.pdf"),
         "safetysummary.pdf",
-    );
-    assert.strictEqual(
-        sanitize("safety \u00e2\u20ac\u201c summary.pdf"),
-        "safety_summary.pdf",
     );
     // The entity entries of $strip stay inert in api.php ("&", "#", ";" are
     // stripped earlier in the same array), so "&#8212;" survives there as "8212;"
@@ -102,9 +99,9 @@ test("sanitizeFileName mirrors api.php's active mojibake strip entries", () => {
 });
 
 test("sanitizeFileName matches PHP strip_tags on an unterminated '<'", () => {
-    // PHP: strip_tags("a<b>c<d") === "ac" - an unclosed "<" eats the rest of
-    // the string, it does not merely leave the trailing text behind.
-    assert.strictEqual(ApiServer.prototype.sanitizeFileName("a<b>c<d"), "ac");
+    // PHP: an unclosed "<" eats the rest of the string, it does not merely
+    // leave the trailing text behind. ("a<b>c<d" itself is pinned in
+    // sanitizeEquivalence.test.js.)
     assert.strictEqual(ApiServer.prototype.sanitizeFileName("a<b"), "a");
     assert.strictEqual(
         ApiServer.prototype.sanitizeFileName("rep<b>ort.pdf<x"),
@@ -113,7 +110,7 @@ test("sanitizeFileName matches PHP strip_tags on an unterminated '<'", () => {
 });
 
 test("copyUploadedDocs passes DOC_FILES intact to the container exec env (spawn stubbed)", async () => {
-    const api = Object.create(ApiServer.prototype);
+    const api = createApiServer(ApiServer);
     const session = Object.create(Session.prototype);
     session.app = { addLog: () => {} };
     let captured = null;

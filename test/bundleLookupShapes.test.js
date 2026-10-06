@@ -3,8 +3,13 @@ const assert = require("node:assert");
 
 // Nothing here may delete real paths: stub rimraf BEFORE ApiServer.class is
 // required so its module-level destructure picks up the fake.
-const rimraf = require("rimraf");
-rimraf.nativeSync = () => true;
+const {
+    stubRimraf,
+    fakeModels,
+    createApiServer,
+    wsRecorder,
+} = require("../test-helpers/fake-mongoose.js");
+stubRimraf();
 
 const ApiServer = require("../src/ApiServer.class");
 
@@ -30,46 +35,14 @@ function createContext({ boom = null } = {}) {
         ],
         BundleList: [],
     };
-    const models = {};
-    for (const [name, docs] of Object.entries(store)) {
-        class Model {
-            constructor(fields) {
-                Object.assign(this, fields);
-            }
-            save() {
-                if (!docs.includes(this)) docs.push(this);
-            }
-            static async findOne(q, proj) {
-                if (boom) throw boom;
-                const doc = docs.find((d) => matches(d, q)) ?? null;
-                // honor a sessions.$elemMatch projection like the real driver
-                if (doc && proj?.sessions?.$elemMatch?.id !== undefined) {
-                    const want = proj.sessions.$elemMatch.id;
-                    return {
-                        ...doc,
-                        sessions: (doc.sessions ?? []).filter(
-                            (s) => s && s.id === want,
-                        ),
-                    };
-                }
-                return doc;
-            }
-            static async deleteOne(q) {}
-        }
-        models[name] = Model;
-    }
-    const api = Object.create(ApiServer.prototype);
-    api.mongoose = { model: (name) => models[name] };
-    api.app = {
+    const { models } = fakeModels(store, { boom });
+    const api = createApiServer(ApiServer, {
         addLog: (m, level) => logs.push([level, String(m)]),
         sessMan: { getContainerSessionsByProjectId: async () => ({}) },
-    };
-    const ws = { sent: [], send: (m) => ws.sent.push(JSON.parse(m)) };
+    });
+    api.mongoose = { model: (name) => models[name] };
+    const ws = wsRecorder();
     return { api, ws, store, logs };
-}
-
-function matches(doc, q) {
-    return Object.entries(q).every(([k, v]) => doc[k] === v);
 }
 
 const oneSettledReply = (ws, cmd, requestId) =>

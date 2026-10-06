@@ -4,13 +4,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // An import that replaces a bundle also throws away what was annotated in it, and
 // item codes come back into use, so the replaced bundle is moved aside instead of
 // deleted. api.retireBundle only needs fs and app.addLog.
 function createContext() {
-    const api = Object.create(ApiServer.prototype);
-    api.app = { addLog: () => {} };
+    const api = createApiServer(ApiServer);
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "visp-data-"));
     fs.mkdirSync(path.join(dataDir, "VISP_emuDB", "sess_ses"), {
         recursive: true,

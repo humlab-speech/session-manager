@@ -1,14 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // Item codes name the recorded takes, so a session that already has recordings must
 // keep the script they were made with. validateSessionScriptChanges needs only a
 // project, the upload listing and the SPR session doc, so a prototype instance with
 // fakes is enough.
 function createContext({ files = [], uploads = [], sprSession = null } = {}) {
-    const api = Object.create(ApiServer.prototype);
-    api.app = { addLog: () => {} };
+    const api = createApiServer(ApiServer);
     api.fetchMongoProjectById = async () => ({
         id: "p1",
         sessions: [

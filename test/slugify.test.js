@@ -1,12 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
-function createApi() {
-    const api = Object.create(ApiServer.prototype);
-    api.app = { addLog: () => {} };
-    return api;
-}
+const createApi = () => createApiServer(ApiServer);
 
 test("slugify maps every character its pattern matches", () => {
     const api = createApi();

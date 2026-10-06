@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const ApiServer = require("../src/ApiServer.class");
+const { createApiServer } = require("../test-helpers/fake-mongoose.js");
 
 // The contract: one saveProject frame gets exactly one progress:end, and that
 // frame says whether the project was stored. Before this was pinned, an
@@ -10,8 +11,7 @@ const ApiServer = require("../src/ApiServer.class");
 // that would.
 function fakeApi(saveProjectEmuDbResult, hooks = {}) {
     const sends = [];
-    const api = Object.create(ApiServer.prototype);
-    api.app = { addLog: () => {} };
+    const api = createApiServer(ApiServer);
     api.validateProjectForm = () => true;
     api.prepareSessionUploads = async () => ({});
     api.saveAnnotationLevelsMongo = async () => {};
