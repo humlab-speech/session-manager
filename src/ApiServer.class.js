@@ -8322,6 +8322,11 @@ session-manager_1    | }
         let clean = String(name ?? "")
             .replace(/<[^>]*>/g, "")
             .replace(/<[\s\S]*$/, "");
+        // strip_tags is byte-wise and drops NUL bytes anywhere in the input; the
+        // two regexes above only handle "<...>". api.php's uploadFileName()
+        // refuses any name containing a NUL, so this only ever applies to a
+        // docFiles name that arrived over the websocket instead.
+        clean = clean.replace(/\u0000/g, "");
         for (const sequence of stripSequences) {
             clean = clean.split(sequence).join("");
         }

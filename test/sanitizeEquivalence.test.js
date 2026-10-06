@@ -24,6 +24,7 @@ test("sanitizeFileName matches PHP's whitespace semantics", () => {
         "a\ufeffb": "a\ufeffb", // nor is a BOM
         "a\u3000b": "a\u3000b", // nor an ideographic space
         "a\u200b\u00a0b": "a\u200b\u00a0b", // zero-width space likewise
+        "a\u0000b": "ab", // strip_tags drops NUL bytes wherever they are
         "a\fb": "a_b", // but form feed and vertical tab ARE PCRE \s...
         "a\vb": "a_b",
         "\fa": "_a", // ...and are NOT PHP trim's set, so they reach the collapse
