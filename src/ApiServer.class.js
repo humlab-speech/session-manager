@@ -7046,7 +7046,7 @@ session-manager_1    | }
                         cmd: msg.cmd,
                         progress: "end",
                         result: false,
-                        message: "",
+                        message: "The project id was missing from the save",
                     }),
                 );
             }
@@ -7639,7 +7639,7 @@ session-manager_1    | }
                         "error",
                     );
                     await this.app.sessMan.deleteSession(session.accessCode);
-                    return;
+                    return false; // the client was just told
                 }
             }
         }
@@ -7714,7 +7714,7 @@ session-manager_1    | }
                     "error",
                 );
                 await this.app.sessMan.deleteSession(session.accessCode);
-                return;
+                return false; // the client was just told
             }
         }
 
@@ -7773,7 +7773,7 @@ session-manager_1    | }
                         "error",
                     );
                     await this.app.sessMan.deleteSession(session.accessCode);
-                    return;
+                    return false; // the client was just told
                 }
             }
         }
@@ -7830,7 +7830,7 @@ session-manager_1    | }
                 "error",
             );
             await this.app.sessMan.deleteSession(session.accessCode);
-            return;
+            return false; // the client was just told
         }
 
         //emudb-setlevelcanvasesorder
@@ -7878,7 +7878,7 @@ session-manager_1    | }
                 "error",
             );
             await this.app.sessMan.deleteSession(session.accessCode);
-            return;
+            return false; // the client was just told
         }
 
         /*
@@ -7950,7 +7950,7 @@ session-manager_1    | }
                     "error",
                 );
                 await this.app.sessMan.deleteSession(session.accessCode);
-                return;
+                return false; // the client was just told
             }
         } else {
             if (ws && msg) {
@@ -8017,7 +8017,7 @@ session-manager_1    | }
                 "error",
             );
             await this.app.sessMan.deleteSession(session.accessCode);
-            return;
+            return false; // the client was just told
         }
 
         if (ws && msg) {
@@ -8103,7 +8103,24 @@ session-manager_1    | }
         }
 
         this.app.addLog("git commit", "debug");
-        await git.commit("System commit");
+        try {
+            await git.commit("System commit");
+        } catch (error) {
+            // Deliberately not fatal, and deliberately not reported to the user as a
+            // failed save: the EMU-DB files are already written in the repository
+            // working directory, so the project DID change - saying otherwise would be
+            // the same kind of lie this commit removes elsewhere, and would send the
+            // user to retry a save whose work is already on disk. The next save's
+            // git add picks up what this one left staged. A stale index.lock (the SPR
+            // importer commits too) and "nothing to commit" both land here.
+            this.app.addLog(
+                "Failed committing project " +
+                    repoDir +
+                    " (the files are saved, the commit is not): " +
+                    error.toString(),
+                "error",
+            );
+        }
 
         if (ws && msg) {
             ws.send(
@@ -8117,7 +8134,19 @@ session-manager_1    | }
                 }),
             );
         }
-        await this.app.sessMan.deleteSession(session.accessCode);
+        try {
+            await this.app.sessMan.deleteSession(session.accessCode);
+        } catch (error) {
+            // The save is complete; tearing down the operations container failing
+            // must not turn into "the project could not be processed".
+            this.app.addLog(
+                "Failed to stop the operations session for project " +
+                    projectFormData.id +
+                    ": " +
+                    error.toString(),
+                "warn",
+            );
+        }
 
         // Option A: Delete the upload directory after all operations succeeded.
         // The audio files have been copied into the EmuDB repository by
