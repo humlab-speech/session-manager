@@ -548,9 +548,16 @@ class ApiServer {
     }
 
     async fetchMongoUser(eppn) {
+        // Raw-driver boundary: a non-string ({"$ne": ...} shape) must never
+        // reach the filter. Callers pass DB-sourced eppns; this closes the door
+        // anyway.
+        const query = ApiServer.requireQueryString(eppn);
+        if (!query) {
+            return null;
+        }
         const db = await this.connectToMongo();
         const usersCollection = db.collection("users");
-        let user = await usersCollection.findOne({ eppn: eppn });
+        let user = await usersCollection.findOne({ eppn: query });
         return user;
     }
 
@@ -4406,12 +4413,22 @@ class ApiServer {
     async fetchSprScripts(ws, msg) {
         const db = await this.connectToMongo("wsrng");
 
-        let query = {};
-        if (msg.data.username != null) {
-            query = { owner: msg.data.username };
+        if (msg.data?.username != null && typeof msg.data.username !== "string") {
+            // Raw-driver query: an object would be operators, not a username.
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "fetchSprScripts",
+                    result: "ERROR: username must be a string",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
         }
         //fetch all with this user OR with sharing set to 'all'
-        query = { $or: [{ owner: msg.data.username }, { sharing: "all" }] };
+        const query = {
+            $or: [{ owner: msg.data?.username }, { sharing: "all" }],
+        };
 
         let scripts = await db.collection("scripts").find(query).toArray();
         ws.send(
@@ -4464,6 +4481,32 @@ class ApiServer {
 
     async createSprSessions(ws, msg) {
         this.app.addLog("createSprSessions", "debug");
+
+        for (let key in msg.sessions ?? {}) {
+            const session = msg.sessions[key];
+            const sessionId = ApiServer.requireQueryString(session?.sessionId);
+            const projectId =
+                typeof session?.projectId === "string"
+                    ? ApiServer.requireQueryString(session.projectId)
+                    : typeof session?.projectId === "number" &&
+                        Number.isFinite(session.projectId)
+                        ? session.projectId
+                        : null;
+            if (!sessionId || projectId === null) {
+                // Refuse the whole request unwritten: a filter built from an
+                // object would be raw-driver operators.
+                ws.send(
+                    JSON.stringify({
+                        type: "cmd-result",
+                        cmd: msg.cmd,
+                        result:
+                            "ERROR: every session needs a string sessionId and a string or number projectId",
+                        requestId: msg.requestId,
+                    }),
+                );
+                return;
+            }
+        }
 
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
@@ -4593,10 +4636,27 @@ class ApiServer {
         this.connectToMongo("wsrng").then(async (db) => {
             for (let key in sprScripts) {
                 let script = sprScripts[key];
+                const scriptId = ApiServer.requireQueryString(script.scriptId);
+                if (!scriptId) {
+                    this.app.addLog(
+                        "saveSprScripts: refusing batch — a scriptId is not a string",
+                        "warning",
+                    );
+                    ws.send(
+                        JSON.stringify({
+                            type: "cmd-result",
+                            cmd: "saveSprScripts",
+                            result:
+                                "ERROR: every script needs a string scriptId",
+                            requestId: msg.requestId,
+                        }),
+                    );
+                    return;
+                }
                 //replace if exists
                 let found = await db
                     .collection("scripts")
-                    .findOne({ scriptId: script.scriptId });
+                    .findOne({ scriptId: scriptId });
                 script.itemcodeSeq = ApiServer.nextItemcodeSeq(
                     found,
                     scripts[key]?.itemcodeSeq,
@@ -4605,7 +4665,7 @@ class ApiServer {
                 if (found) {
                     await db
                         .collection("scripts")
-                        .replaceOne({ scriptId: script.scriptId }, script);
+                        .replaceOne({ scriptId: scriptId }, script);
                 } else {
                     await db.collection("scripts").insertOne(script);
                 }
@@ -4623,10 +4683,22 @@ class ApiServer {
     }
 
     async deleteSprScript(ws, msg) {
+        const scriptId = ApiServer.requireQueryString(msg?.data?.scriptId);
+        if (!scriptId) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "deleteSprScript",
+                    result: "ERROR: scriptId must be a string",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
         this.connectToMongo("wsrng").then(async (db) => {
             await db
                 .collection("scripts")
-                .deleteOne({ scriptId: msg.data.scriptId });
+                .deleteOne({ scriptId: scriptId });
             ws.send(
                 JSON.stringify({
                     type: "cmd-result",
@@ -4891,10 +4963,24 @@ class ApiServer {
             );
         };
 
+        // Raw-driver boundary: the raw driver casts nothing, so only a literal
+        // non-empty string may reach this filter — an object like {"$ne": null}
+        // would be read as operators and redeem someone else's unused code.
+        const code = ApiServer.requireQueryString(msg?.data?.code);
+        if (!code) {
+            this.app.addLog(
+                "Malformed invite code (must be a non-empty string), user eppn: " +
+                    userInfo?.eppn,
+                "warning",
+            );
+            respond(false);
+            return;
+        }
+
         let db = await this.connectToMongo("visp");
         let inviteCodesCollection = db.collection("invite_codes");
         let inviteCodeObject = await inviteCodesCollection.findOne({
-            code: msg.data.code,
+            code: code,
             used: false,
         });
 
@@ -5163,8 +5249,24 @@ class ApiServer {
         for (let key in msg.data.inviteCodes) {
             let inviteCode = msg.data.inviteCodes[key];
 
+            const code = ApiServer.requireQueryString(inviteCode?.code);
+            if (!code) {
+                // Reject the whole batch before any write, like the authz loop
+                // below does — a malformed entry must not become an operator
+                // filter on { code: ... }.
+                ws.send(
+                    JSON.stringify({
+                        type: "cmd-result",
+                        cmd: "updateInviteCodes",
+                        result: "ERROR: every invite code must be a string",
+                        requestId: msg.requestId,
+                    }),
+                );
+                return;
+            }
+
             const existing = await collection.findOne({
-                code: inviteCode.code,
+                code: code,
             });
             if (!existing) {
                 continue;
@@ -5191,7 +5293,7 @@ class ApiServer {
                     : null;
 
             pendingUpdates.push({
-                code: inviteCode.code,
+                code: code,
                 role: role,
                 eppn: restrictedEppn,
             });
@@ -5221,7 +5323,18 @@ class ApiServer {
 
     async getInviteCodesByProject(ws, msg) {
         let user = this.getUserSessionBySocket(ws);
-        const projectId = msg.data?.projectId ?? null;
+        const projectId = ApiServer.requireQueryString(msg.data?.projectId);
+        if (!projectId) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "getInviteCodesByProject",
+                    result: "ERROR: projectId must be a string",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
 
         const project = await this.authorizeInviteCodeAccess(
             ws,
@@ -5251,10 +5364,23 @@ class ApiServer {
     async deleteInviteCode(ws, msg) {
         let user = this.getUserSessionBySocket(ws);
 
+        const code = ApiServer.requireQueryString(msg?.data?.code);
+        if (!code) {
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "deleteInviteCode",
+                    result: "ERROR: code must be a string",
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
+
         let db = await this.connectToMongo("visp");
         let collection = db.collection("invite_codes");
 
-        const existing = await collection.findOne({ code: msg.data.code });
+        const existing = await collection.findOne({ code: code });
         if (!existing) {
             ws.send(
                 JSON.stringify({
@@ -5331,21 +5457,29 @@ class ApiServer {
     }
 
     async fetchSprSession(sessionId) {
+        const query = ApiServer.requireQueryString(sessionId);
+        if (!query) {
+            return null;
+        }
         //fetch from mongo
         let db = await this.connectToMongo("wsrng");
         const sessionsCollection = db.collection("sessions");
         const sprSession = await sessionsCollection.findOne({
-            sessionId: sessionId,
+            sessionId: query,
         });
         return sprSession;
     }
 
     async fetchSprScript(scriptId) {
+        const query = ApiServer.requireQueryString(scriptId);
+        if (!query) {
+            return null;
+        }
         //fetch from mongo
         let db = await this.connectToMongo("wsrng");
         const sessionsCollection = db.collection("scripts");
         const sprScript = await sessionsCollection.findOne({
-            scriptId: scriptId,
+            scriptId: query,
         });
         return sprScript;
     }
@@ -5558,6 +5692,19 @@ class ApiServer {
             return null;
         }
         return ids;
+    }
+
+    /**
+     * Whitelist for any value taken from a client message and placed into a
+     * raw-driver (db.collection()) filter or update document. Unlike a Mongoose
+     * model, the raw driver performs no schema casting, so an object value such
+     * as {"$ne": null} would be interpreted as query operators instead of as a
+     * literal — an injection that can match (or rewrite) documents the caller
+     * never intended. Returns the value when it is a non-empty string, else
+     * null; callers must refuse the request on null, before any DB call.
+     */
+    static requireQueryString(value) {
+        return typeof value === "string" && value.length > 0 ? value : null;
     }
 
     async downloadBundle(ws, user, msg) {
@@ -6422,8 +6569,20 @@ session-manager_1    | }
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
         for (let formSession of projectFormData.sessions) {
+            // The form is client-supplied; a non-string sessionId must not become
+            // an operator filter here or in the matching updateOne below.
+            const sessionId = ApiServer.requireQueryString(
+                formSession?.sessionId,
+            );
+            if (!sessionId) {
+                this.app.addLog(
+                    "Skipping SPR session update for a non-string sessionId",
+                    "warn",
+                );
+                continue;
+            }
             let sprSession = await collection.findOne({
-                sessionId: formSession.sessionId,
+                sessionId: sessionId,
             });
             if (sprSession) {
                 console.log(
@@ -6432,7 +6591,7 @@ session-manager_1    | }
                         " in MongoDB",
                 );
                 await collection.updateOne(
-                    { sessionId: formSession.sessionId },
+                    { sessionId: sessionId },
                     {
                         $set: {
                             sealed: formSession.sprSessionSealed,
