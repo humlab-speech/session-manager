@@ -1603,24 +1603,20 @@ class ApiServer {
         }
 
         if (msg.cmd == "saveProject") {
-            try {
-                // saveProject is async: a synchronous try/catch cannot catch
-                // its rejections, and an unhandled rejection would take down
-                // the whole process. Report failures like the sync path does.
-                this.saveProject(ws, user, msg).catch((error) => {
-                    this.app.addLog(error, "error");
-                    // A form the server cannot even walk (a missing annotLevels,
-                    // say) used to end here: logged, and the client waited for a
-                    // reply that never came.
-                    this.sendProjectSaveFailure(
-                        ws,
-                        msg,
-                        "The project could not be processed",
-                    );
-                });
-            } catch (error) {
+            // saveProject is async: a synchronous try/catch cannot catch
+            // its rejections, and an unhandled rejection would take down
+            // the whole process. Report failures like the sync path does.
+            this.saveProject(ws, user, msg).catch((error) => {
                 this.app.addLog(error, "error");
-            }
+                // A form the server cannot even walk (a missing annotLevels,
+                // say) used to end here: logged, and the client waited for a
+                // reply that never came.
+                this.sendProjectSaveFailure(
+                    ws,
+                    msg,
+                    "The project could not be processed",
+                );
+            });
         }
 
         if (msg.cmd == "searchUsers") {
@@ -2715,7 +2711,6 @@ class ApiServer {
 
         // Resolve every owner BEFORE writing anything: a call that names someone
         // the caller may not act for has to fail as a whole, not half-apply.
-        const BundleList = this.mongoose.model("BundleList");
         const entries = [];
         for (let key in msg.bundleLists) {
             let bundleListDef = msg.bundleLists[key];
@@ -2736,26 +2731,8 @@ class ApiServer {
             entries.push({ owner: owner, bundles: bundleListDef?.bundles });
         }
 
-        for (const entry of entries) {
-            let bundleListResult = await BundleList.find({
-                owner: entry.owner,
-                projectId: project.id,
-            });
-
-            let bundleList = null;
-            if (bundleListResult.length > 0) {
-                //update
-                bundleList = bundleListResult[0];
-                bundleList.bundles = entry.bundles;
-            } else {
-                //create
-                bundleList = new BundleList({
-                    owner: entry.owner,
-                    projectId: project.id,
-                    bundles: entry.bundles,
-                });
-            }
-            bundleList.save();
+        for (const e of entries) {
+            await this._saveBundleLists(e.owner, project.id, e.bundles);
         }
 
         ws.send(
@@ -3505,16 +3482,7 @@ class ApiServer {
             // A broken database is an outage, not an authorization decision:
             // log the real error, and still answer so the client does not hang.
             this.app.addLog(error, "error");
-            ws.send(
-                new WebSocketMessage(
-                    msg.requestId,
-                    msg.cmd,
-                    {},
-                    "Error looking up project",
-                    "end",
-                    false,
-                ).toJSON(),
-            );
+            this.sendAdminCommandError(ws, msg, "Error looking up project");
             return null;
         }
 
@@ -3565,16 +3533,7 @@ class ApiServer {
                 projectId,
             "warn",
         );
-        ws.send(
-            new WebSocketMessage(
-                msg.requestId,
-                msg.cmd,
-                {},
-                "Unauthorized",
-                "end",
-                false,
-            ).toJSON(),
-        );
+        this.sendAdminUnauthorized(ws, msg);
     }
 
     sendAdminUnauthorized(ws, msg) {
@@ -5551,16 +5510,13 @@ class ApiServer {
      * errors they are, not report them as "not found".
      */
     async findProjectAndSession(projectId, sessionId) {
-        const Project = this.mongoose.model("Project");
-        const project = await Project.findOne({ id: projectId });
+        const project = await this.fetchMongoProjectById(projectId);
         if (!project) {
             return { project: null, session: null };
         }
-        const found = await Project.findOne(
-            { id: projectId },
-            { sessions: { $elemMatch: { id: sessionId } } },
-        );
-        return { project, session: found?.sessions?.[0] ?? null };
+        const session =
+            project.sessions?.find((s) => s.id === sessionId) ?? null;
+        return { project, session };
     }
 
     /**
@@ -5643,15 +5599,10 @@ class ApiServer {
             !this.isSysAdminUser(user) &&
             !this.isProjectMember(project, user?.username)
         ) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "downloadBundle",
-                    progress: "end",
-                    result: false,
-                    message: "User is not authorized to access this project",
-                    requestId: msg.requestId,
-                }),
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "User is not authorized to access this project",
             );
             return;
         }
@@ -5773,16 +5724,10 @@ class ApiServer {
         // real bottleneck, the upgrade path is per-bundle ownership - the owner
         // is recorded on the bundle list - not a wider role.
         if (!this.canDeleteProject(project, user)) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "deleteBundle",
-                    progress: "end",
-                    result: false,
-                    message:
-                        "User is not authorized to delete bundles in this project",
-                    requestId: msg.requestId,
-                }),
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "User is not authorized to delete bundles in this project",
             );
             return;
         }
@@ -5987,15 +5932,10 @@ class ApiServer {
                     projectId,
                 "warn",
             );
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "deleteProject",
-                    progress: "end",
-                    message: "User is not authorized to delete this project",
-                    result: false,
-                    requestId: msg.requestId,
-                }),
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "User is not authorized to delete this project",
             );
             return;
         }
@@ -6267,14 +6207,7 @@ session-manager_1    | }
         // project was stored when it was not: false means the callee already
         // sent its own progress=end failure, undefined means nobody said
         // anything (a failed container command, an early bail-out).
-        if (emuDbOk !== true) {
-            if (emuDbOk !== false) {
-                this.sendProjectSaveFailure(
-                    ws,
-                    msg,
-                    "Project could not be saved",
-                );
-            }
+        if (this.answerIncompleteSave(ws, msg, emuDbOk)) {
             return;
         }
         ws.send(
@@ -6407,14 +6340,7 @@ session-manager_1    | }
             ws,
             msg,
         );
-        if (emuDbOk !== true) {
-            if (emuDbOk !== false) {
-                this.sendProjectSaveFailure(
-                    ws,
-                    msg,
-                    "Project could not be saved",
-                );
-            }
+        if (this.answerIncompleteSave(ws, msg, emuDbOk)) {
             return;
         }
         ws.send(
@@ -6426,6 +6352,28 @@ session-manager_1    | }
                 result: "Done",
             }),
         );
+    }
+
+    /**
+     * The one answer both saveProject paths give when saveProjectEmuDb did
+     * not complete. false - its own failure frame already sent - stays
+     * silent; anything else that is not true, including a non-boolean stray
+     * return, gets this terminal frame so no requestId is ever left waiting.
+     *
+     * @returns {boolean} true when the caller must stop: the save is not done
+     */
+    answerIncompleteSave(ws, msg, emuDbOk) {
+        if (emuDbOk === true) {
+            return false;
+        }
+        if (emuDbOk !== false) {
+            this.sendProjectSaveFailure(
+                ws,
+                msg,
+                "Project could not be saved",
+            );
+        }
+        return true;
     }
 
     // The one way a saveProject command is allowed to finish: a progress=end
@@ -6573,10 +6521,16 @@ session-manager_1    | }
      *
      * @returns {Promise<string[]>} one message per refused file
      */
-    async validateSessionUploads(projectFormData, uploadsBySession) {
-        const mongoProject = projectFormData.id
-            ? await this.fetchMongoProjectById(projectFormData.id)
-            : null;
+    async validateSessionUploads(
+        projectFormData,
+        uploadsBySession,
+        mongoProject,
+    ) {
+        if (mongoProject === undefined) {
+            mongoProject = projectFormData.id
+                ? await this.fetchMongoProjectById(projectFormData.id)
+                : null;
+        }
         const errors = [];
         for (const formSession of projectFormData.sessions || []) {
             const uploads = uploadsBySession.get(formSession.id);
@@ -6626,6 +6580,17 @@ session-manager_1    | }
     }
 
     /**
+     * Does this session have recordings - stored files with the recording
+     * origin, or takes sitting in the uploads directory waiting for import?
+     */
+    sessionHasRecordings(projectId, session) {
+        return (
+            filesOfOrigin(session, ORIGIN_RECORDING).length > 0 ||
+            this.sprImportService.listUploads(projectId, session.id).length > 0
+        );
+    }
+
+    /**
      * Refuse, before anything is written, a save that moves a session which already
      * has recordings onto another recording script. Item codes name the recorded
      * takes and every script numbers its prompts from prompt_1, so the next
@@ -6634,11 +6599,13 @@ session-manager_1    | }
      *
      * @returns {Promise<string[]>} one message per session that would be re-pointed
      */
-    async validateSessionScriptChanges(projectFormData) {
+    async validateSessionScriptChanges(projectFormData, mongoProject) {
         const errors = [];
-        const mongoProject = projectFormData.id
-            ? await this.fetchMongoProjectById(projectFormData.id)
-            : null;
+        if (mongoProject === undefined) {
+            mongoProject = projectFormData.id
+                ? await this.fetchMongoProjectById(projectFormData.id)
+                : null;
+        }
         for (const formSession of projectFormData.sessions || []) {
             if (formSession.new || !formSession.sessionScript) {
                 continue;
@@ -6649,12 +6616,10 @@ session-manager_1    | }
             if (!storedSession) {
                 continue;
             }
-            const hasRecordings =
-                filesOfOrigin(storedSession, ORIGIN_RECORDING).length > 0 ||
-                this.sprImportService.listUploads(
-                    projectFormData.id,
-                    formSession.id,
-                ).length > 0;
+            const hasRecordings = this.sessionHasRecordings(
+                projectFormData.id,
+                storedSession,
+            );
             if (!hasRecordings) {
                 continue;
             }
@@ -6682,12 +6647,18 @@ session-manager_1    | }
             user,
             projectFormData,
         );
+        const mongoProject = projectFormData.id
+            ? await this.fetchMongoProjectById(projectFormData.id)
+            : null;
         const errors = await this.validateSessionUploads(
             projectFormData,
             uploadsBySession,
+            mongoProject,
         );
-        const scriptChanges =
-            await this.validateSessionScriptChanges(projectFormData);
+        const scriptChanges = await this.validateSessionScriptChanges(
+            projectFormData,
+            mongoProject,
+        );
         if (errors.length == 0 && scriptChanges.length == 0) {
             return uploadsBySession;
         }
@@ -6794,11 +6765,7 @@ session-manager_1    | }
                 mongoSession.sessionScript &&
                 formSession.sessionScript &&
                 mongoSession.sessionScript != formSession.sessionScript &&
-                (filesOfOrigin(mongoSession, ORIGIN_RECORDING).length > 0 ||
-                    this.sprImportService.listUploads(
-                        projectFormData.id,
-                        formSession.id,
-                    ).length > 0)
+                this.sessionHasRecordings(projectFormData.id, mongoSession)
             ) {
                 // Item codes name the recorded takes, so a session that has
                 // recordings keeps the script they were made with. A current client
@@ -6833,12 +6800,10 @@ session-manager_1    | }
             const requested = sessionSources(formSession);
             const hasUploads =
                 filesOfOrigin(mongoSession, ORIGIN_UPLOAD).length > 0;
-            const hasRecordings =
-                filesOfOrigin(mongoSession, ORIGIN_RECORDING).length > 0 ||
-                this.sprImportService.listUploads(
-                    projectFormData.id,
-                    formSession.id,
-                ).length > 0;
+            const hasRecordings = this.sessionHasRecordings(
+                projectFormData.id,
+                mongoSession,
+            );
             if (
                 (!requested.upload && hasUploads) ||
                 (!requested.record && hasRecordings)
@@ -8251,7 +8216,7 @@ session-manager_1    | }
      * the form (projectFormData.docFiles, entries are {name,size,type} objects).
      * container-agent src/main.mjs matches those entries against the names in
      * UPLOAD_PATH/docs, so they must be the names the files were stored under,
-     * not the browser names (see docFileDiskName). Returns null when the payload
+     * not the browser names (see sanitizeFileName). Returns null when the payload
      * carries no docFiles array, so callers keep the old copy-whole-directory
      * behaviour (safe roll-forward).
      *
@@ -8265,27 +8230,8 @@ session-manager_1    | }
         }
         return (
             "DOC_FILES=" +
-            JSON.stringify(docs.map((d) => this.docFileDiskName(d)))
+            JSON.stringify(docs.map((d) => this.sanitizeFileName(d?.name)))
         );
-    }
-
-    /**
-     * docFileDiskName
-     *
-     * Name an uploaded document actually has on disk under UPLOAD_PATH/docs.
-     * Uploads go through api.php's uploadFile(), which stores the file under
-     * sanitize($fileMeta->filename) - so "consent report (v1).pdf" lands as
-     * "consent_report_v1.pdf" - while the project payload only carries the
-     * browser's original File.name ({name,size,type}), so the browser name has
-     * to run through the api.php sanitize() mirror below, otherwise the allow
-     * list matches nothing and the document silently disappears from the
-     * project repo.
-     *
-     * @param {object|string} entry
-     * @returns {string}
-     */
-    docFileDiskName(entry) {
-        return this.sanitizeFileName(entry?.name ?? entry);
     }
 
     /**
