@@ -8145,7 +8145,11 @@ session-manager_1    | }
      * source - it is what names the upload gets on disk), minus the $anal /
      * $force_lowercase arguments api.php never passes: strip HTML tags, delete
      * the characters in $strip, trim, then collapse runs of whitespace to "_".
-     * Keep in sync with api.php.
+     * Keep in sync with api.php - both the character set AND the whitespace
+     * semantics: PHP trims and matches \s byte-wise (ASCII only), JS does it
+     * code-point-wise, and the difference used to silently rename NBSP names.
+     * api.php's uploadFileName() applies no other transform, so this is the
+     * whole contract.
      *
      * @param {string} name
      * @returns {string}
@@ -8171,8 +8175,15 @@ session-manager_1    | }
         for (const char of strip) {
             clean = clean.split(char).join("");
         }
-        clean = clean.trim();
-        return clean.replace(/\s+/g, "_");
+        // PHP's trim(), whose default set is " \t\n\r\0\x0B" - deliberately not
+        // form feed, and not NBSP: JS's .trim() would eat U+00A0 and the eleven
+        // Unicode spaces PHP's byte-level trim never touches.
+        clean = clean.replace(/^[\t\n\r\0\x0B ]+|[\t\n\r\0\x0B ]+$/g, "");
+        // PCRE's \s without the /u modifier is ASCII-only: " \t\n\r\f\v". Using
+        // JS's \s here converted a pasted NBSP (U+00A0, from any document or web
+        // page) into "_", while api.php wrote the NBSP to disk - the allow-list
+        // then named a file that did not exist, and copy-docs refused the save.
+        return clean.replace(/[ \t\n\r\f\v]+/g, "_");
     }
 
     async addFilesToGit(git, projectId) {
