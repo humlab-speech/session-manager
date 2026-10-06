@@ -455,7 +455,6 @@ class Session {
             // Security hardening: capability profiles per session type.
             // All sessions drop ALL capabilities and add back only what's needed.
             // - Jupyter: runs as jovyan (non-root), also used for operations tasks
-            // - VSCode: runs as non-root, caps mainly for entrypoint setup
             const securityProfiles = {
                 "localhost/visp-jupyter-session": {
                     capAdd: [
@@ -465,10 +464,6 @@ class Session {
                         "SETGID",
                         "SETUID",
                     ],
-                    pidsLimit: 512,
-                },
-                "localhost/visp-vscode-session": {
-                    capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
                     pidsLimit: 512,
                 },
             };

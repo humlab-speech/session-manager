@@ -495,12 +495,6 @@ class SessionManager {
         sess.proxyServer.ws(req, socket, head);
     }
 
-    /*
-    getSessionName(userId, projectId) {
-        return "rstudio-session-p"+projectId+"u"+userId;
-    }
-    */
-
     stopContainer(containerId) {}
 
     fetchActiveSessionsOLD() {

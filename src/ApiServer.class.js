@@ -54,8 +54,6 @@ const STALE_GIT_LOCK_MS = 5 * 60 * 1000;
 class ApiServer {
     constructor(app) {
         this.app = app;
-        this.gitLabActivated =
-            new String(process.env.GITLAB_ACTIVATED).toLowerCase() == "true";
         this.port = 8080;
         this.wsPort = 8020;
         this.wsClients = [];
@@ -5720,8 +5718,8 @@ class ApiServer {
      * personalAccessToken (a long-lived GitLab token) plus phpSessionId and
      * _id - none of which the webclient ever reads, but any of which a
      * compromised or XSS'd page could harvest from the getSession reply.
-     * The server keeps the full object internally (cloneProjectFromGit and
-     * friends need the token); only the client copy is trimmed.
+     * The server keeps the full object internally (internal session-creation
+     * helpers still read the token); only the client copy is trimmed.
      */
     static clientUserSessionPayload(userSession) {
         if (userSession === null || typeof userSession !== "object") {
@@ -8907,22 +8905,6 @@ session-manager_1    | }
                 message: "Launching",
             });
             let containerId = await session.createContainer();
-            let credentials = user.username + ":" + user.personalAccessToken;
-            observer.next({
-                type: "status-update",
-                message: "Cloning project",
-            });
-
-            let cloneOptions = [];
-            if (options.includes("sparse")) {
-                cloneOptions.push("sparse");
-            }
-            if (this.gitLabActivated) {
-                let gitOutput = await session.cloneProjectFromGit(
-                    credentials,
-                    cloneOptions,
-                );
-            }
             observer.next({ type: "status-update", message: "Session ready" });
             this.app.addLog("Creating container complete");
             observer.next({ type: "data", accessCode: session.accessCode });
