@@ -6831,6 +6831,16 @@ session-manager_1    | }
             "BUNDLE_LIST_NAME=" + user.username,
         ];
 
+        //DOC_FILES: allow list consumed by container-agent's copy-docs. Files
+        //removed in the webclient docs form are never deleted server-side, so
+        //without the list copy-docs would leak removed uploads into the project
+        //repo (container-agent FLAW-2). The env reaches the container via
+        //docker exec's Env array (argv, no shell), so the JSON needs no quoting.
+        const docFilesEnv = this.buildDocFilesEnv(projectFormData);
+        if (docFilesEnv !== null) {
+            envVars.push(docFilesEnv);
+        }
+
         //Create EMUDB_SESSIONS env var
         //Make sure that age is a number, not a string
         for (let sessionKey in projectFormData.sessions) {
@@ -7724,6 +7734,30 @@ session-manager_1    | }
         }
 
         return true;
+    }
+
+    /**
+     * buildDocFilesEnv
+     *
+     * Builds the DOC_FILES env var for container-agent's copy-docs command:
+     * a JSON array of the file names the user actually kept in the form
+     * (projectFormData.docFiles, entries are {name} objects). container-agent
+     * src/main.mjs parses it with JSON.parse(...).map(f => f.name ?? f).
+     * Returns null when the payload carries no docFiles array, so callers keep
+     * the old copy-whole-directory behaviour (safe roll-forward).
+     *
+     * @param {object} projectFormData
+     * @returns {string|null}
+     */
+    buildDocFilesEnv(projectFormData) {
+        const docs = projectFormData && projectFormData.docFiles;
+        if (!Array.isArray(docs)) {
+            return null;
+        }
+        return (
+            "DOC_FILES=" +
+            JSON.stringify(docs.map((d) => (d && d.name ? d.name : d)))
+        );
     }
 
     async addFilesToGit(git, projectId) {
