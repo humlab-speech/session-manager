@@ -7613,7 +7613,11 @@ session-manager_1    | }
         } catch (error) {
             result = null;
         }
-        if (!result || result.code != 200) {
+        // container-agent's copyDocs reports 400 when /home/uploads/docs does
+        // not exist - i.e. the user uploaded no documents, which is fine. Only
+        // the webclient docs-form upload creates that group directory
+        // (webclient/api/api.php uploadFile -> <context>/<group>).
+        if (!result || (result.code != 200 && result.code != 400)) {
             // Fail before the upload directory is cleaned up below, or the documents are lost
             this.app.addLog(
                 "Failed copying uploaded documents: " +
@@ -7634,6 +7638,11 @@ session-manager_1    | }
             }
             await this.app.sessMan.deleteSession(session.accessCode);
             return false;
+        } else if (result.code == 400) {
+            this.app.addLog(
+                "No uploaded documents to copy: " + JSON.stringify(result.body),
+                "warn",
+            );
         }
 
         envVars.push("GIT_USER_EMAIL=" + user.email);
