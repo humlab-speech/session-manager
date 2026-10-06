@@ -5855,6 +5855,7 @@ class ApiServer {
                 progress: ++stepNum + "/" + totalStepsNum,
                 message: "Stopping all running containers",
                 result: true,
+                requestId: msg.requestId,
             }),
         );
 
@@ -5878,6 +5879,7 @@ class ApiServer {
                 progress: ++stepNum + "/" + totalStepsNum,
                 message: "Deleting project from database",
                 result: true,
+                requestId: msg.requestId,
             }),
         );
         await Project.deleteOne({ id: project.id });
@@ -5889,6 +5891,7 @@ class ApiServer {
                 progress: ++stepNum + "/" + totalStepsNum,
                 message: "Deleting project from filesystem",
                 result: true,
+                requestId: msg.requestId,
             }),
         );
         if (!nativeSync(repoPath)) {
@@ -5901,6 +5904,7 @@ class ApiServer {
                 progress: "end",
                 message: "Project deleted",
                 result: true,
+                requestId: msg.requestId,
             }),
         );
     }
