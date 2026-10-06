@@ -6500,6 +6500,54 @@ session-manager_1    | }
     }
 
     /**
+     * Refuse, before anything is written, a save that moves a session which already
+     * has recordings onto another recording script. Item codes name the recorded
+     * takes and every script numbers its prompts from prompt_1, so the next
+     * participant would record over takes belonging to other prompts, and importing
+     * that take replaces the bundle with everything annotated in it.
+     *
+     * @returns {Promise<string[]>} one message per session that would be re-pointed
+     */
+    async validateSessionScriptChanges(projectFormData) {
+        const errors = [];
+        const mongoProject = projectFormData.id
+            ? await this.fetchMongoProjectById(projectFormData.id)
+            : null;
+        for (const formSession of projectFormData.sessions || []) {
+            if (formSession.new || !formSession.sessionScript) {
+                continue;
+            }
+            const storedSession = mongoProject?.sessions?.find(
+                (s) => s.id == formSession.id,
+            );
+            if (!storedSession) {
+                continue;
+            }
+            const hasRecordings =
+                filesOfOrigin(storedSession, ORIGIN_RECORDING).length > 0 ||
+                this.sprImportService.listUploads(
+                    projectFormData.id,
+                    formSession.id,
+                ).length > 0;
+            if (!hasRecordings) {
+                continue;
+            }
+            // Older records may not carry the script on the session itself.
+            const storedScript =
+                storedSession.sessionScript ||
+                (await this.fetchSprSession(formSession.id))?.script;
+            if (storedScript && storedScript != formSession.sessionScript) {
+                errors.push(
+                    '"' +
+                        (formSession.name || storedSession.name) +
+                        '" already has recordings made with another script',
+                );
+            }
+        }
+        return errors;
+    }
+
+    /**
      * Collect and validate this save's uploads. On failure, reports it to the
      * client and returns null.
      */
@@ -6512,13 +6560,24 @@ session-manager_1    | }
             projectFormData,
             uploadsBySession,
         );
-        if (errors.length == 0) {
+        const scriptChanges =
+            await this.validateSessionScriptChanges(projectFormData);
+        if (errors.length == 0 && scriptChanges.length == 0) {
             return uploadsBySession;
         }
-        this.app.addLog(
-            "Refused project save, upload name conflicts: " + errors.join("; "),
-            "warn",
-        );
+        const problems = [];
+        if (errors.length > 0) {
+            problems.push(
+                "please rename or remove these files: " + errors.join("; "),
+            );
+        }
+        if (scriptChanges.length > 0) {
+            problems.push(
+                "a session that already has recordings keeps its recording script: " +
+                    scriptChanges.join("; "),
+            );
+        }
+        this.app.addLog("Refused project save: " + problems.join("; "), "warn");
         ws.send(
             JSON.stringify({
                 requestId: msg.requestId,
@@ -6526,9 +6585,7 @@ session-manager_1    | }
                 cmd: "saveProject",
                 progress: "end",
                 result: false,
-                message:
-                    "Can't save, please rename or remove these files: " +
-                    errors.join("; "),
+                message: "Can't save, " + problems.join("; "),
             }),
         );
         return null;
@@ -6607,6 +6664,29 @@ session-manager_1    | }
             mongoSession.speakerAge = formSession.speakerAge;
             mongoSession.timeOfRecording = formSession.timeOfRecording;
             mongoSession.placeOfRecording = formSession.placeOfRecording;
+            if (
+                mongoSession.sessionScript &&
+                formSession.sessionScript &&
+                mongoSession.sessionScript != formSession.sessionScript &&
+                (filesOfOrigin(mongoSession, ORIGIN_RECORDING).length > 0 ||
+                    this.sprImportService.listUploads(
+                        projectFormData.id,
+                        formSession.id,
+                    ).length > 0)
+            ) {
+                // Item codes name the recorded takes, so a session that has
+                // recordings keeps the script they were made with. A current client
+                // is refused earlier; this covers a stale or older one. Rewriting the
+                // form's value (rather than dropping it) keeps the EMU-DB, the SPR
+                // session and the client's next load all saying the same thing.
+                this.app.addLog(
+                    "Keeping the recording script of session " +
+                        formSession.id +
+                        "; it already has recordings",
+                    "warn",
+                );
+                formSession.sessionScript = mongoSession.sessionScript;
+            }
             mongoSession.sessionScript = formSession.sessionScript;
             mongoSession.sessionId = formSession.sessionId;
             // dataSource is left as it was: files stored before origins
