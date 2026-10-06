@@ -95,7 +95,11 @@ test("deleteBundle: a plain member (researcher) is refused - destructive op need
 
 test("deleteBundle: object-shaped ids are refused before any lookup", async () => {
     const { api, ws, writes, removedPaths } = createContext();
-    await api.deleteBundle(ws, { username: "alice" }, payload({ projectId: { $ne: null } }));
+    await api.deleteBundle(
+        ws,
+        { username: "alice" },
+        payload({ projectId: { $ne: null } }),
+    );
     assert.ok(denied(ws, "must be strings"), JSON.stringify(ws.sent));
     assert.strictEqual(writes.length, 0);
     assert.strictEqual(removedPaths.length, 0);
@@ -103,7 +107,11 @@ test("deleteBundle: object-shaped ids are refused before any lookup", async () =
 
 test("deleteBundle: missing msg.data gets an error reply, not a hanging rejection", async () => {
     const { api, ws, writes, removedPaths } = createContext();
-    await api.deleteBundle(ws, { username: "alice" }, { cmd: "deleteBundle", requestId: "r1" });
+    await api.deleteBundle(
+        ws,
+        { username: "alice" },
+        { cmd: "deleteBundle", requestId: "r1" },
+    );
     assert.ok(denied(ws, "must be strings"), JSON.stringify(ws.sent));
     assert.strictEqual(writes.length, 0);
     assert.strictEqual(removedPaths.length, 0);

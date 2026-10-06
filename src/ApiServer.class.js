@@ -3422,10 +3422,28 @@ class ApiServer {
         const projectId =
             typeof msg?.projectId === "string" ? msg.projectId : null;
         const Project = this.mongoose.model("Project");
-        const project =
-            projectId === null
-                ? null
-                : await Project.findOne({ id: projectId });
+        let project = null;
+        try {
+            project =
+                projectId === null
+                    ? null
+                    : await Project.findOne({ id: projectId });
+        } catch (error) {
+            // A broken database is an outage, not an authorization decision:
+            // log the real error, and still answer so the client does not hang.
+            this.app.addLog(error, "error");
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {},
+                    "Error looking up project",
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+            return null;
+        }
 
         if (
             !owner ||
@@ -5382,24 +5400,99 @@ class ApiServer {
         }
     }
 
-    async downloadBundle(ws, user, msg) {
-        let projectId = msg.data.projectId;
-        let sessionId = msg.data.sessionId;
-        let fileName = msg.data.fileName;
+    /**
+     * Non-throwing project+session lookup for the bundle handlers.
+     * getProjectById/getSessionById THROW on falsy or not-found ids, and the
+     * dispatcher calls these handlers without awaiting, so a throw means an
+     * unhandledRejection and a client whose promise never settles. Mongoose
+     * connection errors still throw: callers must log those as the real
+     * errors they are, not report them as "not found".
+     */
+    async findProjectAndSession(projectId, sessionId) {
+        const Project = this.mongoose.model("Project");
+        const project = await Project.findOne({ id: projectId });
+        if (!project) {
+            return { project: null, session: null };
+        }
+        const found = await Project.findOne(
+            { id: projectId },
+            { sessions: { $elemMatch: { id: sessionId } } },
+        );
+        return { project, session: found?.sessions?.[0] ?? null };
+    }
 
-        let project = await this.getProjectById(projectId);
-        let session = await this.getSessionById(projectId, sessionId);
+    /**
+     * A settled reply for lookups that could not name a target: keeps the
+     * cmd-result contract (requestId echoed + result:false) that the webclient
+     * waits on, instead of leaving the socket silent.
+     */
+    sendLookupFailure(ws, msg, message) {
+        ws.send(
+            JSON.stringify({
+                type: "cmd-result",
+                cmd: msg.cmd,
+                progress: "end",
+                result: false,
+                message: message,
+                requestId: msg.requestId,
+            }),
+        );
+    }
+
+    /**
+     * String-gate the three client-supplied bundle ids. Returns null (after
+     * sending the refusal) unless all of them are non-empty strings, so no
+     * handler ever dereferences msg.data or feeds a query object to findOne().
+     */
+    requireBundleIds(ws, msg) {
+        const pick = (v) => (typeof v === "string" && v ? v : null);
+        const ids = {
+            projectId: pick(msg?.data?.projectId),
+            sessionId: pick(msg?.data?.sessionId),
+            fileName: pick(msg?.data?.fileName),
+        };
+        if (!ids.projectId || !ids.sessionId || !ids.fileName) {
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "Malformed request: projectId, sessionId and fileName must be strings",
+            );
+            return null;
+        }
+        return ids;
+    }
+
+    async downloadBundle(ws, user, msg) {
+        const ids = this.requireBundleIds(ws, msg);
+        if (!ids) {
+            return;
+        }
+        const { projectId, sessionId, fileName } = ids;
+
+        let project, session;
+        try {
+            ({ project, session } = await this.findProjectAndSession(
+                projectId,
+                sessionId,
+            ));
+        } catch (error) {
+            // A broken database is an outage, not a "not found": log the real
+            // error, and still answer with its own message so the reply is not
+            // mistaken for a denial.
+            this.app.addLog(error, "error");
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "Error looking up project or session",
+            );
+            return;
+        }
 
         if (!project || !session) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "downloadBundle",
-                    progress: "end",
-                    result: false,
-                    message: "Could not find project or session",
-                    requestId: msg.requestId,
-                }),
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "Could not find project or session",
             );
             return;
         }
@@ -5485,47 +5578,38 @@ class ApiServer {
     }
 
     async deleteBundle(ws, user, msg) {
-        // Everything below deletes directories, so nothing is looked up or
-        // removed unless every id is a plain string (a NoSQL-shaped object
-        // must never reach findOne) and this user is who the guard checks.
-        const projectId =
-            typeof msg?.data?.projectId === "string"
-                ? msg.data.projectId
-                : null;
-        const sessionId =
-            typeof msg?.data?.sessionId === "string"
-                ? msg.data.sessionId
-                : null;
-        const fileName =
-            typeof msg?.data?.fileName === "string" ? msg.data.fileName : null;
-        if (!projectId || !sessionId || !fileName) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "deleteBundle",
-                    progress: "end",
-                    result: false,
-                    message:
-                        "Malformed request: projectId, sessionId and fileName must be strings",
-                    requestId: msg.requestId,
-                }),
+        // Everything below deletes directories, so ids go through the same
+        // string gate and non-throwing lookup as downloadBundle before any
+        // authz decision or removal.
+        const ids = this.requireBundleIds(ws, msg);
+        if (!ids) {
+            return;
+        }
+        const { projectId, sessionId, fileName } = ids;
+
+        let project, session;
+        try {
+            ({ project, session } = await this.findProjectAndSession(
+                projectId,
+                sessionId,
+            ));
+        } catch (error) {
+            // A broken database is an outage, not a "not found": log the real
+            // error, and still answer so the client does not hang.
+            this.app.addLog(error, "error");
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "Error looking up project or session",
             );
             return;
         }
 
-        let project = await this.getProjectById(projectId);
-        let session = await this.getSessionById(projectId, sessionId);
-
         if (!project || !session) {
-            ws.send(
-                JSON.stringify({
-                    type: "cmd-result",
-                    cmd: "deleteBundle",
-                    progress: "end",
-                    result: false,
-                    message: "Could not find project or session",
-                    requestId: msg.requestId,
-                }),
+            this.sendLookupFailure(
+                ws,
+                msg,
+                "Could not find project or session",
             );
             return;
         }
@@ -5728,10 +5812,19 @@ class ApiServer {
         //and nothing happens unless this user may delete that project.
         const projectId = msg?.data?.project?.id;
         const Project = this.mongoose.model("Project");
-        const project =
-            typeof projectId === "string"
-                ? await Project.findOne({ id: projectId })
-                : null;
+        let project = null;
+        try {
+            project =
+                typeof projectId === "string"
+                    ? await Project.findOne({ id: projectId })
+                    : null;
+        } catch (error) {
+            // A broken database is an outage, not a refusal: log the real
+            // error, and still answer so the client does not hang.
+            this.app.addLog(error, "error");
+            this.sendLookupFailure(ws, msg, "Error looking up project");
+            return;
+        }
         if (!project || !this.canDeleteProject(project, user)) {
             this.app.addLog(
                 "deleteProject refused for " +
