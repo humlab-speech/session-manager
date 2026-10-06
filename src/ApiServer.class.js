@@ -19,7 +19,7 @@ const path = require("path");
 const { exec } = require("child_process");
 const { nativeSync } = require("rimraf");
 const mime = require("mime-types");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const WhisperService = require("./WhisperService.class");
 const SprImportService = require("./SprImportService.class");
 const {
@@ -6570,8 +6570,23 @@ session-manager_1    | }
                     this.app.addLog(`Converting ${filePath} to ${newFilePath}`);
 
                     try {
-                        execSync(
-                            `ffmpeg -i "${filePath}" -acodec pcm_s16le -ac 1 -ar 16000 "${newFilePath}"`,
+                        // No shell: file names on disk (converted uploads) go
+                        // straight into argv; an array cannot be reinterpreted
+                        // as shell syntax the way an interpolated command line
+                        // can (same fix as 0883e6f made for the transcribe paths).
+                        execFileSync(
+                            "ffmpeg",
+                            [
+                                "-i",
+                                filePath,
+                                "-acodec",
+                                "pcm_s16le",
+                                "-ac",
+                                "1",
+                                "-ar",
+                                "16000",
+                                newFilePath,
+                            ],
                             { stdio: "pipe" },
                         );
                         this.app.addLog(
