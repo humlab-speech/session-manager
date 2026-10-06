@@ -279,3 +279,48 @@ test("requireQueryString: only non-empty strings pass", () => {
     assert.strictEqual(r([]), null);
     assert.strictEqual(r({ $ne: null }), null);
 });
+
+test("getSession: the browser copy of the user session carries no long-lived credentials", async () => {
+    const api = createApiServer(ApiServer);
+    api.app = { addLog: () => {} };
+    api.projectRolesCache = Object.fromEntries(
+        ApiServer.DEFAULT_PROJECT_ROLES.map((r) => [r.name, r]),
+    );
+    const fullUser = {
+        _id: "64e71bdb16e4d351def68ca5",
+        username: "alice",
+        eppn: "alice@example.edu",
+        firstName: "Alice",
+        loginAllowed: true,
+        personalAccessToken: "glpat-SECRET",
+        phpSessionId: "abc123",
+    };
+    const client = { originalRequest: {} };
+    api.getClientBySocket = () => client;
+    api.authenticateWebSocketUser = async () => ({
+        authenticated: true,
+        userSession: fullUser,
+    });
+    const ws = wsRecorder();
+    await api.handleIncomingWebSocketMessage(
+        ws,
+        JSON.stringify({ cmd: "getSession", requestId: "r1", data: {} }),
+    );
+    const sent = ws.sent.find((m) => m.cmd === "getSession");
+    assert.ok(sent, "getSession must be answered: " + JSON.stringify(ws.sent));
+    assert.strictEqual(sent.data.personalAccessToken, undefined);
+    assert.strictEqual(sent.data.phpSessionId, undefined);
+    assert.strictEqual(sent.data._id, undefined);
+    assert.strictEqual(sent.data.username, "alice", "identity fields survive");
+    // The server must keep the full object internally for git operations.
+    assert.strictEqual(client.userSession.personalAccessToken, "glpat-SECRET");
+});
+
+test("clientUserSessionPayload unit: trims, primitives pass through", () => {
+    const f = ApiServer.clientUserSessionPayload;
+    assert.deepStrictEqual(f({ _id: 1, phpSessionId: "x", personalAccessToken: "p", username: "u" }), {
+        username: "u",
+    });
+    assert.strictEqual(f(null), null);
+    assert.strictEqual(f("x"), "x");
+});

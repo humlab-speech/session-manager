@@ -1148,7 +1148,7 @@ class ApiServer {
                 new WebSocketMessage(
                     msg.requestId,
                     msg.cmd,
-                    sessionAuth.userSession,
+                    ApiServer.clientUserSessionPayload(sessionAuth.userSession),
                 ).toJSON(),
             );
             return;
@@ -5705,6 +5705,24 @@ class ApiServer {
      */
     static requireQueryString(value) {
         return typeof value === "string" && value.length > 0 ? value : null;
+    }
+
+    /**
+     * Copy of the authenticated user session that is safe to hand to a
+     * browser. authenticateWebSocketUser merges the whole users document in
+     * (PHP session data + MongoDB), and that document carries
+     * personalAccessToken (a long-lived GitLab token) plus phpSessionId and
+     * _id - none of which the webclient ever reads, but any of which a
+     * compromised or XSS'd page could harvest from the getSession reply.
+     * The server keeps the full object internally (cloneProjectFromGit and
+     * friends need the token); only the client copy is trimmed.
+     */
+    static clientUserSessionPayload(userSession) {
+        if (userSession === null || typeof userSession !== "object") {
+            return userSession;
+        }
+        const { personalAccessToken, phpSessionId, _id, ...safe } = userSession;
+        return safe;
     }
 
     async downloadBundle(ws, user, msg) {
