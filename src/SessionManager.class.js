@@ -118,18 +118,26 @@ class SessionManager {
         return false;
     }
 
-    getContainerSessionsOverviewByProjectId(projectId) {
+    // Overview of a project's running containers for the dashboard.
+    // requesterUsername is the user the answer will be sent to: the access code
+    // is the bearer credential routeToApp() proxies into the container on, so it
+    // is returned for the requester's own sessions only. Other members' entries
+    // keep username/type, which is all the UI needs to disable an occupied app.
+    getContainerSessionsOverviewByProjectId(projectId, requesterUsername) {
         this.refreshSessions();
 
         let sessions = [];
         this.sessions.forEach((session) => {
             if (session.project.id == projectId) {
-                sessions.push({
+                let entry = {
                     projectId: session.project.id,
                     username: session.user.username,
                     type: session.hsApp,
-                    sessionAccessCode: session.accessCode,
-                });
+                };
+                if (session.user.username === requesterUsername) {
+                    entry.sessionAccessCode = session.accessCode;
+                }
+                sessions.push(entry);
             }
         });
         return sessions;
@@ -486,12 +494,6 @@ class SessionManager {
 
         sess.proxyServer.ws(req, socket, head);
     }
-
-    /*
-    getSessionName(userId, projectId) {
-        return "rstudio-session-p"+projectId+"u"+userId;
-    }
-    */
 
     stopContainer(containerId) {}
 

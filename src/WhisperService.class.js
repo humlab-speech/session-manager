@@ -1,9 +1,10 @@
 const nanoid = require("nanoid");
 const fs = require("fs");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const http = require("http");
 const nodemailer = require("nodemailer");
 const path = require("path");
+const { safePathComponent } = require("./pathSecurity");
 
 class WhisperService {
     constructor(app) {
@@ -619,6 +620,31 @@ class WhisperService {
     async addFileToTranscriptionQueue(ws, user, msg) {
         //check that this user has access to the project designated by msg.data.project
 
+        // These three values name directories and files below /repositories, so
+        // they must be single path components. Without this a client could queue
+        // a path outside its own project.
+        try {
+            safePathComponent(msg.data.project, "project");
+            safePathComponent(msg.data.session, "session");
+            safePathComponent(msg.data.bundle, "bundle");
+        } catch (err) {
+            this.app.addLog(
+                "Rejected transcription request: " + err.message,
+                "warn",
+            );
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    requestId: msg.requestId,
+                    progress: "end",
+                    cmd: msg.cmd,
+                    result: false,
+                    message: "Invalid project, session or bundle name",
+                }),
+            );
+            return;
+        }
+
         //get the mongoose model for Project
         const Project = this.app.apiServer.mongoose.model("Project");
         let project = await Project.findOne({ id: msg.data.project });
@@ -1190,8 +1216,22 @@ class WhisperService {
         }
 
         try {
-            execSync(
-                `ffmpeg -i "${sourcePath}${queueItem.bundle}" -acodec pcm_s16le -ac 1 -ar 16000 "${destPath}${bundleFilenameWithoutExt}.wav"`,
+            // No shell: project/session/bundle come from a client message and
+            // end up in filesystem paths; an argv array cannot be reinterpreted
+            // as shell syntax the way an interpolated command line can.
+            execFileSync(
+                "ffmpeg",
+                [
+                    "-i",
+                    sourcePath + queueItem.bundle,
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    destPath + bundleFilenameWithoutExt + ".wav",
+                ],
                 { stdio: "pipe" },
             );
             queueItem.error = "";
@@ -1474,8 +1514,20 @@ class WhisperService {
             // ffmpeg: convert to 16kHz mono 16-bit WAV in a temp file
             const tmpPath = `/tmp/visp-nb-${Date.now()}-${path.basename(hostFilePath, path.extname(hostFilePath))}.wav`;
             try {
-                execSync(
-                    `ffmpeg -y -i "${hostFilePath}" -acodec pcm_s16le -ac 1 -ar 16000 "${tmpPath}"`,
+                execFileSync(
+                    "ffmpeg",
+                    [
+                        "-y",
+                        "-i",
+                        hostFilePath,
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        tmpPath,
+                    ],
                     { stdio: "pipe" },
                 );
             } catch (err) {
