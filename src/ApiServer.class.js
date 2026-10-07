@@ -5559,34 +5559,6 @@ class ApiServer {
         }
     }
 
-    async setPermissionsRecursive(directoryPath, mode) {
-        try {
-            // Set permissions for the directory itself
-            await fs.chmod(directoryPath, mode);
-
-            // Get the list of items (files and subdirectories) in the directory
-            const items = await fs.readdir(directoryPath);
-
-            // Iterate through each item
-            for (const item of items) {
-                const itemPath = path.join(directoryPath, item);
-                const stats = await fs.stat(itemPath);
-
-                if (stats.isDirectory()) {
-                    // If the item is a subdirectory, recursively set permissions
-                    await this.setPermissionsRecursive(itemPath, mode);
-                } else {
-                    // Set permissions for individual files
-                    await fs.chmod(itemPath, mode);
-                }
-            }
-
-            console.log(`Permissions set for ${directoryPath}`);
-        } catch (error) {
-            console.error(`Error setting permissions:`, error);
-        }
-    }
-
     async getProjectById(projectId) {
         const Project = this.mongoose.model("Project");
 
