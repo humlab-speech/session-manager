@@ -6876,6 +6876,26 @@ session-manager_1    | }
             .findOne({ id: projectFormData.id });
 
         for (let formSession of projectFormData.sessions) {
+            // The id is client-built and reaches the raw SPR driver below
+            // (sprSessionDelete's deleteOne filter, sprSessionEnsure's
+            // findOne/updateOne filters), which performs no schema casting —
+            // an object-shaped value like {"$ne": null} would run as query
+            // operators against the wsrng sessions collection. Refuse it once
+            // per session here, before any spr* call and before any change to
+            // the mongo project. An undefined id is allowed: a session with
+            // no id can never match an existing SPR session, and refusing it
+            // would change behaviour for uploads-only saves that never touch
+            // the SPR db; a null/empty/non-string id cannot occur from the
+            // current client (it always sends a nanoid) and is refused.
+            if (
+                formSession.id !== undefined &&
+                ApiServer.requireQueryString(formSession.id) === null
+            ) {
+                throw new Error(
+                    "Refused project save: session id must be a string, got " +
+                        JSON.stringify(formSession.id),
+                );
+            }
             if (formSession.deleted) {
                 this.app.addLog(
                     "Deleting session with id " +
