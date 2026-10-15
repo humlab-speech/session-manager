@@ -6387,6 +6387,63 @@ session-manager_1    | }
     }
 
     async saveProject(ws, user, msg) {
+        const projectFormData = msg.project;
+        if (!projectFormData || typeof projectFormData !== "object") {
+            this.app.addLog("saveProject without a project form", "error");
+            this.sendProjectSaveFailure(
+                ws,
+                msg,
+                "The project could not be processed",
+            );
+            return;
+        }
+
+        // Creating and editing share this one entry point but need different
+        // permissions, so the branch has to come first and be decided on the
+        // SERVER's document: the payload only names which project, and a gate
+        // that trusted anything else from it would let a member of one project
+        // write into another just by sending its id.
+        //
+        // Creating stays sysadmin-only (the system permission the two-tier role
+        // split made it). Editing is project-scoped editProjectFiles - that is
+        // what ProjectAdmin and Researcher hold, and what updateProject itself
+        // has always assumed but never checked. Both refusals answer with one
+        // terminal frame, and "no such project" says the same thing as "not
+        // yours": a caller who can tell them apart can enumerate project ids.
+        const projectId = projectFormData.id;
+        if (projectId !== undefined && projectId !== null) {
+            if (typeof projectId !== "string" || projectId === "") {
+                this.sendProjectSaveFailure(
+                    ws,
+                    msg,
+                    "The project could not be processed",
+                );
+                return;
+            }
+            const project = await this.fetchMongoProjectById(projectId);
+            if (
+                !project ||
+                !this.getProjectPermissions(project, user).editProjectFiles
+            ) {
+                this.app.addLog(
+                    "User " +
+                        (user && user.username) +
+                        " tried to update project " +
+                        projectId +
+                        " without editProjectFiles",
+                    "warning",
+                );
+                this.sendProjectSaveFailure(
+                    ws,
+                    msg,
+                    "You cannot edit this project",
+                );
+                return;
+            }
+            await this.updateProject(ws, user, msg);
+            return;
+        }
+
         if (!user || !this.getSystemPermissions(user).createProjects) {
             this.app.addLog(
                 "User " +
@@ -6407,17 +6464,7 @@ session-manager_1    | }
             return;
         }
 
-        let projectFormData = msg.project;
-
-        //figure out if this is a new project or an existing one
-        if (
-            typeof projectFormData.id != "undefined" &&
-            projectFormData.id != null
-        ) {
-            await this.updateProject(ws, user, msg);
-        } else {
-            await this.createProject(ws, user, msg);
-        }
+        await this.createProject(ws, user, msg);
     }
 
     async updateProject(ws, user, msg) {
