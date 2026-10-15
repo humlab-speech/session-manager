@@ -9641,7 +9641,6 @@ session-manager_1    | }
         ];
 
         //emudb-create-sessions
-        //await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "delete-sessions"], envVars);
         await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-create-sessions"], envVars);
         await session.runCommand(["/usr/local/bin/node", "/container-agent/main.js", "emudb-track-definitions"], envVars);
         //await session.commit();
