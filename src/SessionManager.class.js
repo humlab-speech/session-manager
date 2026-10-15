@@ -621,7 +621,11 @@ class SessionManager {
         return new Promise((resolve, reject) => {
             let sess = this.getSessionByCode(sessionId);
             if (sess === false) {
-                reject("Could not find session " + sessionId);
+                reject("Could not find session " + this.codeRef(sessionId));
+                // Without this the promise settles and the lines below run on
+                // undefined; that TypeError is logged by the top-level handler,
+                // which is one more place the identifier ended up.
+                return;
             }
 
             sess.delete().then(() => {

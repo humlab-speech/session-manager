@@ -422,7 +422,7 @@ class Session {
 
         const containerConfig = this.getContainerConfig();
         this.app.addLog(
-            `containerConfig: ${JSON.stringify(containerConfig)}`,
+            `containerConfig: ${this.logSafe(containerConfig)}`,
             "debug",
         );
 
@@ -584,10 +584,7 @@ class Session {
                     hostSocketDir,
                 );
             }
-            this.app.addLog(
-                `libpodSpec: ${JSON.stringify(libpodSpec)}`,
-                "debug",
-            );
+            this.app.addLog(`libpodSpec: ${this.logSafe(libpodSpec)}`, "debug");
 
             const http = require("http");
 
@@ -703,6 +700,21 @@ class Session {
      * Helper to set up container log streaming to a file.
      * This logic was extracted from createContainer for clarity.
      */
+    /**
+     * JSON for a log line, with this session's credential replaced by its
+     * reference. The access code is embedded in Env (JUPYTER_TOKEN), in the
+     * visp.accessCode labels and in socket paths, so it is redacted by value
+     * rather than key by key: a new field that carries it cannot be forgotten.
+     */
+    logSafe(value) {
+        const code = String(this.accessCode ?? "");
+        if (!code) return JSON.stringify(value);
+        return JSON.stringify(value).replaceAll(
+            code,
+            this.app.sessMan.codeRef(code),
+        );
+    }
+
     setupLogStreaming() {
         try {
             const logsDir = "/session-manager/logs";

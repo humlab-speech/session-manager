@@ -152,3 +152,28 @@ test("an unknown role is refused, not silently made a Researcher", async () => {
     assert.ok(refused(ctx), JSON.stringify(ctx.ws.sent));
     assert.ok(!ctx.project.members.some((m) => m.username === "stranger_one"));
 });
+
+test("a non-member cannot learn who is already in the project", async () => {
+    // Ordering matters twice over: answering "already a member" before the
+    // permission check hands a stranger a membership oracle, and reading
+    // project.members before it is initialised throws on an old document.
+    const ctx = createContext();
+    const models = ctx.api.mongoose;
+    // The account being added has to resolve — the code looks it up before
+    // deciding anything.
+    ctx.api.mongoose = {
+        model: (name) =>
+            name === "User"
+                ? fakeModels({ User: [{ username: "newcomer_one" }] }).models.User
+                : models.model(name),
+    };
+
+    await addMember(ctx, { username: "outsider_one" }, "newcomer_one", "researcher");
+    assert.ok(refused(ctx), JSON.stringify(ctx.ws.sent));
+    assert.match(ctx.ws.sent[0].message ?? "", /not authorized/);
+
+    delete ctx.project.members;
+    ctx.ws.sent.length = 0;
+    await addMember(ctx, { username: "outsider_one" }, "newcomer_one", "researcher");
+    assert.ok(refused(ctx), "a members-less document must still be refused, not crash");
+});

@@ -1053,7 +1053,7 @@ class ApiServer {
                 "User " +
                     user.username +
                     " attempted to access session " +
-                    session.accessCode +
+                    this.app.sessMan.codeRef(session.accessCode) +
                     " owned by " +
                     (session.user?.username ?? "unknown") +
                     " (cmd: " +
@@ -1532,7 +1532,10 @@ class ApiServer {
 
         if (msg.cmd == "shutdownOperationsSession") {
             try {
-                this.app.addLog("Shutdown of session " + msg.sessionAccessCode);
+                this.app.addLog(
+                    "Shutdown of session " +
+                        this.app.sessMan.codeRef(msg.sessionAccessCode),
+                );
                 let session = this.app.sessMan.getSessionByCode(
                     msg.sessionAccessCode,
                 );
@@ -2294,9 +2297,8 @@ class ApiServer {
             return;
         }
 
-        // This function reports failures by sending the reply itself (unlike
-        // setProjectMemberRole, which is handed one); the guard below needs the
-        // same shape, or it throws instead of answering.
+        // This function sends its own failure replies (unlike setProjectMemberRole,
+        // which is handed a `fail`); the guards below need the same shape.
         const fail = (message) =>
             ws.send(
                 new WebSocketMessage(
@@ -2309,34 +2311,15 @@ class ApiServer {
                 ).toJSON(),
             );
 
-        //check if user is already a member
-        let existingMember = project.members.find(
-            (m) => m.username == msg.username,
-        );
-        if (existingMember) {
-            ws.send(
-                new WebSocketMessage(
-                    msg.requestId,
-                    msg.cmd,
-                    { result: false },
-                    "User is already a member of this project",
-                    "end",
-                    false,
-                ).toJSON(),
-            );
-            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is already a member of this project" }));
-            return;
-        }
-
-        //add user to project
+        // Role names are checked, not coerced: an unknown one used to become a
+        // silent Researcher. And handing out project_admin needs to hold it —
+        // manageProjectMembers is a Researcher right, and project_admin
+        // additionally buys createInviteCodes. Checking that only in
+        // setProjectMemberRole left this command as the way around it.
         if (!this.isValidProjectRole(msg.role)) {
             fail("Unknown project role: " + msg.role);
             return;
         }
-        // The same ceiling as setProjectMemberRole: managing members is a
-        // Researcher right, handing out project_admin is not, because that role
-        // additionally buys createInviteCodes. Checking only the rename path
-        // would leave this one as the way around it.
         if (
             msg.role === ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
             !this.isProjectAdminOrSysAdmin(project, user)
@@ -2355,6 +2338,7 @@ class ApiServer {
             return;
         }
 
+        //check if user is already a member
         //get user info
         const User = this.mongoose.model("User");
         let userInfo = await User.findOne({ username: msg.username }).select(
@@ -2407,6 +2391,25 @@ class ApiServer {
             return;
         }
 
+        let existingMember = project.members.find(
+            (m) => m.username == msg.username,
+        );
+        if (existingMember) {
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { result: false },
+                    "User is already a member of this project",
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is already a member of this project" }));
+            return;
+        }
+
+        //add user to project
         const newMemberRole = msg.role;
         project.members.push({
             username: msg.username,
@@ -10029,7 +10032,7 @@ session-manager_1    | }
                 })().then((session) => {
                     this.app.addLog(
                         "Creating container complete, sending project access code (" +
-                            session.accessCode +
+                            this.app.sessMan.codeRef(session.accessCode) +
                             ") to api/proxy",
                     );
                     res.end(

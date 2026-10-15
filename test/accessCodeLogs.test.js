@@ -60,3 +60,42 @@ test("the logging shapes are gone from both files", () => {
         );
     }
 });
+
+// The sweep continued after the first pass: the code also reached logs through
+// an ownership-refusal message, the shutdown and creation notices, a reject
+// reason the top-level handler logs, and two debug dumps of the container
+// config (Env carries JUPYTER_TOKEN, the labels carry the code).
+test("the second sweep's shapes are gone too", () => {
+    const banned = [
+        ["ApiServer.class.js", "attempted to access session \" +\n                    session.accessCode"],
+        ["ApiServer.class.js", "session.accessCode +\n"],
+        ["ApiServer.class.js", '+ msg.sessionAccessCode)'],
+        ["ApiServer.class.js", "sending project access code (\" +\n                            session.accessCode +"],
+        ["SessionManager.class.js", 'eject("Could not find session " + sessionId)'],
+        ["Session.class.js", "${JSON.stringify(containerConfig)}"],
+        ["Session.class.js", "${JSON.stringify(libpodSpec)}"],
+    ];
+    for (const [file, needle] of banned) {
+        assert.ok(!read(file).includes(needle), `${file} still logs: ${needle}`);
+    }
+});
+
+test("logSafe redacts a credential by value, wherever it sits", () => {
+    const Session = require(path.join(SRC, "Session.class.js"));
+    const code = "ZQ8k3mT9pLw7vR2nX5yH4dJ6cF1bG0sA";
+    const s = Object.create(Session.prototype);
+    Object.assign(s, {
+        accessCode: code,
+        app: { sessMan: Object.create(SessionManager.prototype) },
+    });
+
+    const dumped = s.logSafe({
+        Env: ["JUPYTER_TOKEN=" + code, "PATH=/usr/bin"],
+        Labels: { "visp.accessCode": code },
+        nested: { socket: `/sessions/${code}/ui.sock` },
+    });
+
+    assert.ok(!dumped.includes(code), "the credential survived redaction");
+    assert.match(dumped, /#code/, "redaction lost the correlation handle");
+    assert.match(dumped, /PATH=\/usr\/bin/, "redaction destroyed unrelated config");
+});
