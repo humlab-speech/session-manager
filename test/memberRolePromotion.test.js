@@ -106,3 +106,49 @@ test("a non-member still gets the plain membership refusal", async () => {
     assert.ok(refused(ctx), JSON.stringify(ctx.ws.sent));
     assert.strictEqual(roleOf(ctx, "newcomer_one"), ApiServer.PROJECT_ROLE_RESEARCHER);
 });
+
+// The same ceiling had to be applied to addProjectMember: it gated on
+// manageProjectMembers (a Researcher right) and then pushed whatever valid role
+// name arrived, so it was the way around the rule above. It also turned an
+// unknown role into a silent Researcher instead of refusing it.
+const addMember = (ctx, user, username, role) =>
+    ctx.api.addProjectMember(ctx.ws, user, {
+        cmd: "addProjectMember",
+        requestId: "r1",
+        projectId: "p1",
+        username,
+        role,
+    });
+
+test("a Researcher cannot add someone as Project Admin", async () => {
+    const ctx = createContext();
+    await addMember(ctx, { username: "helper_one" }, "stranger_one", "project_admin");
+    assert.ok(refused(ctx), "must be refused, got: " + JSON.stringify(ctx.ws.sent));
+    assert.ok(
+        !ctx.project.members.some((m) => m.username === "stranger_one"),
+        "the member was added anyway",
+    );
+    assert.deepStrictEqual(ctx.saves, [], "nothing was saved");
+});
+
+test("refusal happens before the User collection is queried", async () => {
+    // The guard sits ahead of the lookup on purpose, so this model is absent:
+    // reaching for it is the proof that the order held.
+    const ctx = createContext();
+    const inner = ctx.api.mongoose;
+    ctx.api.mongoose = {
+        model: (name) => {
+            if (name !== "Project") throw new Error("queried " + name);
+            return inner.model(name);
+        },
+    };
+    await addMember(ctx, { username: "helper_one" }, "stranger_one", "project_admin");
+    assert.ok(refused(ctx), JSON.stringify(ctx.ws.sent));
+});
+
+test("an unknown role is refused, not silently made a Researcher", async () => {
+    const ctx = createContext();
+    await addMember(ctx, { username: "owner_one" }, "stranger_one", "super_user");
+    assert.ok(refused(ctx), JSON.stringify(ctx.ws.sent));
+    assert.ok(!ctx.project.members.some((m) => m.username === "stranger_one"));
+});

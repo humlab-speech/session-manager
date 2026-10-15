@@ -38,7 +38,14 @@ function fakeModels(store, { boom = null, writes = [], deleted = [] } = {}) {
             save() {
                 if (!docs.includes(this)) docs.push(this);
             }
-            static async findOne(q, proj) {
+            // findOne is also chained (`.select(...)`), which a bare async
+            // method cannot be. Same promise, plus the chaining method.
+            static findOne(q, proj) {
+                const pending = Model._findOne(q, proj);
+                pending.select = () => pending;
+                return pending;
+            }
+            static async _findOne(q, proj) {
                 if (boom) throw boom;
                 const doc = docs.find((d) => matches(d, q)) ?? null;
                 if (doc && proj?.sessions?.$elemMatch?.id !== undefined) {

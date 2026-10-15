@@ -2294,6 +2294,67 @@ class ApiServer {
             return;
         }
 
+        // This function reports failures by sending the reply itself (unlike
+        // setProjectMemberRole, which is handed one); the guard below needs the
+        // same shape, or it throws instead of answering.
+        const fail = (message) =>
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    {},
+                    message,
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+
+        //check if user is already a member
+        let existingMember = project.members.find(
+            (m) => m.username == msg.username,
+        );
+        if (existingMember) {
+            ws.send(
+                new WebSocketMessage(
+                    msg.requestId,
+                    msg.cmd,
+                    { result: false },
+                    "User is already a member of this project",
+                    "end",
+                    false,
+                ).toJSON(),
+            );
+            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is already a member of this project" }));
+            return;
+        }
+
+        //add user to project
+        if (!this.isValidProjectRole(msg.role)) {
+            fail("Unknown project role: " + msg.role);
+            return;
+        }
+        // The same ceiling as setProjectMemberRole: managing members is a
+        // Researcher right, handing out project_admin is not, because that role
+        // additionally buys createInviteCodes. Checking only the rename path
+        // would leave this one as the way around it.
+        if (
+            msg.role === ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
+            !this.isProjectAdminOrSysAdmin(project, user)
+        ) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " tried to add " +
+                    msg.username +
+                    " to project " +
+                    msg.projectId +
+                    " as project admin without holding that role",
+                "warning",
+            );
+            fail("Only a project admin can add a member as project admin");
+            return;
+        }
+
         //get user info
         const User = this.mongoose.model("User");
         let userInfo = await User.findOne({ username: msg.username }).select(
@@ -2346,51 +2407,6 @@ class ApiServer {
             return;
         }
 
-        //check if user is already a member
-        let existingMember = project.members.find(
-            (m) => m.username == msg.username,
-        );
-        if (existingMember) {
-            ws.send(
-                new WebSocketMessage(
-                    msg.requestId,
-                    msg.cmd,
-                    { result: false },
-                    "User is already a member of this project",
-                    "end",
-                    false,
-                ).toJSON(),
-            );
-            //ws.send(JSON.stringify({ type: "cmd-result", requestId: msg.requestId, progress: 'end', cmd: msg.cmd, result: false, message: "User is already a member of this project" }));
-            return;
-        }
-
-        //add user to project
-        if (!this.isValidProjectRole(msg.role)) {
-            fail("Unknown project role: " + msg.role);
-            return;
-        }
-        // The same ceiling as setProjectMemberRole: managing members is a
-        // Researcher right, handing out project_admin is not, because that role
-        // additionally buys createInviteCodes. Checking only the rename path
-        // would leave this one as the way around it.
-        if (
-            msg.role === ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
-            !this.isProjectAdminOrSysAdmin(project, user)
-        ) {
-            this.app.addLog(
-                "User " +
-                    user.username +
-                    " tried to add " +
-                    msg.username +
-                    " to project " +
-                    msg.projectId +
-                    " as project admin without holding that role",
-                "warning",
-            );
-            fail("Only a project admin can add a member as project admin");
-            return;
-        }
         const newMemberRole = msg.role;
         project.members.push({
             username: msg.username,
