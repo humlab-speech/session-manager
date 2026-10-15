@@ -145,7 +145,10 @@ test("saveSessionsMongo: a legitimate string id still deletes its SPR session", 
         sessions: [{ deleted: true, id: "s1" }],
     });
     await settle();
-    assert.deepStrictEqual(calls[0], ["sessions", { sessionId: "s1" }]);
+    assert.deepStrictEqual(calls[0], [
+        "sessions",
+        { sessionId: "s1", project: "p1" },
+    ]);
     assert.strictEqual(list.length, 0, "the real session is deleted");
     assert.ok(writes.length > 0);
     assert.strictEqual(mongoProject.sessions.length, 0);

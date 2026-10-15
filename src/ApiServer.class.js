@@ -562,7 +562,6 @@ class ApiServer {
     startServer() {
         this.httpServer = http.createServer(this.expressApp);
         this.httpServer.on("request", (req, res) => {
-            console.log("request: " + req.url);
             if (req.url == "/api/importaudiofiles") {
                 //special case for this
                 return;
@@ -1365,7 +1364,7 @@ class ApiServer {
         }
 
         if (msg.cmd == "cleanupOrphanedSessions") {
-            this.cleanupOrphanedSessions(msg.data.projectId).then((result) => {
+            this.cleanupOrphanedSessions(msg.data.projectId, user).then((result) => {
                 ws.send(
                     new WebSocketMessage(
                         msg.requestId,
@@ -2437,6 +2436,26 @@ class ApiServer {
             return;
         }
 
+        // Managing members is a Researcher right; handing out the admin role is
+        // not, because project_admin additionally buys createInviteCodes — the
+        // ability to bring anyone into the project. Without this ceiling a
+        // Researcher could promote themselves and take the project over.
+        if (
+            msg.role === ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
+            !this.isProjectAdminOrSysAdmin(project, user)
+        ) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " tried to grant the project admin role in project " +
+                    msg.projectId +
+                    ", but does not hold it themselves",
+                "warning",
+            );
+            fail("Only a project admin can grant the project admin role");
+            return;
+        }
+
         const member = this.getProjectMember(project, msg.username);
         if (!member) {
             fail("User is not a member of this project");
@@ -3051,7 +3070,7 @@ class ApiServer {
         return health;
     }
 
-    async cleanupOrphanedSessions(projectId) {
+    async cleanupOrphanedSessions(projectId, user) {
         /**
          * Cleans up project consistency issues:
          * 1. Orphaned EmuDB session directories (on disk but not in MongoDB) — deleted
@@ -3073,6 +3092,23 @@ class ApiServer {
             const project = await Project.findOne({ id: projectId });
             if (!project) {
                 result.errors.push("Project not found");
+                return result;
+            }
+
+            // Removes session directories from disk and marks sessions deleted, so
+            // it takes the same rule as deleting a bundle (see deleteBundle): the
+            // project's own ProjectAdmin, or a SysAdmin. The dispatcher used to hand
+            // over nothing but the projectId the client typed, so any logged-in
+            // user could purge recordings out of any project. Checked here rather
+            // than at the call site: with no user there is nobody to trust.
+            if (!this.canDeleteProject(project, user)) {
+                this.app.addLog(
+                    `User ${user?.username} tried to clean up sessions in project ${projectId}, but is not authorized to delete sessions in it`,
+                    "warning",
+                );
+                result.errors.push(
+                    "User is not authorized to clean up sessions in this project",
+                );
                 return result;
             }
 
@@ -6923,12 +6959,22 @@ session-manager_1    | }
                     "debug",
                 );
 
+                // The SPR session may only be dropped when the id belongs to this
+                // project: the form's id is client-built and SPR sessions are keyed
+                // by sessionId alone, so without this an edit on project P could
+                // name a session of project Q.
+                const knownToProject = mongoProject.sessions.some(
+                    (session) => session.id === formSession.id,
+                );
+
                 mongoProject.sessions = mongoProject.sessions.filter(
                     (session) => session.id !== formSession.id,
                 );
                 mongoProject.markModified("sessions");
 
-                this.sprSessionDelete(formSession.id);
+                if (knownToProject) {
+                    this.sprSessionDelete(formSession.id, projectFormData.id);
+                }
 
                 continue;
             }
@@ -7041,7 +7087,7 @@ session-manager_1    | }
                 await this.sprSessionEnsure(projectFormData.id, formSession);
             } else if (wasRecording) {
                 // Switched off with nothing recorded: the link stops working.
-                await this.sprSessionDelete(formSession.id);
+                await this.sprSessionDelete(formSession.id, projectFormData.id);
             }
         }
         mongoProject.markModified("sessions");
@@ -7071,19 +7117,39 @@ session-manager_1    | }
         let db = await this.connectToMongo("wsrng");
         const exists = await db
             .collection("sessions")
-            .findOne({ sessionId: session.id }, { projection: { _id: 1 } });
+            .findOne(
+                { sessionId: session.id },
+                { projection: { _id: 1, project: 1 } },
+            );
+        if (exists && exists.project !== projectId) {
+            // A sessionId another project's SPR session already holds. Neither
+            // updating it (that project's recording configuration) nor inserting a
+            // second document under the same id is ours to do.
+            this.app.addLog(
+                "Leaving SPR session " +
+                    session.id +
+                    " alone: it belongs to project " +
+                    exists.project +
+                    ", not " +
+                    projectId,
+                "warning",
+            );
+            return;
+        }
         if (!exists) {
             await this.sprSessionCreate(projectId, session);
         }
-        await this.sprSessionUpdate(session);
+        await this.sprSessionUpdate(session, projectId);
     }
 
-    async sprSessionUpdate(session) {
+    async sprSessionUpdate(session, projectId) {
         this.app.addLog("Updating SPR session " + session.id);
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
         await collection.updateOne(
-            { sessionId: session.id },
+            // Scoped to the project like the delete below: {sessionId} alone
+            // matches whichever project happens to hold that id.
+            { sessionId: session.id, project: projectId },
             {
                 $set: {
                     script: session.sessionScript,
@@ -7097,11 +7163,13 @@ session-manager_1    | }
         );
     }
 
-    async sprSessionDelete(sessionId) {
+    async sprSessionDelete(sessionId, projectId) {
         this.app.addLog("Deleting SPR session " + sessionId);
         let db = await this.connectToMongo("wsrng");
         let collection = db.collection("sessions");
-        collection.deleteOne({ sessionId: sessionId });
+        // project comes from the server's own project id, never from the form, so
+        // a save on one project cannot delete another project's recording session.
+        collection.deleteOne({ sessionId: sessionId, project: projectId });
     }
 
     async convertAllInDirectoryToWav(projectId, dir) {
