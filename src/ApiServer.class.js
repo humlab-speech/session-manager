@@ -2366,9 +2366,32 @@ class ApiServer {
         }
 
         //add user to project
-        const newMemberRole = this.isValidProjectRole(msg.role)
-            ? msg.role
-            : ApiServer.PROJECT_ROLE_RESEARCHER;
+        if (!this.isValidProjectRole(msg.role)) {
+            fail("Unknown project role: " + msg.role);
+            return;
+        }
+        // The same ceiling as setProjectMemberRole: managing members is a
+        // Researcher right, handing out project_admin is not, because that role
+        // additionally buys createInviteCodes. Checking only the rename path
+        // would leave this one as the way around it.
+        if (
+            msg.role === ApiServer.PROJECT_ROLE_PROJECT_ADMIN &&
+            !this.isProjectAdminOrSysAdmin(project, user)
+        ) {
+            this.app.addLog(
+                "User " +
+                    user.username +
+                    " tried to add " +
+                    msg.username +
+                    " to project " +
+                    msg.projectId +
+                    " as project admin without holding that role",
+                "warning",
+            );
+            fail("Only a project admin can add a member as project admin");
+            return;
+        }
+        const newMemberRole = msg.role;
         project.members.push({
             username: msg.username,
             role: newMemberRole,
@@ -9295,7 +9318,15 @@ session-manager_1    | }
                 throw new Error(
                     step +
                         " failed: " +
-                        String(body.stderr || body.stdout || "").slice(-500),
+                        // An ApiResponse body is a plain string ("Unknown command:
+                        // x"), other steps hand back {stderr, stdout}. Reading only
+                        // the object fields made every string body an empty reason:
+                        // the member saw "Import failed" with nothing to act on.
+                        String(
+                            body.stderr ||
+                                body.stdout ||
+                                (typeof body === "string" ? body : ""),
+                        ).slice(-500),
                 );
             }
         };
