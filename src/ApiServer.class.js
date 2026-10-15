@@ -2751,19 +2751,32 @@ class ApiServer {
 
         //find via mongoose
         const BundleList = this.mongoose.model("BundleList");
-        let bundleListResult = await BundleList.findOne({
-            owner: owner,
-            projectId: project.id,
-        });
-
-        if (!bundleListResult) {
-            //insert a new bundlelist
-            bundleListResult = new BundleList({
+        let bundleListResult = null;
+        try {
+            // The read is inside the guard too: a rejection from findOne here
+            // had nothing above it to catch (the dispatcher only logs), so the
+            // process died with no frame sent and the dialog waited forever.
+            bundleListResult = await BundleList.findOne({
                 owner: owner,
                 projectId: project.id,
-                bundles: [],
             });
-            bundleListResult.save();
+            if (!bundleListResult) {
+                //insert a new bundlelist
+                bundleListResult = new BundleList({
+                    owner: owner,
+                    projectId: project.id,
+                    bundles: [],
+                });
+                await bundleListResult.save();
+            }
+        } catch (error) {
+            this.app.addLog("Bundle list lookup failed: " + error.message, "error");
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "The bundle list could not be loaded",
+            );
+            return;
         }
 
         ws.send(
@@ -2803,8 +2816,20 @@ class ApiServer {
             entries.push({ owner: owner, bundles: bundleListDef?.bundles });
         }
 
-        for (const e of entries) {
-            await this._saveBundleLists(e.owner, project.id, e.bundles);
+        try {
+            for (const e of entries) {
+                await this._saveBundleLists(e.owner, project.id, e.bundles);
+            }
+        } catch (error) {
+            this.app.addLog(
+                "Could not save the bundle list: " + error.message, "error"
+            );
+            this.sendAdminCommandError(
+                ws,
+                msg,
+                "The bundle list could not be saved",
+            );
+            return;
         }
 
         ws.send(
@@ -6334,6 +6359,45 @@ session-manager_1    | }
                 message: "Initializing project directory",
             }),
         );
+
+        //create a bundlelist for the user creating the project, from the files actually uploaded
+        // NOTE: emuR's import_mediaFiles() replaces spaces with underscores in filenames/bundle names,
+        // so we must apply the same sanitization here so MongoDB names match the files on disk.
+        let bundles = [];
+        projectFormData.sessions.forEach((session) => {
+            (uploadsBySession.get(session.id) || []).forEach((file) => {
+                let sanitizedFileName = file.name.replace(/ /g, "_");
+                let bundleName = sanitizedFileName.replace(/\.[^/.]+$/, "");
+                bundles.push({
+                    comment: "",
+                    fileName: sanitizedFileName,
+                    finishedEditing: session.sessionId,
+                    name: bundleName,
+                    session: session.name,
+                });
+            });
+        });
+
+        try {
+            await this._saveBundleLists(
+                user.username,
+                projectFormData.id,
+                bundles,
+            );
+        } catch (error) {
+            // Answering "Building project directory" and then continuing would
+            // leave a project whose owner has no bundle list at all.
+            this.app.addLog(
+                "Could not store the initial bundle list: " + error.message,
+                "error",
+            );
+            this.sendProjectSaveFailure(
+                ws,
+                msg,
+                "The project could not be created",
+            );
+            return;
+        }
         if (!(await this.initProjectDirectory(user, projectFormData))) {
             this.app.addLog("Failed initializing project directory", "warn");
         }
@@ -6373,8 +6437,23 @@ session-manager_1    | }
             spokenLanguage: projectWideMetadata.spokenLanguage,
             recordingDevice: projectWideMetadata.recordingDevice,
         });
-
-        mongoProject.save();
+        try {
+            // Unawaited, a rejected write here was invisible: the create went
+            // on with the project's own details unwritten and the rejection
+            // surfaced after the client had been answered.
+            await mongoProject.save();
+        } catch (error) {
+            this.app.addLog(
+                "Could not store the project details: " + error.message,
+                "error",
+            );
+            this.sendProjectSaveFailure(
+                ws,
+                msg,
+                "The project could not be finished - remove it and try again",
+            );
+            return;
+        }
 
         await this.writeProjectMetadataFile(
             projectFormData.id,
@@ -6384,25 +6463,6 @@ session-manager_1    | }
 
         await this.saveSessionsMongo(projectFormData, uploadsBySession);
 
-        //create a bundlelist for the user creating the project, from the files actually uploaded
-        // NOTE: emuR's import_mediaFiles() replaces spaces with underscores in filenames/bundle names,
-        // so we must apply the same sanitization here so MongoDB names match the files on disk.
-        let bundles = [];
-        projectFormData.sessions.forEach((session) => {
-            (uploadsBySession.get(session.id) || []).forEach((file) => {
-                let sanitizedFileName = file.name.replace(/ /g, "_");
-                let bundleName = sanitizedFileName.replace(/\.[^/.]+$/, "");
-                bundles.push({
-                    comment: "",
-                    fileName: sanitizedFileName,
-                    finishedEditing: session.sessionId,
-                    name: bundleName,
-                    session: session.name,
-                });
-            });
-        });
-
-        this._saveBundleLists(user.username, projectFormData.id, bundles);
 
         ws.send(
             JSON.stringify({
@@ -6461,7 +6521,10 @@ session-manager_1    | }
                 bundles: bundles,
             });
         }
-        bundleList.save();
+        // Awaited: unawaited, a rejected write was invisible here, so every
+        // caller answered "saved" and the rejection surfaced as an unhandled
+        // error in the log instead.
+        await bundleList.save();
     }
 
     async saveProject(ws, user, msg) {
@@ -9397,8 +9460,16 @@ session-manager_1    | }
         try {
             this.ensureReplacedRecordingsIgnored(repoDir);
             const git = await simpleGit(repoDir);
-            await git.addConfig("user.name", "VISP system");
-            await git.addConfig("user.email", "system@visp.local");
+            // Identity for this one commit, through the environment. addConfig
+            // wrote it into the project's own .git/config, where it stayed
+            // after this call: the user's checkout kept committing as
+            // "VISP system" long after the recordings were replaced.
+            git.env({
+                GIT_AUTHOR_NAME: "VISP system",
+                GIT_AUTHOR_EMAIL: "system@visp.local",
+                GIT_COMMITTER_NAME: "VISP system",
+                GIT_COMMITTER_EMAIL: "system@visp.local",
+            });
             await this.addFilesToGit(git, projectId);
             await git.commit(
                 "System commit before replacing imported recordings",
