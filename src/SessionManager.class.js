@@ -408,12 +408,18 @@ class SessionManager {
         return requesterEppn === ownerEppn;
     }
 
+    // The proxied request line carries the session access code as ?token= (Jupyter's
+    // password is that same code), so only the path ever goes into a log.
+    requestPath(req) {
+        return String(req.url).split("?")[0];
+    }
+
     routeToApp(req, res = null, socket = null, ws = false, head = null) {
         let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
         if (sessionAccessCode === false) {
             this.app.addLog(
                 "Couldn't perform routing to app (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") because we couldn't get a sessionAccessCode from the request! (1)",
                 "warn",
             );
@@ -437,7 +443,7 @@ class SessionManager {
                 "Denied routing to session " +
                     sessionAccessCode +
                     ": requester is not the session owner (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") (1)",
                 "warn",
             );
@@ -447,7 +453,7 @@ class SessionManager {
             }
             return false;
         }
-        //this.app.addLog("Route-to-app - request: "+req.url, "debug");
+        //this.app.addLog("Route-to-app - request: "+this.requestPath(req), "debug");
         sess.proxyServer.web(req, res);
     }
 
@@ -456,7 +462,7 @@ class SessionManager {
         if (sessionAccessCode === false) {
             this.app.addLog(
                 "Couldn't perform routing to app (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") because we couldn't get a sessionAccessCode from the request! (2)",
                 "warn",
             );
@@ -480,7 +486,7 @@ class SessionManager {
                 "Denied ws routing to session " +
                     sessionAccessCode +
                     ": requester is not the session owner (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") (2)",
                 "warn",
             );
@@ -488,7 +494,7 @@ class SessionManager {
             return false;
         }
 
-        this.app.addLog("Route-to-app ws - request: " + req.url, "debug");
+        this.app.addLog("Route-to-app ws - request: " + this.requestPath(req), "debug");
 
         //socket.on('message', message => this.addLog("routeToAppWs - ws msg: "+message, "debug"));
 
