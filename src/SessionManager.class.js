@@ -259,7 +259,7 @@ class SessionManager {
                     ) {
                         this.app.addLog(
                             "refreshSessions: Skipping recently created session " +
-                                session.accessCode +
+                                this.codeRef(session.accessCode) +
                                 " (created " +
                                 (Date.now() - session.createdAt) +
                                 "ms ago)",
@@ -271,7 +271,7 @@ class SessionManager {
                     if (session.shortDockerContainerId === null) {
                         this.app.addLog(
                             "refreshSessions: Skipping session " +
-                                session.accessCode +
+                                this.codeRef(session.accessCode) +
                                 " - container not yet created",
                             "debug",
                         );
@@ -285,7 +285,7 @@ class SessionManager {
                     ) {
                         this.app.addLog(
                             "Session " +
-                                session.accessCode +
+                                this.codeRef(session.accessCode) +
                                 " (container " +
                                 session.shortDockerContainerId +
                                 ") not found in docker daemon, removing",
@@ -310,7 +310,7 @@ class SessionManager {
                         if (state === "exited" || state === "dead") {
                             this.app.addLog(
                                 "Session " +
-                                    session.accessCode +
+                                    this.codeRef(session.accessCode) +
                                     " (container " +
                                     session.shortDockerContainerId +
                                     ") is in state " +
@@ -325,7 +325,7 @@ class SessionManager {
 
                     this.app.addLog(
                         "Session " +
-                            session.accessCode +
+                            this.codeRef(session.accessCode) +
                             " (container " +
                             session.shortDockerContainerId +
                             ") found and running",
@@ -414,6 +414,28 @@ class SessionManager {
         return String(req.url).split("?")[0];
     }
 
+    /**
+     * The access code is a bearer credential (see JupyterSession: it is also
+     * JUPYTER_TOKEN), so it must not be copyable out of a log. Log lines still
+     * need something to correlate by, so they get a short stable reference.
+     */
+    codeRef(code) {
+        return "#code" + String(code === undefined ? "" : code).slice(0, 6);
+    }
+
+    /**
+     * What `this.sessions` looks like when it is about to be logged: the whole
+     * map used to go in, access codes and all, at the default log level.
+     */
+    sessionSummaries() {
+        return this.sessions.map((s) => ({
+            projectId: s.project?.id,
+            username: s.user?.username,
+            type: s.hsApp,
+            codeRef: this.codeRef(s.accessCode),
+        }));
+    }
+
     routeToApp(req, res = null, socket = null, ws = false, head = null) {
         let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
         if (sessionAccessCode === false) {
@@ -430,18 +452,18 @@ class SessionManager {
         if (sess === false) {
             this.app.addLog(
                 "Couldn't find a container session with code " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     " (1)",
                 "warn",
             );
-            this.app.addLog(this.sessions);
+            this.app.addLog(this.sessionSummaries());
             return false;
         }
 
         if (!this.isRequestAuthorizedForSession(req, sess)) {
             this.app.addLog(
                 "Denied routing to session " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     ": requester is not the session owner (" +
                     this.requestPath(req) +
                     ") (1)",
@@ -473,18 +495,18 @@ class SessionManager {
         if (sess === false) {
             this.app.addLog(
                 "Couldn't find a container session with code " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     " (2)",
                 "warn",
             );
-            this.app.addLog(this.sessions);
+            this.app.addLog(this.sessionSummaries());
             return false;
         }
 
         if (!this.isRequestAuthorizedForSession(req, sess)) {
             this.app.addLog(
                 "Denied ws routing to session " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     ": requester is not the session owner (" +
                     this.requestPath(req) +
                     ") (2)",

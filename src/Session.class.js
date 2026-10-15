@@ -1096,7 +1096,9 @@ class Session {
 
         this.proxyServer.on("proxyReqWs", (_err, req) => {
             this.app.addLog("Session proxy received ws request!", "debug");
-            this.app.addLog(req.url);
+            // The proxied URL is /?token=<access code> for app.* sessions; the
+            // code is a bearer credential, so only the path belongs in a log.
+            this.app.addLog("Session proxy ws: " + String(req.url).split("?")[0]);
         });
 
         this.proxyServer.on("upgrade", function () {
@@ -1195,7 +1197,10 @@ class Session {
     }
 
     async delete() {
-        this.app.addLog("Shuttting down container session " + this.accessCode);
+        this.app.addLog(
+            "Shuttting down container session #" +
+                String(this.accessCode).slice(0, 6),
+        );
 
         //This will stop new connections but not close existing ones
         try {
