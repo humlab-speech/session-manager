@@ -7000,7 +7000,13 @@ session-manager_1    | }
      * participant would record over takes belonging to other prompts, and importing
      * that take replaces the bundle with everything annotated in it.
      *
-     * @returns {Promise<string[]>} one message per session that would be re-pointed
+     * A script missing from the payload is refused too, not repaired in silence: the
+     * write below is unconditional, so an omitted field would clear the stored script
+     * in mongo and in the SPR session and leave item codes that no longer match the
+     * takes. A disabled form control drops its value from the group's value, which is
+     * how an omission arrives from the browser.
+     *
+     * @returns {Promise<string[]>} one message per session whose script would be lost
      */
     async validateSessionScriptChanges(projectFormData, mongoProject) {
         const errors = [];
@@ -7010,7 +7016,9 @@ session-manager_1    | }
                 : null;
         }
         for (const formSession of projectFormData.sessions || []) {
-            if (formSession.new || !formSession.sessionScript) {
+            // New sessions have nothing to lose, and a deletion is gated on its own
+            // and takes the recordings with it.
+            if (formSession.new || formSession.deleted) {
                 continue;
             }
             const storedSession = mongoProject?.sessions?.find(
@@ -7030,6 +7038,16 @@ session-manager_1    | }
             const storedScript =
                 storedSession.sessionScript ||
                 (await this.fetchSprSession(formSession.id))?.script;
+            if (!formSession.sessionScript) {
+                if (storedScript) {
+                    errors.push(
+                        `"${formSession.name || storedSession.name}" arrived without its ` +
+                            "recording script while it has recordings made with one. " +
+                            "Reload this page and save again",
+                    );
+                }
+                continue;
+            }
             if (storedScript && storedScript != formSession.sessionScript) {
                 errors.push(
                     '"' +
