@@ -44,6 +44,8 @@ const {
     safePathComponent,
     safeJoinedPath,
     safeMountSource,
+    readRegularTree,
+    NonRegularFileError,
 } = require("./pathSecurity");
 
 // How young a .git/index.lock must be to be treated as somebody's running git
@@ -5855,7 +5857,10 @@ class ApiServer {
         safePathComponent(session.name, "sessionName");
         safePathComponent(fileBaseName, "fileName");
         let repoBundlePath = safeJoinedPath(
-            "/repositories",
+            // A property rather than an inlined literal so the guard above can
+            // be tested against a temp tree: a deployed box has a real
+            // /repositories full of real projects in it.
+            this.projectReposRoot || "/repositories",
             project.id,
             "Data",
             "VISP_emuDB",
@@ -5891,8 +5896,40 @@ class ApiServer {
         // Create an instance of AdmZip for in-memory zipping
         let zip = new AdmZip();
 
-        // Add the directory to the zip
-        zip.addLocalFolder(repoBundlePath);
+        // Add the directory to the zip - through readRegularTree, never through
+        // adm-zip's own walk. This directory lives in the project repository,
+        // which is bind-mounted read-write into the members' own session
+        // containers, so a member can put "take.wav -> /etc/passwd" in a bundle
+        // they are entitled to download; addLocalFolder uses statSync and
+        // readFileSync and would archive the link's TARGET CONTENT and hand it
+        // back base64 under plain membership authz - across every other project
+        // and every staged upload the session-manager container mounts. A
+        // pre-scan instead of this reader would be raced by whoever can edit the
+        // directory, which is the same person who would plant the link.
+        try {
+            for (const file of readRegularTree(repoBundlePath)) {
+                zip.addFile(file.name, file.data);
+            }
+        } catch (err) {
+            if (!(err instanceof NonRegularFileError)) {
+                throw err;
+            }
+            this.app.addLog(
+                "Refusing to zip bundle " + repoBundlePath + ": " + err.message,
+                "error",
+            );
+            ws.send(
+                JSON.stringify({
+                    type: "cmd-result",
+                    cmd: "downloadBundle",
+                    progress: "end",
+                    result: false,
+                    message: "The bundle could not be zipped: " + err.message,
+                    requestId: msg.requestId,
+                }),
+            );
+            return;
+        }
 
         // Get the zip file data as a buffer (in-memory, no disk write)
         let zipBuffer = zip.toBuffer();
