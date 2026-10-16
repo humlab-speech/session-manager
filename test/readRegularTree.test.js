@@ -87,3 +87,54 @@ test(
     fs.rmSync(root, { recursive: true, force: true });
     }
 );
+
+test("a subdirectory swapped for a link after the listing is refused", () => {
+    // The race the path-based walk could not close: the listing sees `sub` as
+    // a real directory, and between that listing and the walk entering it the
+    // member renames it away and plants `sub -> outside`. Deterministic here:
+    // the swap happens inside the very first readdir, i.e. exactly in the
+    // window the race opens.
+    const root = tree({ "sub/real.wav": "REAL" });
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+    fs.writeFileSync(path.join(outside, "secret.txt"), "OTHER PROJECT DATA");
+    const realSub = path.join(root, "sub");
+    const originalReaddir = fs.readdirSync;
+    let swapped = false;
+    fs.readdirSync = function (p, opts) {
+        const entries = originalReaddir(p, opts);
+        if (!swapped) {
+            swapped = true;
+            fs.renameSync(realSub, realSub + ".gone");
+            fs.symlinkSync(outside, realSub);
+        }
+        return entries;
+    };
+    try {
+        assert.throws(
+            () => readRegularTree(root),
+            (err) => err instanceof NonRegularFileError && /sub/.test(err.message),
+        );
+    } finally {
+        fs.readdirSync = originalReaddir;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test("a symlink in the path above the root is refused", () => {
+    // lstat on the root alone cannot see this: <parent>/link is a symlink to
+    // another project's data, and the bundle sits "below" it. An fd-walk
+    // anchored at "/" opens `link` through its parent's descriptor with
+    // O_NOFOLLOW and refuses it there.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+    fs.mkdirSync(path.join(outside, "bundle"));
+    fs.writeFileSync(path.join(outside, "bundle", "ok.wav"), "OTHER PROJECT DATA");
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "regular-tree-"));
+    fs.symlinkSync(outside, path.join(parent, "link"));
+    assert.throws(
+        () => readRegularTree(path.join(parent, "link", "bundle")),
+        (err) => err instanceof NonRegularFileError && /link/.test(err.message),
+    );
+    fs.rmSync(parent, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+});

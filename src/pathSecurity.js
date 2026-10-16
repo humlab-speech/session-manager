@@ -116,60 +116,115 @@ class NonRegularFileError extends Error {
  * This is a reader rather than a check-then-act scan on purpose: the directory
  * belongs to the person who would plant the link, so anything that lists the
  * tree and then reads it in a second pass can be raced by that person simply
- * keeping `ln -sf` running. Here the type comes from the directory listing, and
- * the read itself goes through O_NOFOLLOW on the descriptor, so a link swapped
- * in afterwards is refused at open() instead of being followed.
+ * keeping `ln -sf` running. Every directory is therefore pinned by a
+ * descriptor: the walk is anchored at "/" and each component - the path to the
+ * root, every subdirectory, every file - is opened through
+ * /proc/self/fd/<dirfd>/<name> with O_NOFOLLOW, so no name is ever
+ * re-resolved from the user-writable filesystem. A symlink swapped in at any
+ * position is refused with ELOOP at the failing component, and renaming or
+ * replacing a directory after its listing cannot redirect the walk into the
+ * replacement: the dirfd still refers to the original directory.
+ * Requires /proc/self/fd (Linux).
  *
- * @param {string} root directory to read (a link at root is refused)
+ * @param {string} root absolute directory to read (a link anywhere in the
+ *                      path to it, or at it, is refused)
  * @returns {Array<{name: string, data: Buffer}>} names are root-relative, '/'-joined
- * @throws {NonRegularFileError} for the first entry that is not a plain file
+ * @throws {NonRegularFileError} for the first path that is not a plain directory/file
  */
 function readRegularTree(root) {
-    // The root is listed by readdirSync, which follows it: without this a
-    // member could name the bundle directory itself as a link and have the
-    // whole target tree walked.
-    if (!fs.lstatSync(root).isDirectory()) {
+    if (!path.isAbsolute(root)) {
         throw new NonRegularFileError(root);
     }
+
+    const openDir = (parentFd, comp) =>
+        fs.openSync(
+            `/proc/self/fd/${parentFd}/${comp}`,
+            fs.constants.O_RDONLY |
+                fs.constants.O_DIRECTORY |
+                fs.constants.O_NOFOLLOW,
+        );
+
+    // Anchor at "/": every component of `root` is opened through the previous
+    // one, so a link above the root - e.g. a swapped session directory - is
+    // refused here, not followed.
+    let rootFd;
+    try {
+        rootFd = fs.openSync("/", fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+        for (const comp of root.split("/").filter((c) => c.length > 0)) {
+            const child = openDir(rootFd, comp);
+            fs.closeSync(rootFd);
+            rootFd = child;
+        }
+    } catch (err) {
+        if (rootFd !== undefined) {
+            fs.closeSync(rootFd);
+        }
+        throw new NonRegularFileError(root);
+    }
+
     const files = [];
-    const stack = [{ dir: root, prefix: "" }];
-    while (stack.length > 0) {
-        const { dir, prefix } = stack.pop();
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const name = prefix ? prefix + "/" + entry.name : entry.name;
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                stack.push({ dir: full, prefix: name });
-                continue;
-            }
-            if (!entry.isFile()) {
-                // Symlinks, FIFOs, sockets, devices - and anything that
-                // changed shape between listing and this iteration.
-                throw new NonRegularFileError(name);
-            }
-            let fd;
+    const stack = [{ dirFd: rootFd, prefix: "" }];
+    try {
+        while (stack.length > 0) {
+            const { dirFd, prefix } = stack.pop();
             try {
-                fd = fs.openSync(
-                    full,
-                    fs.constants.O_RDONLY |
-                        fs.constants.O_NOFOLLOW |
-                        fs.constants.O_NONBLOCK,
-                );
-            } catch (err) {
-                // ELOOP: swapped to a link after the listing. Anything else
-                // (EACCES, ENOENT, a socket) is a refusal too - this path is
-                // read because someone asked for it, not out of curiosity.
-                throw new NonRegularFileError(name);
-            }
-            try {
-                if (!fs.fstatSync(fd).isFile()) {
-                    throw new NonRegularFileError(name);
+                // Listing a pinned fd: this is the original directory, even
+                // if it has been renamed under the attacker's hands.
+                const entries = fs.readdirSync(`/proc/self/fd/${dirFd}`, {
+                    withFileTypes: true,
+                });
+                for (const entry of entries) {
+                    const name = prefix ? prefix + "/" + entry.name : entry.name;
+                    if (entry.isDirectory()) {
+                        let childFd;
+                        try {
+                            childFd = openDir(dirFd, entry.name);
+                        } catch (err) {
+                            // ELOOP: swapped to a link after the listing.
+                            // ENOENT: renamed away. Both refuse, fail-closed.
+                            throw new NonRegularFileError(name);
+                        }
+                        stack.push({ dirFd: childFd, prefix: name });
+                        continue;
+                    }
+                    if (!entry.isFile()) {
+                        // Symlinks, FIFOs, sockets, devices - and anything
+                        // that changed shape between listing and this entry.
+                        throw new NonRegularFileError(name);
+                    }
+                    let fd;
+                    try {
+                        fd = fs.openSync(
+                            `/proc/self/fd/${dirFd}/${entry.name}`,
+                            fs.constants.O_RDONLY |
+                                fs.constants.O_NOFOLLOW |
+                                fs.constants.O_NONBLOCK,
+                        );
+                    } catch (err) {
+                        // ELOOP: swapped to a link after the listing. Anything
+                        // else (EACCES, ENOENT, a socket) is a refusal too -
+                        // this path is read because someone asked for it, not
+                        // out of curiosity.
+                        throw new NonRegularFileError(name);
+                    }
+                    try {
+                        if (!fs.fstatSync(fd).isFile()) {
+                            throw new NonRegularFileError(name);
+                        }
+                        files.push({ name, data: fs.readFileSync(fd) });
+                    } finally {
+                        fs.closeSync(fd);
+                    }
                 }
-                files.push({ name, data: fs.readFileSync(fd) });
             } finally {
-                fs.closeSync(fd);
+                fs.closeSync(dirFd);
             }
         }
+    } catch (err) {
+        while (stack.length > 0) {
+            fs.closeSync(stack.pop().dirFd);
+        }
+        throw err;
     }
     return files;
 }
