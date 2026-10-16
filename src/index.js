@@ -8,7 +8,6 @@ const colors = require('colors');
 
 class Application {
   constructor() {
-    this.gitlabAddress = process.env.GITLAB_ADDRESS;
     this.hsApiAccessToken = process.env.HS_API_ACCESS_TOKEN;
     this.absRootPath = process.env.ABS_ROOT_PATH;
     this.logLevel = process.env.LOG_LEVEL.toUpperCase();
@@ -93,6 +92,27 @@ class Application {
 }
 
 let application = null;
+
+// The websocket dispatcher fires off its async command handlers without
+// awaiting them (ApiServer.handleIncomingWebSocketMessage), so a rejection in
+// any one of them would otherwise be an unhandled rejection - fatal under the
+// Node >=15 default, i.e. one bad command would take the server down for every
+// user. Log it and stay up.
+process.on('unhandledRejection', (reason) => {
+  const msg = 'Unhandled rejection: ' + (reason && reason.stack ? reason.stack : reason);
+  // The safety net must not be fatal itself: addLog is an appendFileSync onto a host
+  // bind mount, so a full or read-only disk turns logging the last error into an
+  // uncaughtException inside the handler that exists to keep the process alive.
+  try {
+    if (application) {
+      application.addLog(msg, 'error');
+    } else {
+      console.error(msg);
+    }
+  } catch (logError) {
+    console.error(msg + ' (and logging it failed: ' + logError + ')');
+  }
+});
 
 process.on('SIGINT', () => {
   console.log("SIGINT received");

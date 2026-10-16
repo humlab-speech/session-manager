@@ -118,18 +118,26 @@ class SessionManager {
         return false;
     }
 
-    getContainerSessionsOverviewByProjectId(projectId) {
+    // Overview of a project's running containers for the dashboard.
+    // requesterUsername is the user the answer will be sent to: the access code
+    // is the bearer credential routeToApp() proxies into the container on, so it
+    // is returned for the requester's own sessions only. Other members' entries
+    // keep username/type, which is all the UI needs to disable an occupied app.
+    getContainerSessionsOverviewByProjectId(projectId, requesterUsername) {
         this.refreshSessions();
 
         let sessions = [];
         this.sessions.forEach((session) => {
             if (session.project.id == projectId) {
-                sessions.push({
+                let entry = {
                     projectId: session.project.id,
                     username: session.user.username,
                     type: session.hsApp,
-                    sessionAccessCode: session.accessCode,
-                });
+                };
+                if (session.user.username === requesterUsername) {
+                    entry.sessionAccessCode = session.accessCode;
+                }
+                sessions.push(entry);
             }
         });
         return sessions;
@@ -251,7 +259,7 @@ class SessionManager {
                     ) {
                         this.app.addLog(
                             "refreshSessions: Skipping recently created session " +
-                                session.accessCode +
+                                this.codeRef(session.accessCode) +
                                 " (created " +
                                 (Date.now() - session.createdAt) +
                                 "ms ago)",
@@ -263,7 +271,7 @@ class SessionManager {
                     if (session.shortDockerContainerId === null) {
                         this.app.addLog(
                             "refreshSessions: Skipping session " +
-                                session.accessCode +
+                                this.codeRef(session.accessCode) +
                                 " - container not yet created",
                             "debug",
                         );
@@ -277,7 +285,7 @@ class SessionManager {
                     ) {
                         this.app.addLog(
                             "Session " +
-                                session.accessCode +
+                                this.codeRef(session.accessCode) +
                                 " (container " +
                                 session.shortDockerContainerId +
                                 ") not found in docker daemon, removing",
@@ -302,7 +310,7 @@ class SessionManager {
                         if (state === "exited" || state === "dead") {
                             this.app.addLog(
                                 "Session " +
-                                    session.accessCode +
+                                    this.codeRef(session.accessCode) +
                                     " (container " +
                                     session.shortDockerContainerId +
                                     ") is in state " +
@@ -317,7 +325,7 @@ class SessionManager {
 
                     this.app.addLog(
                         "Session " +
-                            session.accessCode +
+                            this.codeRef(session.accessCode) +
                             " (container " +
                             session.shortDockerContainerId +
                             ") found and running",
@@ -400,12 +408,40 @@ class SessionManager {
         return requesterEppn === ownerEppn;
     }
 
+    // The proxied request line carries the session access code as ?token= (Jupyter's
+    // password is that same code), so only the path ever goes into a log.
+    requestPath(req) {
+        return String(req.url).split("?")[0];
+    }
+
+    /**
+     * The access code is a bearer credential (see JupyterSession: it is also
+     * JUPYTER_TOKEN), so it must not be copyable out of a log. Log lines still
+     * need something to correlate by, so they get a short stable reference.
+     */
+    codeRef(code) {
+        return "#code" + String(code === undefined ? "" : code).slice(0, 6);
+    }
+
+    /**
+     * What `this.sessions` looks like when it is about to be logged: the whole
+     * map used to go in, access codes and all, at the default log level.
+     */
+    sessionSummaries() {
+        return this.sessions.map((s) => ({
+            projectId: s.project?.id,
+            username: s.user?.username,
+            type: s.hsApp,
+            codeRef: this.codeRef(s.accessCode),
+        }));
+    }
+
     routeToApp(req, res = null, socket = null, ws = false, head = null) {
         let sessionAccessCode = this.getSessionAccessCodeFromRequest(req);
         if (sessionAccessCode === false) {
             this.app.addLog(
                 "Couldn't perform routing to app (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") because we couldn't get a sessionAccessCode from the request! (1)",
                 "warn",
             );
@@ -416,20 +452,20 @@ class SessionManager {
         if (sess === false) {
             this.app.addLog(
                 "Couldn't find a container session with code " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     " (1)",
                 "warn",
             );
-            this.app.addLog(this.sessions);
+            this.app.addLog(this.sessionSummaries());
             return false;
         }
 
         if (!this.isRequestAuthorizedForSession(req, sess)) {
             this.app.addLog(
                 "Denied routing to session " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     ": requester is not the session owner (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") (1)",
                 "warn",
             );
@@ -439,7 +475,7 @@ class SessionManager {
             }
             return false;
         }
-        //this.app.addLog("Route-to-app - request: "+req.url, "debug");
+        //this.app.addLog("Route-to-app - request: "+this.requestPath(req), "debug");
         sess.proxyServer.web(req, res);
     }
 
@@ -448,7 +484,7 @@ class SessionManager {
         if (sessionAccessCode === false) {
             this.app.addLog(
                 "Couldn't perform routing to app (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") because we couldn't get a sessionAccessCode from the request! (2)",
                 "warn",
             );
@@ -459,20 +495,20 @@ class SessionManager {
         if (sess === false) {
             this.app.addLog(
                 "Couldn't find a container session with code " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     " (2)",
                 "warn",
             );
-            this.app.addLog(this.sessions);
+            this.app.addLog(this.sessionSummaries());
             return false;
         }
 
         if (!this.isRequestAuthorizedForSession(req, sess)) {
             this.app.addLog(
                 "Denied ws routing to session " +
-                    sessionAccessCode +
+                    this.codeRef(sessionAccessCode) +
                     ": requester is not the session owner (" +
-                    req.url +
+                    this.requestPath(req) +
                     ") (2)",
                 "warn",
             );
@@ -480,18 +516,12 @@ class SessionManager {
             return false;
         }
 
-        this.app.addLog("Route-to-app ws - request: " + req.url, "debug");
+        this.app.addLog("Route-to-app ws - request: " + this.requestPath(req), "debug");
 
         //socket.on('message', message => this.addLog("routeToAppWs - ws msg: "+message, "debug"));
 
         sess.proxyServer.ws(req, socket, head);
     }
-
-    /*
-    getSessionName(userId, projectId) {
-        return "rstudio-session-p"+projectId+"u"+userId;
-    }
-    */
 
     stopContainer(containerId) {}
 
@@ -591,7 +621,11 @@ class SessionManager {
         return new Promise((resolve, reject) => {
             let sess = this.getSessionByCode(sessionId);
             if (sess === false) {
-                reject("Could not find session " + sessionId);
+                reject("Could not find session " + this.codeRef(sessionId));
+                // Without this the promise settles and the lines below run on
+                // undefined; that TypeError is logged by the top-level handler,
+                // which is one more place the identifier ended up.
+                return;
             }
 
             sess.delete().then(() => {

@@ -1,11 +1,11 @@
 /**
  * Tests for pathSecurity.js — path traversal protection utilities.
  *
- * Run with:  node src/pathSecurity.test.js
+ * Run with:  node --test test/   (or node test/pathSecurity.test.js)
  * Exit code: 0 = all pass, 1 = failures
  */
 
-const { safePathComponent, safeJoinedPath, safeMountSource } = require("./pathSecurity");
+const { safePathComponent, safeJoinedPath, safeMountSource } = require("../src/pathSecurity");
 
 let passed = 0;
 let failed = 0;

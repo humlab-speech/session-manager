@@ -24,7 +24,7 @@ class Session {
         this.container = null;
         // In-container service identity (uid:gid). Used both to enforce the
         // spawn user and to anchor the rootless --userns=keep-id mapping so this
-        // UID maps to the host repository owner (johan, 1000:1000). Every write
+        // UID maps to the host repository owner (uid:gid 1000:1000). Every write
         // to a bind mount is then owned by that single repository identity,
         // regardless of which UID the in-container service runs as.
         // jovyan = 1000:100 in the jupyter/datascience base image.
@@ -422,7 +422,7 @@ class Session {
 
         const containerConfig = this.getContainerConfig();
         this.app.addLog(
-            `containerConfig: ${JSON.stringify(containerConfig)}`,
+            `containerConfig: ${this.logSafe(containerConfig)}`,
             "debug",
         );
 
@@ -455,7 +455,6 @@ class Session {
             // Security hardening: capability profiles per session type.
             // All sessions drop ALL capabilities and add back only what's needed.
             // - Jupyter: runs as jovyan (non-root), also used for operations tasks
-            // - VSCode: runs as non-root, caps mainly for entrypoint setup
             const securityProfiles = {
                 "localhost/visp-jupyter-session": {
                     capAdd: [
@@ -465,10 +464,6 @@ class Session {
                         "SETGID",
                         "SETUID",
                     ],
-                    pidsLimit: 512,
-                },
-                "localhost/visp-vscode-session": {
-                    capAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
                     pidsLimit: 512,
                 },
             };
@@ -493,9 +488,10 @@ class Session {
                 // upstream quay.io/jupyter/datascience-notebook base image.
                 user: this.containerUidGid,
                 // Rootless userns mapping: pin this container's service UID/GID to
-                // the host user that owns the bind-mounted repositories (johan,
-                // 1000:1000). Files the container writes to a mount are then owned
-                // by that single repository identity — no exec-as-root needed and
+                // the host user that owns the bind-mounted repositories (the
+                // deploying user, uid:gid 1000:1000). Files the container writes
+                // to a mount are then owned by that single repository identity —
+                // no exec-as-root needed and
                 // no foreign-owned (subuid) emuDB files. As a bonus this remaps
                 // container UID 0 away from the host repo owner onto a subuid, so a
                 // container-root escape lands on an unprivileged host id.
@@ -588,10 +584,7 @@ class Session {
                     hostSocketDir,
                 );
             }
-            this.app.addLog(
-                `libpodSpec: ${JSON.stringify(libpodSpec)}`,
-                "debug",
-            );
+            this.app.addLog(`libpodSpec: ${this.logSafe(libpodSpec)}`, "debug");
 
             const http = require("http");
 
@@ -707,6 +700,21 @@ class Session {
      * Helper to set up container log streaming to a file.
      * This logic was extracted from createContainer for clarity.
      */
+    /**
+     * JSON for a log line, with this session's credential replaced by its
+     * reference. The access code is embedded in Env (JUPYTER_TOKEN), in the
+     * visp.accessCode labels and in socket paths, so it is redacted by value
+     * rather than key by key: a new field that carries it cannot be forgotten.
+     */
+    logSafe(value) {
+        const code = String(this.accessCode ?? "");
+        if (!code) return JSON.stringify(value);
+        return JSON.stringify(value).replaceAll(
+            code,
+            this.app.sessMan.codeRef(code),
+        );
+    }
+
     setupLogStreaming() {
         try {
             const logsDir = "/session-manager/logs";
@@ -1100,7 +1108,9 @@ class Session {
 
         this.proxyServer.on("proxyReqWs", (_err, req) => {
             this.app.addLog("Session proxy received ws request!", "debug");
-            this.app.addLog(req.url);
+            // The proxied URL is /?token=<access code> for app.* sessions; the
+            // code is a bearer credential, so only the path belongs in a log.
+            this.app.addLog("Session proxy ws: " + String(req.url).split("?")[0]);
         });
 
         this.proxyServer.on("upgrade", function () {
@@ -1199,7 +1209,10 @@ class Session {
     }
 
     async delete() {
-        this.app.addLog("Shuttting down container session " + this.accessCode);
+        this.app.addLog(
+            "Shuttting down container session #" +
+                String(this.accessCode).slice(0, 6),
+        );
 
         //This will stop new connections but not close existing ones
         try {
