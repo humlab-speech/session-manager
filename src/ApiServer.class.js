@@ -6662,6 +6662,31 @@ session-manager_1    | }
             );
             return;
         }
+        // Deleting a session removes it from the project and drops its SPR
+        // session - the same class of act as deleting a stored bundle or the
+        // project itself, so it is gated the same way: ProjectAdmin/SysAdmin.
+        // Refused here, before prepareSessionUploads and before any save.
+        if ((projectFormData.sessions || []).some((s) => s.deleted)) {
+            const project = await this.fetchMongoProjectById(
+                projectFormData.id,
+            );
+            if (!project || !this.canDeleteProject(project, user)) {
+                this.app.addLog(
+                    "User " +
+                        (user && user.username) +
+                        " tried to delete a session in project " +
+                        projectFormData.id +
+                        " without project-delete rights",
+                    "warning",
+                );
+                this.sendProjectSaveFailure(
+                    ws,
+                    msg,
+                    "Only project admins can delete sessions",
+                );
+                return;
+            }
+        }
         const uploadsBySession = await this.prepareSessionUploads(
             ws,
             msg,
@@ -7071,6 +7096,23 @@ session-manager_1    | }
         let mongoProject = await this.mongoose
             .model("Project")
             .findOne({ id: projectFormData.id });
+
+        // Validate every session id before anything is written. Checked in
+        // the per-session loop below, that loop deletes as it walks: a bad id
+        // on a later session would otherwise arrive after an earlier deleted
+        // session's SPR record is already gone, leaving the project listing a
+        // session whose SPR session no longer exists. Same check, first pass.
+        for (const formSession of projectFormData.sessions) {
+            if (
+                formSession.id !== undefined &&
+                ApiServer.requireQueryString(formSession.id) === null
+            ) {
+                throw new Error(
+                    "Refused project save: session id must be a string, got " +
+                        JSON.stringify(formSession.id),
+                );
+            }
+        }
 
         for (let formSession of projectFormData.sessions) {
             // The id is client-built and reaches the raw SPR driver below
@@ -9311,9 +9353,6 @@ session-manager_1    | }
         return mongoProject;
     }
 
-    // Run createSessions.R (via container-agent) in a short-lived operations
-    // container, importing the takes under uploadPath into projectSession.
-    /**
     /**
      * Move a bundle directory that an import is about to replace out of the
      * project's EMU-DB and into <dataDir>/replaced-recordings/<session>/<utc>-<bundle>,
@@ -9361,6 +9400,8 @@ session-manager_1    | }
         return target;
     }
 
+    // Run createSessions.R (via container-agent) in a short-lived operations
+    // container, importing the takes under uploadPath into projectSession.
     async runSprImportContainer(project, projectSession, uploadPath) {
         const projectId = project.id;
         let volumes = [
