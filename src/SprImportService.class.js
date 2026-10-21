@@ -290,9 +290,11 @@ class SprImportService {
         const state = session.sprImport;
         // Cheap early outs before touching the database.
         if (uploads.length === 0) {
+            await this.retractPendingStamp(projectId, session, false);
             return;
         }
         if (state && state.fingerprint === fingerprintUploads(uploads)) {
+            await this.retractPendingStamp(projectId, session, true);
             return;
         }
 
@@ -365,6 +367,22 @@ class SprImportService {
                 });
                 break;
         }
+    }
+
+    // requestCheck stamps "pending" optimistically, before it can know whether
+    // anything will actually be imported. When an early out proves there is
+    // nothing to do - a replayed hint for an already-imported session, or a
+    // stray hint for a session with no uploads - take the stamp back, or the
+    // session stays "busy" forever: the client locks the recording script on
+    // pending, and the state lives in the database across restarts.
+    async retractPendingStamp(projectId, session, fingerprintMatches) {
+        if (session.sprImport?.status !== "pending") {
+            return;
+        }
+        await this.setImportState(projectId, session.id, {
+            status: fingerprintMatches ? "imported" : null,
+            updatedAt: new Date(),
+        });
     }
 
     // Drain the queue one item at a time. Imports of one project share its

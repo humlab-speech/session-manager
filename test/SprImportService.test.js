@@ -235,3 +235,88 @@ test("compares bundle audio by content, not by metadata", () => {
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });
+
+function evaluateFake(uploads, writes) {
+    return Object.assign(Object.create(SprImportService.prototype), {
+        app: { addLog: () => {} },
+        listUploads: () => uploads,
+        setImportState: (projectId, sessionId, fields) => {
+            writes.push({ projectId, sessionId, fields });
+            return Promise.resolve();
+        },
+    });
+}
+
+test("a replayed hint for an already-imported session takes the pending stamp back", async () => {
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const writes = [];
+    const session = {
+        id: "sessA",
+        sprImport: {
+            status: "pending",
+            fingerprint: fingerprintUploads(uploads),
+        },
+    };
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake(uploads, writes),
+        "pjTest",
+        session,
+    );
+    assert.strictEqual(
+        writes.length,
+        1,
+        "the stale stamp must be retracted exactly once",
+    );
+    assert.strictEqual(writes[0].fields.status, "imported");
+});
+
+test("a stray hint for a session with no uploads takes the pending stamp back", async () => {
+    const writes = [];
+    const session = {
+        id: "sessA",
+        sprImport: { status: "pending", updatedAt: new Date() },
+    };
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake([], writes),
+        "pjTest",
+        session,
+    );
+    assert.strictEqual(
+        writes.length,
+        1,
+        "the stray stamp must be retracted exactly once",
+    );
+    assert.strictEqual(
+        writes[0].fields.status,
+        null,
+        "with nothing imported there is no state to show",
+    );
+});
+
+test("early outs do not write for sessions without a pending stamp", async () => {
+    const writes = [];
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const imported = {
+        id: "sessA",
+        sprImport: {
+            status: "imported",
+            fingerprint: fingerprintUploads(uploads),
+        },
+    };
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake(uploads, writes),
+        "pjTest",
+        imported,
+    );
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake([], writes),
+        "pjTest",
+        { id: "sessB" },
+    );
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake([], writes),
+        "pjTest",
+        { id: "sessC", sprImport: { status: "failed" } },
+    );
+    assert.deepStrictEqual(writes, [], "the hot path must stay write-free");
+});
