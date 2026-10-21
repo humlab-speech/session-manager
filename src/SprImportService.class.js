@@ -184,6 +184,19 @@ class SprImportService {
     requestCheck(projectId, sessionId) {
         safePathComponent(projectId, "projectId");
         safePathComponent(sessionId, "sessionId");
+        // The takes are already on disk and will be imported once the quiet
+        // window passes, so the session should say so right away. Without this
+        // the dashboard stays silent through the whole queue window and the
+        // "queued for import" lock is only visible while an import executes.
+        this.setImportState(projectId, sessionId, {
+            status: "pending",
+            updatedAt: new Date(),
+        }).catch((err) =>
+            this.app.addLog(
+                "Could not mark SPR import pending: " + err.message,
+                "warning",
+            ),
+        );
         this.scheduleCheck(projectId, sessionId, Date.now() + QUIET_MS + 1000);
     }
 
