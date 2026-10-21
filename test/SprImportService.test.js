@@ -10,6 +10,50 @@ const {
     QUIET_MS,
     ABANDONED_MS,
 } = require("../src/SprImportService.class");
+const SprImportService = require("../src/SprImportService.class");
+
+test("queueing a check marks the session pending right away", () => {
+    const writes = [];
+    const scheduled = [];
+    const fake = {
+        app: { addLog: () => {} },
+        setImportState: (projectId, sessionId, fields) => {
+            writes.push({ projectId, sessionId, fields });
+            return Promise.resolve();
+        },
+        scheduleCheck: (projectId, sessionId, at) =>
+            scheduled.push({ projectId, sessionId, at }),
+    };
+    SprImportService.prototype.requestCheck.call(fake, "pjTest", "sessA");
+    assert.strictEqual(
+        writes.length,
+        1,
+        "requestCheck must stamp the session state",
+    );
+    assert.strictEqual(writes[0].fields.status, "pending");
+    assert.strictEqual(writes[0].projectId, "pjTest");
+    assert.strictEqual(writes[0].sessionId, "sessA");
+    assert.strictEqual(scheduled.length, 1, "the check still gets scheduled");
+});
+
+test("a failed pending stamp does not break the queueing or escape as a rejection", async () => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    const fake = {
+        app: { addLog: () => {} },
+        setImportState: () => Promise.reject(new Error("mongo down")),
+        scheduleCheck: () => {},
+    };
+    SprImportService.prototype.requestCheck.call(fake, "pjTest", "sessA");
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off("unhandledRejection", onRejection);
+    assert.deepStrictEqual(
+        rejections,
+        [],
+        "the stamp failure must be caught, not thrown or left unhandled",
+    );
+});
 
 const NOW = 1_800_000_000_000;
 
@@ -72,7 +116,10 @@ test("up to date when the uploads match the last import", () => {
     const uploads = [upload("prompt_1.wav", QUIET_MS * 3)];
     const d = decide({
         uploads,
-        sprImport: { status: "imported", fingerprint: fingerprintUploads(uploads) },
+        sprImport: {
+            status: "imported",
+            fingerprint: fingerprintUploads(uploads),
+        },
     });
     assert.strictEqual(d.action, "none");
 });
@@ -81,7 +128,10 @@ test("re-imports when a take is re-recorded after import", () => {
     const imported = [upload("prompt_1.wav", QUIET_MS * 10, 1000)];
     const d = decide({
         uploads: [upload("prompt_1.wav", QUIET_MS * 2, 1200)],
-        sprImport: { status: "imported", fingerprint: fingerprintUploads(imported) },
+        sprImport: {
+            status: "imported",
+            fingerprint: fingerprintUploads(imported),
+        },
     });
     assert.strictEqual(d.action, "enqueue");
 });
@@ -139,7 +189,8 @@ test("backs off after a failed import of the same uploads", () => {
     };
     assert.strictEqual(decide({ uploads, sprImport: failed }).action, "wait");
     assert.strictEqual(
-        decide({ uploads, sprImport: { ...failed, nextRetryAt: NOW - 1 } }).action,
+        decide({ uploads, sprImport: { ...failed, nextRetryAt: NOW - 1 } })
+            .action,
         "enqueue",
     );
     assert.strictEqual(
