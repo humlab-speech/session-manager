@@ -10,6 +10,50 @@ const {
     QUIET_MS,
     ABANDONED_MS,
 } = require("../src/SprImportService.class");
+const SprImportService = require("../src/SprImportService.class");
+
+test("queueing a check marks the session pending right away", () => {
+    const writes = [];
+    const scheduled = [];
+    const fake = {
+        app: { addLog: () => {} },
+        setImportState: (projectId, sessionId, fields) => {
+            writes.push({ projectId, sessionId, fields });
+            return Promise.resolve();
+        },
+        scheduleCheck: (projectId, sessionId, at) =>
+            scheduled.push({ projectId, sessionId, at }),
+    };
+    SprImportService.prototype.requestCheck.call(fake, "pjTest", "sessA");
+    assert.strictEqual(
+        writes.length,
+        1,
+        "requestCheck must stamp the session state",
+    );
+    assert.strictEqual(writes[0].fields.status, "pending");
+    assert.strictEqual(writes[0].projectId, "pjTest");
+    assert.strictEqual(writes[0].sessionId, "sessA");
+    assert.strictEqual(scheduled.length, 1, "the check still gets scheduled");
+});
+
+test("a failed pending stamp does not break the queueing or escape as a rejection", async () => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    const fake = {
+        app: { addLog: () => {} },
+        setImportState: () => Promise.reject(new Error("mongo down")),
+        scheduleCheck: () => {},
+    };
+    SprImportService.prototype.requestCheck.call(fake, "pjTest", "sessA");
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off("unhandledRejection", onRejection);
+    assert.deepStrictEqual(
+        rejections,
+        [],
+        "the stamp failure must be caught, not thrown or left unhandled",
+    );
+});
 
 const NOW = 1_800_000_000_000;
 
@@ -72,7 +116,10 @@ test("up to date when the uploads match the last import", () => {
     const uploads = [upload("prompt_1.wav", QUIET_MS * 3)];
     const d = decide({
         uploads,
-        sprImport: { status: "imported", fingerprint: fingerprintUploads(uploads) },
+        sprImport: {
+            status: "imported",
+            fingerprint: fingerprintUploads(uploads),
+        },
     });
     assert.strictEqual(d.action, "none");
 });
@@ -81,7 +128,10 @@ test("re-imports when a take is re-recorded after import", () => {
     const imported = [upload("prompt_1.wav", QUIET_MS * 10, 1000)];
     const d = decide({
         uploads: [upload("prompt_1.wav", QUIET_MS * 2, 1200)],
-        sprImport: { status: "imported", fingerprint: fingerprintUploads(imported) },
+        sprImport: {
+            status: "imported",
+            fingerprint: fingerprintUploads(imported),
+        },
     });
     assert.strictEqual(d.action, "enqueue");
 });
@@ -139,7 +189,8 @@ test("backs off after a failed import of the same uploads", () => {
     };
     assert.strictEqual(decide({ uploads, sprImport: failed }).action, "wait");
     assert.strictEqual(
-        decide({ uploads, sprImport: { ...failed, nextRetryAt: NOW - 1 } }).action,
+        decide({ uploads, sprImport: { ...failed, nextRetryAt: NOW - 1 } })
+            .action,
         "enqueue",
     );
     assert.strictEqual(
@@ -183,4 +234,89 @@ test("compares bundle audio by content, not by metadata", () => {
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+function evaluateFake(uploads, writes) {
+    return Object.assign(Object.create(SprImportService.prototype), {
+        app: { addLog: () => {} },
+        listUploads: () => uploads,
+        setImportState: (projectId, sessionId, fields) => {
+            writes.push({ projectId, sessionId, fields });
+            return Promise.resolve();
+        },
+    });
+}
+
+test("a replayed hint for an already-imported session takes the pending stamp back", async () => {
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const writes = [];
+    const session = {
+        id: "sessA",
+        sprImport: {
+            status: "pending",
+            fingerprint: fingerprintUploads(uploads),
+        },
+    };
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake(uploads, writes),
+        "pjTest",
+        session,
+    );
+    assert.strictEqual(
+        writes.length,
+        1,
+        "the stale stamp must be retracted exactly once",
+    );
+    assert.strictEqual(writes[0].fields.status, "imported");
+});
+
+test("a stray hint for a session with no uploads takes the pending stamp back", async () => {
+    const writes = [];
+    const session = {
+        id: "sessA",
+        sprImport: { status: "pending", updatedAt: new Date() },
+    };
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake([], writes),
+        "pjTest",
+        session,
+    );
+    assert.strictEqual(
+        writes.length,
+        1,
+        "the stray stamp must be retracted exactly once",
+    );
+    assert.strictEqual(
+        writes[0].fields.status,
+        null,
+        "with nothing imported there is no state to show",
+    );
+});
+
+test("early outs do not write for sessions without a pending stamp", async () => {
+    const writes = [];
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const imported = {
+        id: "sessA",
+        sprImport: {
+            status: "imported",
+            fingerprint: fingerprintUploads(uploads),
+        },
+    };
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake(uploads, writes),
+        "pjTest",
+        imported,
+    );
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake([], writes),
+        "pjTest",
+        { id: "sessB" },
+    );
+    await SprImportService.prototype.evaluate.call(
+        evaluateFake([], writes),
+        "pjTest",
+        { id: "sessC", sprImport: { status: "failed" } },
+    );
+    assert.deepStrictEqual(writes, [], "the hot path must stay write-free");
 });
