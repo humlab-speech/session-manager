@@ -1366,15 +1366,17 @@ class ApiServer {
         }
 
         if (msg.cmd == "cleanupOrphanedSessions") {
-            this.cleanupOrphanedSessions(msg.data.projectId, user).then((result) => {
-                ws.send(
-                    new WebSocketMessage(
-                        msg.requestId,
-                        msg.cmd,
-                        result,
-                    ).toJSON(),
-                );
-            });
+            this.cleanupOrphanedSessions(msg.data.projectId, user).then(
+                (result) => {
+                    ws.send(
+                        new WebSocketMessage(
+                            msg.requestId,
+                            msg.cmd,
+                            result,
+                        ).toJSON(),
+                    );
+                },
+            );
         }
 
         if (msg.cmd == "validateProjectName") {
@@ -2772,7 +2774,10 @@ class ApiServer {
                 await bundleListResult.save();
             }
         } catch (error) {
-            this.app.addLog("Bundle list lookup failed: " + error.message, "error");
+            this.app.addLog(
+                "Bundle list lookup failed: " + error.message,
+                "error",
+            );
             this.sendAdminCommandError(
                 ws,
                 msg,
@@ -2824,7 +2829,8 @@ class ApiServer {
             }
         } catch (error) {
             this.app.addLog(
-                "Could not save the bundle list: " + error.message, "error"
+                "Could not save the bundle list: " + error.message,
+                "error",
             );
             this.sendAdminCommandError(
                 ws,
@@ -4522,7 +4528,10 @@ class ApiServer {
     async fetchSprScripts(ws, msg) {
         const db = await this.connectToMongo("wsrng");
 
-        if (msg.data?.username != null && typeof msg.data.username !== "string") {
+        if (
+            msg.data?.username != null &&
+            typeof msg.data.username !== "string"
+        ) {
             // Raw-driver query: an object would be operators, not a username.
             ws.send(
                 JSON.stringify({
@@ -4599,8 +4608,8 @@ class ApiServer {
                     ? ApiServer.requireQueryString(session.projectId)
                     : typeof session?.projectId === "number" &&
                         Number.isFinite(session.projectId)
-                        ? session.projectId
-                        : null;
+                      ? session.projectId
+                      : null;
             if (!sessionId || projectId === null) {
                 // Refuse the whole request unwritten: a filter built from an
                 // object would be raw-driver operators.
@@ -4608,8 +4617,7 @@ class ApiServer {
                     JSON.stringify({
                         type: "cmd-result",
                         cmd: msg.cmd,
-                        result:
-                            "ERROR: every session needs a string sessionId and a string or number projectId",
+                        result: "ERROR: every session needs a string sessionId and a string or number projectId",
                         requestId: msg.requestId,
                     }),
                 );
@@ -4755,8 +4763,7 @@ class ApiServer {
                         JSON.stringify({
                             type: "cmd-result",
                             cmd: "saveSprScripts",
-                            result:
-                                "ERROR: every script needs a string scriptId",
+                            result: "ERROR: every script needs a string scriptId",
                             requestId: msg.requestId,
                         }),
                     );
@@ -4805,9 +4812,7 @@ class ApiServer {
             return;
         }
         this.connectToMongo("wsrng").then(async (db) => {
-            await db
-                .collection("scripts")
-                .deleteOne({ scriptId: scriptId });
+            await db.collection("scripts").deleteOne({ scriptId: scriptId });
             ws.send(
                 JSON.stringify({
                     type: "cmd-result",
@@ -6500,7 +6505,6 @@ session-manager_1    | }
 
         await this.saveSessionsMongo(projectFormData, uploadsBySession);
 
-
         ws.send(
             JSON.stringify({
                 requestId: msg.requestId,
@@ -6758,11 +6762,7 @@ session-manager_1    | }
             return false;
         }
         if (emuDbOk !== false) {
-            this.sendProjectSaveFailure(
-                ws,
-                msg,
-                "Project could not be saved",
-            );
+            this.sendProjectSaveFailure(ws, msg, "Project could not be saved");
         }
         return true;
     }
