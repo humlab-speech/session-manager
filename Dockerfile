@@ -1,94 +1,62 @@
 # Multi-stage build for session-manager
 # This builds the application in a container without requiring Node.js on the host
 
+# Every stage uses the same Node image, so the runtime always runs node_modules
+# with the Node that built them — in dev mode too, where the bind-mounted host
+# node_modules is installed through this image (see ./visp.py npm).
+ARG NODE_IMAGE=docker.io/library/node:24.22.2-trixie-slim
+
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM node:24.19.0-bookworm-slim AS dependencies
+FROM ${NODE_IMAGE} AS dependencies
 
 WORKDIR /app
 
 # Install git (needed for some npm packages that use git dependencies)
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies from package-lock.json
-RUN npm ci
+# Install the production dependencies from package-lock.json. Dev mode does not
+# use these: it bind-mounts the source tree, node_modules included (installed
+# with devDependencies through './visp.py npm session-manager -- ci'), over
+# /session-manager, and runs nodemon from there.
+# --ignore-scripts: the only lifecycle script is "prepare: husky" (a dev git-hook
+# installer); no production dependency has an install script.
+RUN npm ci --omit=dev --ignore-scripts
 
 # ============================================================================
-# Stage 2: Build (if there were a build step, but session-manager doesn't have one)
+# Stage 2: Runtime
 # ============================================================================
-FROM node:24.19.0-bookworm-slim AS builder
+FROM ${NODE_IMAGE}
 
-WORKDIR /app
-
-# Copy dependencies from previous stage
-COPY --from=dependencies /app/node_modules ./node_modules
-
-# Copy source code
-COPY . .
-
-# If there were a build step, it would go here
-# RUN npm run build
-
-# ============================================================================
-# Stage 3: Runtime
-# ============================================================================
-FROM debian:bookworm-20260505-slim
+# Runtime requirements, and nothing else:
+# - ffmpeg: converts uploads and transcription input (execFileSync "ffmpeg")
+# - git: simple-git commits project repositories
+# - tzdata: local time in logs
+# Containers are managed through the Podman API socket (node-docker-api), so no
+# docker/podman CLI is installed. 'upgrade' first: 'install' only fetches the
+# packages it names, so the rest of the base would stay as old as the tag.
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
+    apt-get install -y --no-install-recommends ffmpeg git tzdata ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set timezone
-RUN rm -f /etc/localtime && ln -s /usr/share/zoneinfo/Europe/Stockholm /etc/localtime
+RUN ln -sf /usr/share/zoneinfo/Europe/Stockholm /etc/localtime
 
-# Install runtime dependencies
-# Node.js, Docker CLI, ffmpeg, Python3, git (for simple-git package)
-RUN apt-get update && apt-get install -y \
-    curl \
-    ca-certificates \
-    gnupg \
-    && mkdir -p /etc/apt/keyrings
-
-# Install Node.js 24 (Active LTS; Node 20 reached end-of-life 2026-04-30).
-# Keep this major in sync with the build stages above — the runtime must match the
-# Node that built node_modules, and in dev mode the bind-mounted host node_modules
-# is installed through this image (see ./visp.py npm).
-RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-    gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
-    tee /etc/apt/sources.list.d/nodesource.list
-
-# Install all runtime requirements
-RUN apt-get update && apt-get install -y \
-    nodejs \
-    docker.io \
-    ffmpeg \
-    python3 \
-    python3-pip \
-    git \
-    zlib1g-dev \
-    nano \
-    r-cran-git2r \
-    libgit2-1.5 \
-    libgit2-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set git environment variables
-ENV GIT_SSL_NO_VERIFY=true
 ENV GIT_DISCOVERY_ACROSS_FILESYSTEM=true
-
-# Install whisper-script dependencies
-WORKDIR /whisper-script
-RUN git clone https://github.com/humlab-speech/whisper-script /whisper-script && \
-    pip3 install --break-system-packages -r requirements.txt
 
 # Set up application
 WORKDIR /session-manager
 
-# Copy application files from builder
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package*.json ./
-COPY --from=builder /app/src ./src
+# Copy application files
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY package*.json ./
+COPY src ./src
 
 # Create logs directory
 RUN mkdir -p logs
