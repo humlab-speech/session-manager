@@ -135,10 +135,7 @@ class WhisperService {
             host: "smtp.umu.se",
             port: 25,
             secure: false, // true for port 465, false for other ports
-            auth: {
-                //user: "",
-                //pass: "",
-            },
+            // No auth: the relay accepts unauthenticated mail from inside the network.
         });
 
         (async () => {
