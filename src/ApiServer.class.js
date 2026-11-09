@@ -46,6 +46,7 @@ const {
     readRegularTree,
     NonRegularFileError,
 } = require("./pathSecurity");
+const { trattLevelNameProblem, trattLevelState } = require("./trattLevel");
 
 // How young a .git/index.lock must be to be treated as somebody's running git
 // operation rather than debris from a dead one. A git add over a multi-gigabyte
@@ -1650,6 +1651,19 @@ class ApiServer {
             } catch (error) {
                 this.app.addLog(error, "error");
             }
+        }
+
+        if (msg.cmd == "createTrattLevel") {
+            // Async like saveProject: a rejection must be answered, not left
+            // to take the process down.
+            this.createTrattLevel(ws, user, msg).catch((error) => {
+                this.app.addLog(error, "error");
+                this.sendTrattLevelFailure(
+                    ws,
+                    msg,
+                    "The level could not be created",
+                );
+            });
         }
 
         if (msg.cmd == "saveBundleLists") {
@@ -9115,6 +9129,287 @@ session-manager_1    | }
 
     // Run createSessions.R (via container-agent) in a short-lived operations
     // container, importing the takes under uploadPath into projectSession.
+    sendTrattLevelFailure(ws, msg, message) {
+        ws.send(
+            JSON.stringify({
+                type: "cmd-result",
+                cmd: "createTrattLevel",
+                requestId: msg?.requestId,
+                progress: "end",
+                result: false,
+                message: message,
+            }),
+        );
+    }
+
+    /**
+     * Create an annotation level for TRATT to transcribe into: an unlinked
+     * SEGMENT level, added to the project's EMU-DB and its MongoDB document.
+     *
+     * TRATT's launch dialog offers this when the project has no level TRATT can
+     * use, so a member does not have to leave for the project dialog and save
+     * the whole project to get one. msg.data = { projectId, name }.
+     *
+     * Gated like editing the project (editProjectFiles, from the server's
+     * document): the project dialog can already add levels with that
+     * permission, so this grants nothing new. A refusal does not say whether
+     * the project exists, like saveProject.
+     */
+    async createTrattLevel(ws, user, msg) {
+        const projectId = msg?.data?.projectId;
+        const name = msg?.data?.name;
+        if (typeof projectId !== "string" || projectId === "") {
+            this.sendTrattLevelFailure(
+                ws,
+                msg,
+                "The level could not be created",
+            );
+            return;
+        }
+        const project = await this.fetchMongoProjectById(projectId);
+        if (
+            !project ||
+            !this.getProjectPermissions(project, user).editProjectFiles
+        ) {
+            this.app.addLog(
+                "User " +
+                    (user && user.username) +
+                    " tried to create a TRATT level in project " +
+                    projectId +
+                    " without editProjectFiles",
+                "warning",
+            );
+            this.sendTrattLevelFailure(ws, msg, "You cannot edit this project");
+            return;
+        }
+        const nameProblem = trattLevelNameProblem(
+            name,
+            project.annotationLevels,
+        );
+        if (nameProblem) {
+            this.sendTrattLevelFailure(ws, msg, nameProblem);
+            return;
+        }
+
+        // Two creations at once would race on the DBconfig, which R rewrites
+        // whole. Within one process a set is enough.
+        this.trattLevelCreations = this.trattLevelCreations ?? new Set();
+        if (this.trattLevelCreations.has(projectId)) {
+            this.sendTrattLevelFailure(
+                ws,
+                msg,
+                "A level is already being created in this project",
+            );
+            return;
+        }
+        this.trattLevelCreations.add(projectId);
+        let refusal;
+        try {
+            refusal = await this.addTrattLevelToProject(project, user, name);
+        } finally {
+            this.trattLevelCreations.delete(projectId);
+        }
+        if (refusal) {
+            this.sendTrattLevelFailure(ws, msg, refusal);
+            return;
+        }
+
+        const level = { name: name, type: "SEGMENT" };
+        ws.send(
+            JSON.stringify({
+                type: "cmd-result",
+                cmd: "createTrattLevel",
+                requestId: msg.requestId,
+                progress: "end",
+                result: true,
+                data: { level: level },
+            }),
+        );
+    }
+
+    /**
+     * The work of createTrattLevel once the request is allowed. Returns why
+     * the level cannot be created (for the user), or null once it exists in
+     * the EMU-DB and in MongoDB. Throws when something broke on the way.
+     */
+    async addTrattLevelToProject(project, user, name) {
+        safePathComponent(project.id, "projectId");
+        const dbConfigPath = safeJoinedPath(
+            "/repositories",
+            project.id,
+            "Data",
+            "VISP_emuDB",
+            "VISP_DBconfig.json",
+        );
+        const readDbConfig = () =>
+            JSON.parse(fs.readFileSync(dbConfigPath, "utf8"));
+
+        const dbConfig = readDbConfig();
+        const state = trattLevelState(dbConfig, name);
+        if (state !== "missing" && state !== "usable") {
+            return state;
+        }
+        if (state === "missing") {
+            // The canvases order lists every SEGMENT and EVENT level, so Artic
+            // shows the new one too. Taken from the DBconfig, not MongoDB: a
+            // level the EMU-DB lacks would fail the whole order.
+            const levels = (dbConfig.levelDefinitions ?? [])
+                .map((def) => ({ name: def.name, type: def.type }))
+                .concat([{ name: name, type: "SEGMENT" }]);
+            await this.runTrattLevelContainer(project, user, name, levels);
+            // container-agent answers 200 whatever R did, so the DBconfig is
+            // the only word on whether the level now exists.
+            const created = trattLevelState(readDbConfig(), name);
+            if (created !== "usable") {
+                throw new Error(
+                    "Level " +
+                        name +
+                        " was not created in project " +
+                        project.id +
+                        " (" +
+                        created +
+                        ")",
+                );
+            }
+        }
+
+        // A positional push that cannot duplicate the level, and that leaves
+        // everything else in the document as a concurrent save left it.
+        await this.mongoose.model("Project").updateOne(
+            { id: project.id, "annotationLevels.name": { $ne: name } },
+            {
+                $push: {
+                    annotationLevels: { name: name, type: "SEGMENT" },
+                },
+            },
+        );
+        await this.commitTrattLevel(project.id, user, name);
+        this.app.addLog(
+            "Created TRATT level " + name + " in project " + project.id,
+            "info",
+        );
+        return null;
+    }
+
+    async runTrattLevelContainer(project, user, name, levels) {
+        const volumes = [
+            {
+                source: safeMountSource(
+                    this.app.absRootPath,
+                    "mounts/repositories/" + project.id,
+                ),
+                target: "/home/jovyan/project",
+            },
+        ];
+        const envVars = ["PROJECT_PATH=/home/jovyan/project"];
+        const containerSession = this.app.sessMan.createSession(
+            user,
+            project,
+            "operations",
+            volumes,
+        );
+        await containerSession.createContainer();
+        try {
+            await this.runContainerAgentStep(
+                containerSession,
+                "emudb-create-annotlevel",
+                envVars.concat([
+                    "ANNOT_LEVEL_DEF_NAME=" + name,
+                    "ANNOT_LEVEL_DEF_TYPE=SEGMENT",
+                ]),
+            );
+            await this.runContainerAgentStep(
+                containerSession,
+                "emudb-setlevelcanvasesorder",
+                envVars.concat([
+                    "ANNOT_LEVELS=" +
+                        Buffer.from(JSON.stringify(levels)).toString("base64"),
+                ]),
+            );
+        } finally {
+            await this.app.sessMan.deleteSession(containerSession.accessCode);
+        }
+    }
+
+    /**
+     * Commit the new level as the user who made it. Only the DBconfig: the
+     * working tree may hold the user's own uncommitted work, which does not
+     * belong in this commit. Not fatal, like the save's commit - the level
+     * exists either way, and the next save commits it.
+     */
+    async commitTrattLevel(projectId, user, name) {
+        const repoDir = safeJoinedPath("/repositories", projectId);
+        const dbConfigFile = "Data/VISP_emuDB/VISP_DBconfig.json";
+        try {
+            const author = [user.firstName, user.lastName]
+                .filter(Boolean)
+                .join(" ");
+            // The identity as `git -c` for these commands only: neither
+            // written to the project's .git/config nor passed as GIT_*
+            // variables, which simple-git 4's environment guard refuses.
+            const git = simpleGit({
+                baseDir: repoDir,
+                config: [
+                    "user.name=" + (author || user.username),
+                    "user.email=" + (user.email || "system@visp.local"),
+                ],
+            });
+            await git.add(dbConfigFile);
+            await git.commit('Add annotation level "' + name + '" for TRATT', [
+                dbConfigFile,
+            ]);
+        } catch (error) {
+            this.app.addLog(
+                "Could not commit the new level in project " +
+                    projectId +
+                    ": " +
+                    error.toString(),
+                "warn",
+            );
+        }
+    }
+
+    /**
+     * Run one container-agent step in an operations container. runCommand()
+     * logs and swallows exec errors, resolving undefined, and container-agent
+     * reports its own failures as {code, body} JSON: both become exceptions.
+     */
+    async runContainerAgentStep(containerSession, step, envVars) {
+        const output = await containerSession.runCommand(
+            ["/usr/local/bin/node", "/container-agent/main.js", step],
+            envVars,
+        );
+        if (output === undefined) {
+            throw new Error(step + " could not be run");
+        }
+        let result = null;
+        try {
+            result = JSON.parse(output);
+        } catch (err) {
+            this.app.addLog(
+                step + " returned unparseable output; assuming success",
+                "warn",
+            );
+            return;
+        }
+        if (result && result.code >= 400) {
+            const body = result.body || {};
+            throw new Error(
+                step +
+                    " failed: " +
+                    // An ApiResponse body is a plain string ("Unknown command:
+                    // x"), other steps hand back {stderr, stdout}. Reading only
+                    // the object fields made every string body an empty reason:
+                    // the member saw "Import failed" with nothing to act on.
+                    String(
+                        body.stderr ||
+                            body.stdout ||
+                            (typeof body === "string" ? body : ""),
+                    ).slice(-500),
+            );
+        }
+    }
+
     async runSprImportContainer(project, projectSession, uploadPath) {
         const projectId = project.id;
         let volumes = [
@@ -9165,44 +9460,9 @@ session-manager_1    | }
         );
         await containerSession.createContainer();
 
-        // runCommand() logs and swallows exec errors, resolving undefined, and
-        // container-agent reports its own failures as {code, body} JSON. Turn
-        // both into exceptions so a failed step fails the import.
-        const runAgentStep = async (step) => {
-            const output = await containerSession.runCommand(
-                ["/usr/local/bin/node", "/container-agent/main.js", step],
-                envVars,
-            );
-            if (output === undefined) {
-                throw new Error(step + " could not be run");
-            }
-            let result = null;
-            try {
-                result = JSON.parse(output);
-            } catch (err) {
-                this.app.addLog(
-                    step + " returned unparseable output; assuming success",
-                    "warn",
-                );
-                return;
-            }
-            if (result && result.code >= 400) {
-                const body = result.body || {};
-                throw new Error(
-                    step +
-                        " failed: " +
-                        // An ApiResponse body is a plain string ("Unknown command:
-                        // x"), other steps hand back {stderr, stdout}. Reading only
-                        // the object fields made every string body an empty reason:
-                        // the member saw "Import failed" with nothing to act on.
-                        String(
-                            body.stderr ||
-                                body.stdout ||
-                                (typeof body === "string" ? body : ""),
-                        ).slice(-500),
-                );
-            }
-        };
+        // A failed step throws, so it fails the import.
+        const runAgentStep = (step) =>
+            this.runContainerAgentStep(containerSession, step, envVars);
 
         try {
             await runAgentStep("emudb-create-sessions");
