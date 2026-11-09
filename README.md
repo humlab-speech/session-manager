@@ -163,10 +163,15 @@ wsrng-server. SPR data lives in a separate `wsrng` MongoDB database:
 - **Audio conversion** — Non-WAV files are automatically converted to 16 kHz mono PCM WAV
   using ffmpeg during project save.
 
-### 7. Octra annotation tasks
+### 7. Annotation tools (Artic, TRATT)
 
-Session-manager can create and save Octra virtual annotation tasks, stored in MongoDB
-(`octravirtualtasks` collection) and linked to specific project sessions and bundles.
+Session-manager is not involved when a user annotates. Artic and TRATT both read the
+user's bundle list, the bundles and their audio from the VISP annotation server
+(`annotation-server`, the EMU-webApp websocket protocol), and save through it. What
+session-manager provides is the bundle list itself: the *Assign annotation tasks* dialog
+writes it (`bundlelists` collection). The old TRATT path through session-manager
+(`createOctraTask` / `saveOctraTask`, `octravirtualtasks` collection) was removed in
+VISP 1.2.0.
 
 ## WebSocket protocol
 
