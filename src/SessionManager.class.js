@@ -188,7 +188,19 @@ class SessionManager {
         return userSessions;
     }
 
-    createSession(user, project, hsApp = "jupyter", volumes = []) {
+    /**
+     * `ownerSocket` is the browser connection a session serves, if any: when
+     * that connection closes, its operations sessions are shut down. Leave it
+     * null for server-side work (imports, level creation) - such work cleans
+     * up after itself, and must not die because the user closed some tab.
+     */
+    createSession(
+        user,
+        project,
+        hsApp = "jupyter",
+        volumes = [],
+        ownerSocket = null,
+    ) {
         let sess = null;
         switch (hsApp) {
             case "jupyter":
@@ -216,6 +228,7 @@ class SessionManager {
         }
 
         if (sess != null) {
+            sess.ownerSocket = ownerSocket;
             this.sessions.push(sess);
         }
 
@@ -516,7 +529,10 @@ class SessionManager {
             return false;
         }
 
-        this.app.addLog("Route-to-app ws - request: " + this.requestPath(req), "debug");
+        this.app.addLog(
+            "Route-to-app ws - request: " + this.requestPath(req),
+            "debug",
+        );
 
         //socket.on('message', message => this.addLog("routeToAppWs - ws msg: "+message, "debug"));
 

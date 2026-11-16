@@ -958,16 +958,21 @@ class ApiServer {
             this.app.addLog("Closed with code:", event.code);
         }
 
-        //If this client has any active operations-sessions, kill them
-        if (client.userSession) {
-            this.app.sessMan
-                .getUserSessions(client.userSession.username)
-                .forEach((session) => {
-                    if (session.type == "operations") {
-                        this.shutdownSessionContainer(session.sessionCode);
-                    }
-                });
-        }
+        // Shut down the operations sessions THIS connection owns. Not every
+        // operations session of the user: they also belong to the user's
+        // other tabs (a project save in progress there) and to server-side
+        // work (recording imports, TRATT levels), and killing those mid-run
+        // failed the save with "The project could not be processed".
+        this.app.sessMan.sessions
+            .filter(
+                (session) =>
+                    session.hsApp == "operations" &&
+                    session.ownerSocket &&
+                    session.ownerSocket === client.socket,
+            )
+            .forEach((session) => {
+                this.shutdownSessionContainer(session.accessCode);
+            });
 
         if (this.deleteWsClient(client)) {
             //this.app.addLog("Deleted websocket client");
@@ -1940,6 +1945,7 @@ class ApiServer {
             msg.projectId,
             msg.appName,
             volumes,
+            ws,
         ).subscribe(
             (status) => {
                 if (status.type == "status-update") {
@@ -7463,11 +7469,14 @@ session-manager_1    | }
             .model("Project")
             .findOne({ id: projectFormData.id });
 
+        // Owned by the saving connection: if that tab goes away mid-save,
+        // its container is shut down rather than left behind.
         const session = this.app.sessMan.createSession(
             user,
             mongoProject,
             "operations",
             volumes,
+            ws,
         );
         await session.createContainer();
 
@@ -8791,7 +8800,7 @@ session-manager_1    | }
         projectId,
         hsApp = "operations",
         volumes = [],
-        options = [],
+        ownerSocket = null,
     ) {
         return new Rx.Observable((observer) => {
             let completed = false;
@@ -8846,6 +8855,7 @@ session-manager_1    | }
                         project,
                         hsApp,
                         volumes,
+                        ownerSocket,
                     );
                     observer.next({
                         type: "status-update",
