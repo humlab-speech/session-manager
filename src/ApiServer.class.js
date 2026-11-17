@@ -33,7 +33,6 @@ const {
     findUploadNameClashes,
 } = require("./sessionFiles");
 const AdmZip = require("adm-zip");
-const { parseFile } = require("music-metadata");
 const {
     QUALITY_CONTROL_METHOD_IDS,
     formatVispMetadataJson,
@@ -47,6 +46,7 @@ const {
     readRegularTree,
     NonRegularFileError,
 } = require("./pathSecurity");
+const { trattLevelNameProblem, trattLevelState } = require("./trattLevel");
 
 // How young a .git/index.lock must be to be treated as somebody's running git
 // operation rather than debris from a dead one. A git add over a multi-gigabyte
@@ -173,19 +173,6 @@ class ApiServer {
             "TranscriptionQueueItem",
             this.models.TranscriptionQueueItem,
         );
-
-        this.models.OctraVirtualTask = new mongoose.Schema({
-            id: String,
-            projectId: String,
-            sessionId: String,
-            bundleName: String,
-            createdBy: String,
-            createdAt: Date,
-            savedBy: String,
-            savedAt: Date,
-            closed: Boolean,
-        });
-        mongoose.model("OctraVirtualTask", this.models.OctraVirtualTask);
 
         this.models.ImportQueueItem = new mongoose.Schema({
             projectId: String,
@@ -971,16 +958,21 @@ class ApiServer {
             this.app.addLog("Closed with code:", event.code);
         }
 
-        //If this client has any active operations-sessions, kill them
-        if (client.userSession) {
-            this.app.sessMan
-                .getUserSessions(client.userSession.username)
-                .forEach((session) => {
-                    if (session.type == "operations") {
-                        this.shutdownSessionContainer(session.sessionCode);
-                    }
-                });
-        }
+        // Shut down the operations sessions THIS connection owns. Not every
+        // operations session of the user: they also belong to the user's
+        // other tabs (a project save in progress there) and to server-side
+        // work (recording imports, TRATT levels), and killing those mid-run
+        // failed the save with "The project could not be processed".
+        this.app.sessMan.sessions
+            .filter(
+                (session) =>
+                    session.hsApp == "operations" &&
+                    session.ownerSocket &&
+                    session.ownerSocket === client.socket,
+            )
+            .forEach((session) => {
+                this.shutdownSessionContainer(session.accessCode);
+            });
 
         if (this.deleteWsClient(client)) {
             //this.app.addLog("Deleted websocket client");
@@ -1264,16 +1256,6 @@ class ApiServer {
             return;
         } else {
             //this.app.addLog("User "+user.eppn+" authorized", "debug");
-        }
-
-        if (msg.cmd == "createOctraTask") {
-            this.createOctraTask(ws, user, msg);
-            return;
-        }
-
-        if (msg.cmd == "saveOctraTask") {
-            this.saveOctraTask(ws, user, msg);
-            return;
         }
 
         if (msg.cmd == "authorizeUser") {
@@ -1676,6 +1658,19 @@ class ApiServer {
             }
         }
 
+        if (msg.cmd == "createTrattLevel") {
+            // Async like saveProject: a rejection must be answered, not left
+            // to take the process down.
+            this.createTrattLevel(ws, user, msg).catch((error) => {
+                this.app.addLog(error, "error");
+                this.sendTrattLevelFailure(
+                    ws,
+                    msg,
+                    "The level could not be created",
+                );
+            });
+        }
+
         if (msg.cmd == "saveBundleLists") {
             try {
                 this.saveBundleLists(ws, user, msg);
@@ -1790,287 +1785,6 @@ class ApiServer {
             this.importEmuDbSessions(ws, msg.appSession);
         }
         */
-    }
-
-    async createOctraTask(ws, user, msg) {
-        //msg contains: projectId, sessionId, bundleName
-
-        //check if there exists an <bundlename>_annot.json file in the appropriate project/session/bundle directory
-        const Project = this.mongoose.model("Project");
-        let project = await Project.findOne({ id: msg.projectId });
-        if (!project) {
-            ws.send(
-                new WebSocketMessage(msg.requestId, msg.cmd, {
-                    result: 400,
-                    msg: "Project not found",
-                }).toJSON(),
-            );
-            return;
-        }
-
-        let session = project.sessions.find((s) => s.id == msg.sessionId);
-        if (!session) {
-            ws.send(
-                new WebSocketMessage(msg.requestId, msg.cmd, {
-                    result: 400,
-                    msg: "Session not found",
-                }).toJSON(),
-            );
-            return;
-        }
-
-        //bundlePathName should be the filename minus the file extension and + _bndl
-        let bundleBaseName = path.parse(msg.bundleName).name;
-        safePathComponent(msg.projectId, "projectId");
-        safePathComponent(bundleBaseName, "bundleName");
-        safePathComponent(session.name, "sessionName");
-        let bundlePathName = bundleBaseName + "_bndl";
-        let projectBundlePath = safeJoinedPath(
-            "/repositories",
-            msg.projectId,
-            "Data",
-            "VISP_emuDB",
-            session.name + "_ses",
-            bundlePathName,
-        );
-        let annotationFilePath =
-            projectBundlePath + "/" + bundleBaseName + "_annot.json";
-        let annotationFileExists = await fs.pathExists(annotationFilePath);
-
-        //we create a new virtual id to represent these variables and then we store this combination in a collection 'OctraVirtualTask'
-        const OctraVirtualTask = this.mongoose.model("OctraVirtualTask");
-        let newTask = new OctraVirtualTask({
-            id: nanoid.nanoid(64),
-            projectId: msg.projectId,
-            sessionId: msg.sessionId,
-            bundleName: msg.bundleName,
-            createdBy: user.username,
-            createdAt: new Date(),
-            annotationFile: annotationFileExists,
-            closed: false,
-        });
-
-        await newTask.save();
-
-        // If annotation file exists, update it to set the "annotates" field to <taskid>.wav and make sure the "name" field is correct and other things
-        if (annotationFileExists) {
-            try {
-                let annotationData = await fs.readJson(annotationFilePath);
-                annotationData.annotates = newTask.id + ".wav";
-                annotationData.name = bundleBaseName + "_annot.json";
-
-                //ensure levels array exists
-                if (!annotationData.levels) {
-                    annotationData.levels = [];
-                }
-
-                let wavFilePath =
-                    projectBundlePath + "/" + bundleBaseName + ".wav";
-                annotationData = await this.ensureValidAnnotationDataStruct(
-                    annotationData,
-                    wavFilePath,
-                );
-
-                await fs.writeJson(annotationFilePath, annotationData, {
-                    spaces: 2,
-                });
-                this.app.addLog(
-                    "Updated annotation file with task ID: " + newTask.id,
-                    "info",
-                );
-            } catch (err) {
-                this.app.addLog(
-                    "Error updating annotation file: " + err.toString(),
-                    "error",
-                );
-            }
-        }
-
-        ws.send(
-            new WebSocketMessage(msg.requestId, msg.cmd, {
-                result: 200,
-                taskId: newTask.id,
-                annotationFile: annotationFileExists,
-            }).toJSON(),
-        );
-    }
-
-    async ensureValidAnnotationDataStruct(annotationData, wavFilePath) {
-        //get the sampleDur metadata from the wav file (in samples: duration * sample_rate)
-
-        this.app.addLog("Reading wav file info from: " + wavFilePath, "debug");
-        let sampleDurSamples = 0;
-        try {
-            const metadata = await parseFile(wavFilePath);
-            const sampleRate = metadata.format.sampleRate;
-            const durSeconds = metadata.format.duration;
-            sampleDurSamples = Math.round(durSeconds * sampleRate);
-        } catch (err) {
-            this.app.addLog(
-                "Error reading wav file info, defaulting sampleDur to 0: " +
-                    err.toString(),
-                "warn",
-            );
-            sampleDurSamples = 0;
-        }
-
-        //ensure OCTRA_1 level exists
-        let octraLevel = annotationData.levels.find(
-            (level) => level.name === "OCTRA_1",
-        );
-        if (!octraLevel) {
-            this.app.addLog(
-                "OCTRA_1 level not found in annotation file, creating it.",
-                "info",
-            );
-            // Compute next unique item ID across all existing levels
-            let maxItemId = annotationData.levels.reduce((max, level) => {
-                return level.items
-                    ? level.items.reduce(
-                          (m, item) => Math.max(m, item.id || 0),
-                          max,
-                      )
-                    : max;
-            }, 0);
-            octraLevel = {
-                name: "OCTRA_1",
-                type: "SEGMENT",
-                items: [
-                    {
-                        id: maxItemId + 1,
-                        labels: [{ name: "OCTRA_1", value: "" }],
-                        sampleStart: 0,
-                        sampleDur: sampleDurSamples,
-                    },
-                ],
-            };
-            annotationData.levels.push(octraLevel);
-        }
-
-        //for all SEGMENT levels, ensure there is at least one item. If empty, add a default item with OCTRA_1 label and proper sampleDur
-        annotationData.levels.forEach((level) => {
-            if (level.type && level.type.toUpperCase() === "SEGMENT") {
-                if (!Array.isArray(level.items) || level.items.length === 0) {
-                    this.app.addLog(
-                        `Adding default item to SEGMENT level ${level.name}`,
-                        "debug",
-                    );
-                    // Compute next unique item ID across all levels (including those already processed)
-                    let maxItemId = annotationData.levels.reduce((max, lvl) => {
-                        return lvl.items
-                            ? lvl.items.reduce(
-                                  (m, item) => Math.max(m, item.id || 0),
-                                  max,
-                              )
-                            : max;
-                    }, 0);
-                    level.items = [
-                        {
-                            id: maxItemId + 1,
-                            labels: [{ name: "OCTRA_1", value: "" }],
-                            sampleStart: 0,
-                            sampleDur: sampleDurSamples,
-                        },
-                    ];
-                }
-            }
-        });
-
-        //go through all levels and ensure that none of them have an items array with an item containing the attribute "type"
-        annotationData.levels.forEach((level) => {
-            if (Array.isArray(level.items)) {
-                level.items.forEach((item) => {
-                    if (item.hasOwnProperty("type")) {
-                        delete item.type;
-                        this.app.addLog(
-                            `Removed deprecated "type" attribute from item in level ${level.name}`,
-                            "debug",
-                        );
-                    }
-                });
-            }
-        });
-
-        return annotationData;
-    }
-
-    async saveOctraTask(ws, user, msg) {
-        //msg will contain "octraTaskId" and "annotation", which is a json struct representing the annotation data
-        const OctraVirtualTask = this.mongoose.model("OctraVirtualTask");
-        let task = await OctraVirtualTask.findOne({ id: msg.octraTaskId });
-        if (task === null || task.createdBy !== user.username) {
-            ws.send(
-                new WebSocketMessage(msg.requestId, msg.cmd, {
-                    result: 400,
-                    msg: "Task not found or access denied",
-                }).toJSON(),
-            );
-            return;
-        }
-        task.savedAt = new Date();
-        task.savedBy = user.username;
-        task.closed = true;
-
-        await task.save();
-
-        //get session name from sessionId
-        const Project = this.mongoose.model("Project");
-        let project = await Project.findOne({ id: task.projectId });
-        if (!project) {
-            ws.send(
-                new WebSocketMessage(msg.requestId, msg.cmd, {
-                    result: 400,
-                    msg: "Project not found",
-                }).toJSON(),
-            );
-            return;
-        }
-
-        let session = project.sessions.find((s) => s.id == task.sessionId);
-        if (!session) {
-            ws.send(
-                new WebSocketMessage(msg.requestId, msg.cmd, {
-                    result: 400,
-                    msg: "Session not found",
-                }).toJSON(),
-            );
-            return;
-        }
-
-        //bundlePathName should be the filename minus the file extension and + _bndl
-        let bundleBaseName = path.parse(task.bundleName).name;
-        safePathComponent(task.projectId, "projectId");
-        safePathComponent(bundleBaseName, "bundleName");
-        safePathComponent(session.name, "sessionName");
-        let bundlePathName = bundleBaseName + "_bndl";
-
-        //now save the annotation data as a file to disk in the project bundle directory
-        let projectBundlePath = safeJoinedPath(
-            "/repositories",
-            task.projectId,
-            "Data",
-            "VISP_emuDB",
-            session.name + "_ses",
-            bundlePathName,
-        );
-        let annotationFilePath =
-            projectBundlePath + "/" + bundleBaseName + "_annot.json";
-
-        msg.annotation.name = bundleBaseName + "_annot.json";
-        msg.annotation.annotates = bundleBaseName + ".wav";
-
-        console.log("Saving annotation to " + annotationFilePath);
-        await fs.writeFile(
-            annotationFilePath,
-            JSON.stringify(msg.annotation, null, 2),
-        );
-
-        ws.send(
-            new WebSocketMessage(msg.requestId, msg.cmd, {
-                result: 200,
-                msg: "Task updated successfully",
-            }).toJSON(),
-        );
     }
 
     /**
@@ -2231,6 +1945,7 @@ class ApiServer {
             msg.projectId,
             msg.appName,
             volumes,
+            ws,
         ).subscribe(
             (status) => {
                 if (status.type == "status-update") {
@@ -7754,11 +7469,14 @@ session-manager_1    | }
             .model("Project")
             .findOne({ id: projectFormData.id });
 
+        // Owned by the saving connection: if that tab goes away mid-save,
+        // its container is shut down rather than left behind.
         const session = this.app.sessMan.createSession(
             user,
             mongoProject,
             "operations",
             volumes,
+            ws,
         );
         await session.createContainer();
 
@@ -9082,7 +8800,7 @@ session-manager_1    | }
         projectId,
         hsApp = "operations",
         volumes = [],
-        options = [],
+        ownerSocket = null,
     ) {
         return new Rx.Observable((observer) => {
             let completed = false;
@@ -9137,6 +8855,7 @@ session-manager_1    | }
                         project,
                         hsApp,
                         volumes,
+                        ownerSocket,
                     );
                     observer.next({
                         type: "status-update",
@@ -9420,6 +9139,287 @@ session-manager_1    | }
 
     // Run createSessions.R (via container-agent) in a short-lived operations
     // container, importing the takes under uploadPath into projectSession.
+    sendTrattLevelFailure(ws, msg, message) {
+        ws.send(
+            JSON.stringify({
+                type: "cmd-result",
+                cmd: "createTrattLevel",
+                requestId: msg?.requestId,
+                progress: "end",
+                result: false,
+                message: message,
+            }),
+        );
+    }
+
+    /**
+     * Create an annotation level for TRATT to transcribe into: an unlinked
+     * SEGMENT level, added to the project's EMU-DB and its MongoDB document.
+     *
+     * TRATT's launch dialog offers this when the project has no level TRATT can
+     * use, so a member does not have to leave for the project dialog and save
+     * the whole project to get one. msg.data = { projectId, name }.
+     *
+     * Gated like editing the project (editProjectFiles, from the server's
+     * document): the project dialog can already add levels with that
+     * permission, so this grants nothing new. A refusal does not say whether
+     * the project exists, like saveProject.
+     */
+    async createTrattLevel(ws, user, msg) {
+        const projectId = msg?.data?.projectId;
+        const name = msg?.data?.name;
+        if (typeof projectId !== "string" || projectId === "") {
+            this.sendTrattLevelFailure(
+                ws,
+                msg,
+                "The level could not be created",
+            );
+            return;
+        }
+        const project = await this.fetchMongoProjectById(projectId);
+        if (
+            !project ||
+            !this.getProjectPermissions(project, user).editProjectFiles
+        ) {
+            this.app.addLog(
+                "User " +
+                    (user && user.username) +
+                    " tried to create a TRATT level in project " +
+                    projectId +
+                    " without editProjectFiles",
+                "warning",
+            );
+            this.sendTrattLevelFailure(ws, msg, "You cannot edit this project");
+            return;
+        }
+        const nameProblem = trattLevelNameProblem(
+            name,
+            project.annotationLevels,
+        );
+        if (nameProblem) {
+            this.sendTrattLevelFailure(ws, msg, nameProblem);
+            return;
+        }
+
+        // Two creations at once would race on the DBconfig, which R rewrites
+        // whole. Within one process a set is enough.
+        this.trattLevelCreations = this.trattLevelCreations ?? new Set();
+        if (this.trattLevelCreations.has(projectId)) {
+            this.sendTrattLevelFailure(
+                ws,
+                msg,
+                "A level is already being created in this project",
+            );
+            return;
+        }
+        this.trattLevelCreations.add(projectId);
+        let refusal;
+        try {
+            refusal = await this.addTrattLevelToProject(project, user, name);
+        } finally {
+            this.trattLevelCreations.delete(projectId);
+        }
+        if (refusal) {
+            this.sendTrattLevelFailure(ws, msg, refusal);
+            return;
+        }
+
+        const level = { name: name, type: "SEGMENT" };
+        ws.send(
+            JSON.stringify({
+                type: "cmd-result",
+                cmd: "createTrattLevel",
+                requestId: msg.requestId,
+                progress: "end",
+                result: true,
+                data: { level: level },
+            }),
+        );
+    }
+
+    /**
+     * The work of createTrattLevel once the request is allowed. Returns why
+     * the level cannot be created (for the user), or null once it exists in
+     * the EMU-DB and in MongoDB. Throws when something broke on the way.
+     */
+    async addTrattLevelToProject(project, user, name) {
+        safePathComponent(project.id, "projectId");
+        const dbConfigPath = safeJoinedPath(
+            "/repositories",
+            project.id,
+            "Data",
+            "VISP_emuDB",
+            "VISP_DBconfig.json",
+        );
+        const readDbConfig = () =>
+            JSON.parse(fs.readFileSync(dbConfigPath, "utf8"));
+
+        const dbConfig = readDbConfig();
+        const state = trattLevelState(dbConfig, name);
+        if (state !== "missing" && state !== "usable") {
+            return state;
+        }
+        if (state === "missing") {
+            // The canvases order lists every SEGMENT and EVENT level, so Artic
+            // shows the new one too. Taken from the DBconfig, not MongoDB: a
+            // level the EMU-DB lacks would fail the whole order.
+            const levels = (dbConfig.levelDefinitions ?? [])
+                .map((def) => ({ name: def.name, type: def.type }))
+                .concat([{ name: name, type: "SEGMENT" }]);
+            await this.runTrattLevelContainer(project, user, name, levels);
+            // container-agent answers 200 whatever R did, so the DBconfig is
+            // the only word on whether the level now exists.
+            const created = trattLevelState(readDbConfig(), name);
+            if (created !== "usable") {
+                throw new Error(
+                    "Level " +
+                        name +
+                        " was not created in project " +
+                        project.id +
+                        " (" +
+                        created +
+                        ")",
+                );
+            }
+        }
+
+        // A positional push that cannot duplicate the level, and that leaves
+        // everything else in the document as a concurrent save left it.
+        await this.mongoose.model("Project").updateOne(
+            { id: project.id, "annotationLevels.name": { $ne: name } },
+            {
+                $push: {
+                    annotationLevels: { name: name, type: "SEGMENT" },
+                },
+            },
+        );
+        await this.commitTrattLevel(project.id, user, name);
+        this.app.addLog(
+            "Created TRATT level " + name + " in project " + project.id,
+            "info",
+        );
+        return null;
+    }
+
+    async runTrattLevelContainer(project, user, name, levels) {
+        const volumes = [
+            {
+                source: safeMountSource(
+                    this.app.absRootPath,
+                    "mounts/repositories/" + project.id,
+                ),
+                target: "/home/jovyan/project",
+            },
+        ];
+        const envVars = ["PROJECT_PATH=/home/jovyan/project"];
+        const containerSession = this.app.sessMan.createSession(
+            user,
+            project,
+            "operations",
+            volumes,
+        );
+        await containerSession.createContainer();
+        try {
+            await this.runContainerAgentStep(
+                containerSession,
+                "emudb-create-annotlevel",
+                envVars.concat([
+                    "ANNOT_LEVEL_DEF_NAME=" + name,
+                    "ANNOT_LEVEL_DEF_TYPE=SEGMENT",
+                ]),
+            );
+            await this.runContainerAgentStep(
+                containerSession,
+                "emudb-setlevelcanvasesorder",
+                envVars.concat([
+                    "ANNOT_LEVELS=" +
+                        Buffer.from(JSON.stringify(levels)).toString("base64"),
+                ]),
+            );
+        } finally {
+            await this.app.sessMan.deleteSession(containerSession.accessCode);
+        }
+    }
+
+    /**
+     * Commit the new level as the user who made it. Only the DBconfig: the
+     * working tree may hold the user's own uncommitted work, which does not
+     * belong in this commit. Not fatal, like the save's commit - the level
+     * exists either way, and the next save commits it.
+     */
+    async commitTrattLevel(projectId, user, name) {
+        const repoDir = safeJoinedPath("/repositories", projectId);
+        const dbConfigFile = "Data/VISP_emuDB/VISP_DBconfig.json";
+        try {
+            const author = [user.firstName, user.lastName]
+                .filter(Boolean)
+                .join(" ");
+            // The identity as `git -c` for these commands only: neither
+            // written to the project's .git/config nor passed as GIT_*
+            // variables, which simple-git 4's environment guard refuses.
+            const git = simpleGit({
+                baseDir: repoDir,
+                config: [
+                    "user.name=" + (author || user.username),
+                    "user.email=" + (user.email || "system@visp.local"),
+                ],
+            });
+            await git.add(dbConfigFile);
+            await git.commit('Add annotation level "' + name + '" for TRATT', [
+                dbConfigFile,
+            ]);
+        } catch (error) {
+            this.app.addLog(
+                "Could not commit the new level in project " +
+                    projectId +
+                    ": " +
+                    error.toString(),
+                "warn",
+            );
+        }
+    }
+
+    /**
+     * Run one container-agent step in an operations container. runCommand()
+     * logs and swallows exec errors, resolving undefined, and container-agent
+     * reports its own failures as {code, body} JSON: both become exceptions.
+     */
+    async runContainerAgentStep(containerSession, step, envVars) {
+        const output = await containerSession.runCommand(
+            ["/usr/local/bin/node", "/container-agent/main.js", step],
+            envVars,
+        );
+        if (output === undefined) {
+            throw new Error(step + " could not be run");
+        }
+        let result = null;
+        try {
+            result = JSON.parse(output);
+        } catch (err) {
+            this.app.addLog(
+                step + " returned unparseable output; assuming success",
+                "warn",
+            );
+            return;
+        }
+        if (result && result.code >= 400) {
+            const body = result.body || {};
+            throw new Error(
+                step +
+                    " failed: " +
+                    // An ApiResponse body is a plain string ("Unknown command:
+                    // x"), other steps hand back {stderr, stdout}. Reading only
+                    // the object fields made every string body an empty reason:
+                    // the member saw "Import failed" with nothing to act on.
+                    String(
+                        body.stderr ||
+                            body.stdout ||
+                            (typeof body === "string" ? body : ""),
+                    ).slice(-500),
+            );
+        }
+    }
+
     async runSprImportContainer(project, projectSession, uploadPath) {
         const projectId = project.id;
         let volumes = [
@@ -9470,44 +9470,9 @@ session-manager_1    | }
         );
         await containerSession.createContainer();
 
-        // runCommand() logs and swallows exec errors, resolving undefined, and
-        // container-agent reports its own failures as {code, body} JSON. Turn
-        // both into exceptions so a failed step fails the import.
-        const runAgentStep = async (step) => {
-            const output = await containerSession.runCommand(
-                ["/usr/local/bin/node", "/container-agent/main.js", step],
-                envVars,
-            );
-            if (output === undefined) {
-                throw new Error(step + " could not be run");
-            }
-            let result = null;
-            try {
-                result = JSON.parse(output);
-            } catch (err) {
-                this.app.addLog(
-                    step + " returned unparseable output; assuming success",
-                    "warn",
-                );
-                return;
-            }
-            if (result && result.code >= 400) {
-                const body = result.body || {};
-                throw new Error(
-                    step +
-                        " failed: " +
-                        // An ApiResponse body is a plain string ("Unknown command:
-                        // x"), other steps hand back {stderr, stdout}. Reading only
-                        // the object fields made every string body an empty reason:
-                        // the member saw "Import failed" with nothing to act on.
-                        String(
-                            body.stderr ||
-                                body.stdout ||
-                                (typeof body === "string" ? body : ""),
-                        ).slice(-500),
-                );
-            }
-        };
+        // A failed step throws, so it fails the import.
+        const runAgentStep = (step) =>
+            this.runContainerAgentStep(containerSession, step, envVars);
 
         try {
             await runAgentStep("emudb-create-sessions");
