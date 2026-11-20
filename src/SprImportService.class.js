@@ -188,10 +188,7 @@ class SprImportService {
         // window passes, so the session should say so right away. Without this
         // the dashboard stays silent through the whole queue window and the
         // "queued for import" lock is only visible while an import executes.
-        this.setImportState(projectId, sessionId, {
-            status: "pending",
-            updatedAt: new Date(),
-        }).catch((err) =>
+        this.markPending(projectId, sessionId).catch((err) =>
             this.app.addLog(
                 "Could not mark SPR import pending: " + err.message,
                 "warning",
@@ -367,6 +364,49 @@ class SprImportService {
                 });
                 break;
         }
+    }
+
+    // Stamp the session "pending" for requestCheck, unless its stored state
+    // already accounts for the uploads on disk:
+    // - "imported" with the same fingerprint: nothing will be imported.
+    // - "failed" with the same failedFingerprint: the retry back-off in
+    //   decideSprImportAction keys on status "failed", so overwriting it would
+    //   skip the back-off (and the stop after the last retry) and hide the
+    //   failure in the UI.
+    // The condition is part of the update, so an import finishing between a
+    // read and the write cannot be overwritten.
+    async markPending(projectId, sessionId) {
+        const uploads = this.listUploads(projectId, sessionId);
+        if (uploads.length === 0) {
+            return;
+        }
+        const fingerprint = fingerprintUploads(uploads);
+        await this.projectsCollection.updateOne(
+            {
+                id: projectId,
+                sessions: {
+                    $elemMatch: {
+                        id: sessionId,
+                        $nor: [
+                            {
+                                "sprImport.status": "imported",
+                                "sprImport.fingerprint": fingerprint,
+                            },
+                            {
+                                "sprImport.status": "failed",
+                                "sprImport.failedFingerprint": fingerprint,
+                            },
+                        ],
+                    },
+                },
+            },
+            {
+                $set: {
+                    "sessions.$.sprImport.status": "pending",
+                    "sessions.$.sprImport.updatedAt": new Date(),
+                },
+            },
+        );
     }
 
     // requestCheck stamps "pending" optimistically, before it can know whether

@@ -17,8 +17,8 @@ test("queueing a check marks the session pending right away", () => {
     const scheduled = [];
     const fake = {
         app: { addLog: () => {} },
-        setImportState: (projectId, sessionId, fields) => {
-            writes.push({ projectId, sessionId, fields });
+        markPending: (projectId, sessionId) => {
+            writes.push({ projectId, sessionId });
             return Promise.resolve();
         },
         scheduleCheck: (projectId, sessionId, at) =>
@@ -30,7 +30,6 @@ test("queueing a check marks the session pending right away", () => {
         1,
         "requestCheck must stamp the session state",
     );
-    assert.strictEqual(writes[0].fields.status, "pending");
     assert.strictEqual(writes[0].projectId, "pjTest");
     assert.strictEqual(writes[0].sessionId, "sessA");
     assert.strictEqual(scheduled.length, 1, "the check still gets scheduled");
@@ -42,7 +41,7 @@ test("a failed pending stamp does not break the queueing or escape as a rejectio
     process.on("unhandledRejection", onRejection);
     const fake = {
         app: { addLog: () => {} },
-        setImportState: () => Promise.reject(new Error("mongo down")),
+        markPending: () => Promise.reject(new Error("mongo down")),
         scheduleCheck: () => {},
     };
     SprImportService.prototype.requestCheck.call(fake, "pjTest", "sessA");
@@ -319,4 +318,120 @@ test("early outs do not write for sessions without a pending stamp", async () =>
         { id: "sessC", sprImport: { status: "failed" } },
     );
     assert.deepStrictEqual(writes, [], "the hot path must stay write-free");
+});
+
+// Applies markPending's update to an in-memory project the way MongoDB would
+// for this filter shape: the first session matching the $elemMatch gets the
+// $set through the positional operator. Returns the $set applied, or null.
+function markPendingOn(project, uploads) {
+    let applied = null;
+    const fake = {
+        listUploads: () => uploads,
+        projectsCollection: {
+            updateOne: async (filter, update) => {
+                assert.strictEqual(filter.id, project.id);
+                const em = filter.sessions.$elemMatch;
+                const get = (doc, dotted) =>
+                    dotted.split(".").reduce((v, k) => v?.[k], doc);
+                const matches = (s, cond) =>
+                    Object.entries(cond).every(([k, v]) => get(s, k) === v);
+                const target = project.sessions.find(
+                    (s) =>
+                        s.id === em.id &&
+                        !em.$nor.some((cond) => matches(s, cond)),
+                );
+                if (target) {
+                    applied = update.$set;
+                    target.sprImport = {
+                        ...target.sprImport,
+                        status: update.$set["sessions.$.sprImport.status"],
+                    };
+                }
+            },
+        },
+    };
+    return SprImportService.prototype.markPending
+        .call(fake, project.id, "sessA")
+        .then(() => applied);
+}
+
+test("markPending stamps a session whose uploads are new", async () => {
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const older = [{ name: "a.wav", size: 8, mtimeMs: 900 }];
+    for (const sprImport of [
+        undefined,
+        { status: "imported", fingerprint: fingerprintUploads(older) },
+        { status: "failed", failedFingerprint: fingerprintUploads(older) },
+        { status: null },
+    ]) {
+        const project = {
+            id: "pjTest",
+            sessions: [{ id: "sessA", sprImport }],
+        };
+        const applied = await markPendingOn(project, uploads);
+        assert.ok(applied, "expected a stamp for " + JSON.stringify(sprImport));
+        assert.strictEqual(project.sessions[0].sprImport.status, "pending");
+    }
+});
+
+test("markPending leaves a failed import of the same uploads alone", async () => {
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const failed = {
+        status: "failed",
+        failedFingerprint: fingerprintUploads(uploads),
+        nextRetryAt: Date.now() + 60_000,
+    };
+    const project = {
+        id: "pjTest",
+        sessions: [{ id: "sessA", sprImport: failed }],
+    };
+    assert.strictEqual(await markPendingOn(project, uploads), null);
+    assert.strictEqual(
+        decideSprImportAction({
+            uploads,
+            sprImport: {
+                ...failed,
+                status: project.sessions[0].sprImport.status,
+            },
+            filesInDb: [],
+            bundlesPresent: false,
+            hasQueuedItem: false,
+            sealed: true,
+            now: Date.now(),
+        }).action,
+        "wait",
+        "the retry back-off must still apply after a hint",
+    );
+});
+
+test("markPending leaves an import of the same uploads alone", async () => {
+    const uploads = [{ name: "a.wav", size: 10, mtimeMs: 1000 }];
+    const project = {
+        id: "pjTest",
+        sessions: [
+            {
+                id: "sessA",
+                sprImport: {
+                    status: "imported",
+                    fingerprint: fingerprintUploads(uploads),
+                },
+            },
+        ],
+    };
+    assert.strictEqual(await markPendingOn(project, uploads), null);
+    assert.strictEqual(project.sessions[0].sprImport.status, "imported");
+});
+
+test("markPending writes nothing for a session with no uploads", async () => {
+    let called = false;
+    const fake = {
+        listUploads: () => [],
+        projectsCollection: {
+            updateOne: async () => {
+                called = true;
+            },
+        },
+    };
+    await SprImportService.prototype.markPending.call(fake, "pjTest", "sessA");
+    assert.strictEqual(called, false);
 });
